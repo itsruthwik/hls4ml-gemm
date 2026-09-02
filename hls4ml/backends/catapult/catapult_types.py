@@ -78,7 +78,7 @@ class CatapultStreamVariableConverter(StreamVariableConverter):
 
 
 class CatapultInplaceStreamVariableDefinition(VariableDefinition):
-    def definition_cpp(self):
+    def definition_cpp(self, name_suffix='', as_reference=False):
         return f'auto& {self.name} = {self.input_var.name}'
 
 

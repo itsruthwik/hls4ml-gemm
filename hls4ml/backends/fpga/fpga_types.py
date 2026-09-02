@@ -410,12 +410,13 @@ class StaticWeightVariableConverter:
     def __init__(self, type_converter):
         self.type_converter = type_converter
 
-    def convert(self, weight_var):
+    def convert(self, weight_var, transpose=False):
         if isinstance(weight_var, StaticWeightVariableDefinition):  # Already converted
             return weight_var
 
         weight_var.weight_class = weight_var.__class__.__name__
         weight_var.storage = 'register'
+        weight_var.transpose = transpose
         weight_var.type = self.type_converter.convert(weight_var.type)
         tensor_cls_fqn = weight_var.__class__.__module__ + '.' + weight_var.__class__.__qualname__
 

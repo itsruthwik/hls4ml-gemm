@@ -42,7 +42,8 @@ class TransformTypes(GlobalOptimizerPass):
             node.set_attr(out_name, new_var)
 
         for w_name, weight in node.weights.items():
-            new_weight = self.weight_var_converter.convert(weight)
+            transpose = node.model.config.get_layer_config_value(node, 'TransposeWeights', False)
+            new_weight = self.weight_var_converter.convert(weight, transpose=transpose)
             node.set_attr(w_name, new_weight)
 
         for t_name, type in node.types.items():

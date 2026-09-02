@@ -15,6 +15,10 @@ from hls4ml.model.layers import (
 conv_mult_config_template = """struct config{index}_mult : nnet::dense_config {{
     static const unsigned n_in = {n_in};
     static const unsigned n_out = {n_out};
+    static const unsigned gemm_m = {gemm_m};
+    static const unsigned gemm_k = {gemm_k};
+    static const unsigned gemm_n = {gemm_n};
+    static const unsigned gemm_ip_id = {index};
     static const unsigned reuse_factor = {reuse};
     static const unsigned strategy = nnet::{strategy};
     static const unsigned n_zeros = {nzeros};
@@ -25,6 +29,19 @@ conv_mult_config_template = """struct config{index}_mult : nnet::dense_config {{
     template<class x_T, class y_T>
     using product = nnet::product::{product_type}<x_T, y_T>;
 }};\n"""
+
+
+def _latency_inner_mult_reuse(node, mult_params):
+    """Pin the conv inner MAC reuse_factor to 1 on the latency path.
+
+    Catapult cannot nest the resource-shared (rolled) dense MAC pipeline inside the
+    already-pipelined per-pixel conv driver (CIN-319 / no nested-pipeline merge), so the inner
+    latency MAC stays fully spatial; a conv layer expresses its reuse via the per-pixel loop II
+    (writer-emitted) instead. Resource-strategy convs keep their own reuse handling untouched.
+    """
+    if node.get_attr('strategy', 'latency') == 'latency':
+        mult_params['reuse'] = 1
+
 
 # Conv1D templates
 
@@ -41,6 +58,10 @@ conv1d_config_template = """struct config{index} : nnet::conv1d_config {{
     static const unsigned out_width = {out_width};
     static const unsigned reuse_factor = {reuse};
     static const unsigned n_zeros = {nzeros};
+    static const unsigned gemm_m = {gemm_m};
+    static const unsigned gemm_k = {gemm_k};
+    static const unsigned gemm_n = {gemm_n};
+    static const unsigned gemm_ip_id = {index};
     static const unsigned multiplier_limit =
         DIV_ROUNDUP(kernel_size * n_chan * n_filt, reuse_factor) - n_zeros / reuse_factor;
     static const bool store_weights_in_bram = false;
@@ -56,6 +77,10 @@ conv1d_config_template = """struct config{index} : nnet::conv1d_config {{
     typedef {bias_t.name} bias_t;
     typedef {weight_t.name} weight_t;
     typedef {config_t} mult_config;
+    template<class x_T, class y_T>
+    using product = nnet::product::{product_type}<x_T, y_T>;
+    static const unsigned n_in = {gemm_k};
+    static const unsigned n_out = {gemm_n};
     template<unsigned K, unsigned S, unsigned W>
     using scale_index = nnet::{scale_index_type}<K, S, W>;
 }};
@@ -96,13 +121,23 @@ class Conv1DConfigTemplate(LayerConfigTemplate):
 
         params['min_width'] = node.get_attr('min_width', node.get_attr('in_width'))
         params['instructions'] = node.get_attr('instructions', '0')
+        params['gemm_m'] = node.get_attr('out_width')
+        params['gemm_k'] = node.get_attr('n_chan') * node.get_attr('filt_width')
+        params['gemm_n'] = node.get_attr('n_filt')
+        params['product_type'] = get_backend('catapult').product_type(
+            node.get_input_variable().type.precision, node.get_weights('weight').type.precision
+        )
 
         conv_config = self.template.format(**params)
 
         mult_params = self._default_config_params(node)
+        _latency_inner_mult_reuse(node, mult_params)
         mult_params['n_in'] = node.get_attr('n_chan') * node.get_attr('filt_width')
         mult_params['n_out'] = node.get_attr('n_filt')
         mult_params['nzeros'] = node.get_weights('weight').nzeros
+        mult_params['gemm_m'] = node.get_attr('out_width')
+        mult_params['gemm_k'] = node.get_attr('n_chan') * node.get_attr('filt_width')
+        mult_params['gemm_n'] = node.get_attr('n_filt')
         mult_params['product_type'] = get_backend('catapult').product_type(
             node.get_input_variable().type.precision, node.get_weights('weight').type.precision
         )
@@ -149,8 +184,14 @@ conv2d_config_template = """struct config{index} : nnet::conv2d_config {{
     static const unsigned stride_width = {stride_width};
     static const unsigned out_height = {out_height};
     static const unsigned out_width = {out_width};
+    static const unsigned dilation_height = {dilation_height};
+    static const unsigned dilation_width = {dilation_width};
     static const unsigned reuse_factor = {reuse};
     static const unsigned n_zeros = {nzeros};
+    static const unsigned gemm_m = {gemm_m};
+    static const unsigned gemm_k = {gemm_k};
+    static const unsigned gemm_n = {gemm_n};
+    static const unsigned gemm_ip_id = {index};
     static const unsigned multiplier_limit =
         DIV_ROUNDUP(kernel_size * n_chan * n_filt, reuse_factor) - n_zeros / reuse_factor;
     static const bool store_weights_in_bram = false;
@@ -167,6 +208,10 @@ conv2d_config_template = """struct config{index} : nnet::conv2d_config {{
     typedef {bias_t.name} bias_t;
     typedef {weight_t.name} weight_t;
     typedef {config_t} mult_config;
+    template<class x_T, class y_T>
+    using product = nnet::product::{product_type}<x_T, y_T>;
+    static const unsigned n_in = {gemm_k};
+    static const unsigned n_out = {gemm_n};
     template<unsigned K, unsigned S, unsigned W>
     using scale_index_height = nnet::{scale_index_height_type}<K, S, W>;
     template<unsigned K, unsigned S, unsigned W>
@@ -193,7 +238,8 @@ class Conv2DConfigTemplate(LayerConfigTemplate):
 
     def format(self, node):
         params = self._default_config_params(node)
-        params['dilation'] = node.get_attr('dilation', 1)
+        params['dilation_height'] = node.get_attr('dilation_height', 1)
+        params['dilation_width'] = node.get_attr('dilation_width', 1)
         params['nzeros'] = node.get_weights('weight').nzeros
 
         params['config_t'] = f'config{node.index}_mult'
@@ -216,13 +262,23 @@ class Conv2DConfigTemplate(LayerConfigTemplate):
         params['min_height'] = node.get_attr('min_height', node.get_attr('in_height'))
         params['min_width'] = node.get_attr('min_width', node.get_attr('in_width'))
         params['instructions'] = node.get_attr('instructions', '0')
+        params['gemm_m'] = node.get_attr('out_height') * node.get_attr('out_width')
+        params['gemm_k'] = node.get_attr('n_chan') * node.get_attr('filt_height') * node.get_attr('filt_width')
+        params['gemm_n'] = node.get_attr('n_filt')
+        params['product_type'] = get_backend('catapult').product_type(
+            node.get_input_variable().type.precision, node.get_weights('weight').type.precision
+        )
 
         conv_config = self.template.format(**params)
 
         mult_params = self._default_config_params(node)
+        _latency_inner_mult_reuse(node, mult_params)
         mult_params['n_in'] = node.get_attr('n_chan') * node.get_attr('filt_height') * node.get_attr('filt_width')
         mult_params['n_out'] = node.get_attr('n_filt')
         mult_params['nzeros'] = node.get_weights('weight').nzeros
+        mult_params['gemm_m'] = node.get_attr('out_height') * node.get_attr('out_width')
+        mult_params['gemm_k'] = node.get_attr('n_chan') * node.get_attr('filt_height') * node.get_attr('filt_width')
+        mult_params['gemm_n'] = node.get_attr('n_filt')
         mult_params['product_type'] = get_backend('catapult').product_type(
             node.get_input_variable().type.precision, node.get_weights('weight').type.precision
         )
@@ -310,6 +366,7 @@ class SeparableConv1DConfigTemplate(LayerConfigTemplate):
 
         # Depthwise mult config
         mult_params = self._default_config_params(node)
+        _latency_inner_mult_reuse(node, mult_params)
         mult_params['index'] = str(node.index) + '_depthwise'
         mult_params['n_in'] = node.get_attr('n_chan') * node.get_attr('filt_width')
         mult_params['n_out'] = node.get_attr('n_chan')
@@ -347,6 +404,7 @@ class SeparableConv1DConfigTemplate(LayerConfigTemplate):
 
         # Pointwise mult config
         mult_params = self._default_config_params(node)
+        _latency_inner_mult_reuse(node, mult_params)
         mult_params['index'] = str(node.index) + '_pointwise'
         mult_params['n_in'] = node.get_attr('n_chan')
         mult_params['n_out'] = node.get_attr('n_filt')
@@ -431,6 +489,7 @@ class SeparableConv2DConfigTemplate(LayerConfigTemplate):
 
         # Depthwise mult config
         mult_params = self._default_config_params(node)
+        _latency_inner_mult_reuse(node, mult_params)
         mult_params['index'] = str(node.index) + '_depthwise'
         mult_params['n_in'] = node.get_attr('n_chan') * node.get_attr('filt_height') * node.get_attr('filt_width')
         mult_params['n_out'] = node.get_attr('n_chan')
@@ -475,6 +534,7 @@ class SeparableConv2DConfigTemplate(LayerConfigTemplate):
 
         # Pointwise mult config
         mult_params = self._default_config_params(node)
+        _latency_inner_mult_reuse(node, mult_params)
         mult_params['index'] = str(node.index) + '_pointwise'
         mult_params['n_in'] = node.get_attr('n_chan')
         mult_params['n_out'] = node.get_attr('n_filt')

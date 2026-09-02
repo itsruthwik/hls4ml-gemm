@@ -2,20 +2,101 @@ import glob
 import os
 import stat
 import tarfile
+import json
 from collections import OrderedDict
+from copy import copy
 from pathlib import Path
 from shutil import copyfile, copytree, rmtree
 
 import numpy as np
+
+from hls4ml.writer.gemm_ip_weights import write_gemm_ip_weight_cols
 import yaml
 
 from hls4ml.backends import get_backend
+from hls4ml.backends.fpga.passes.gemm_nodes import Gemm, Im2ColGemm
+from hls4ml.model.layers import EinsumDense, Einsum
 from hls4ml.writer.writers import Writer
 
 config_filename = 'hls4ml_config.yml'
 
 
 class CatapultWriter(Writer):
+    @staticmethod
+    def _uses_gemm_ip(model):
+        return any(bool(node.get_attr('strategy') == 'gemm') for node in model.graph.values())
+
+    @staticmethod
+    def _as_list(value):
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            return list(value)
+        return [value]
+
+    def _layer_input_variables(self, layer):
+        return [layer.get_input_variable(input_name) for input_name in layer.inputs]
+
+    def _layer_output_variables(self, layer):
+        return [layer.get_output_variable(output_name) for output_name in layer.outputs]
+
+    @staticmethod
+    def _resolve_inplace_variable(var):
+        """Follow InplaceTensorVariable links to the variable that actually owns storage."""
+        from hls4ml.model.types import InplaceTensorVariable
+
+        while isinstance(var, InplaceTensorVariable):
+            var = var.input_var
+        return var
+
+    def _emit_catapult_stage_wrapper(self, layer):
+        func_list = self._as_list(layer.get_attr('function_cpp', None))
+        if len(func_list) != 1:
+            return ''
+
+        io_vars = self._layer_input_variables(layer) + self._layer_output_variables(layer)
+        if not io_vars:
+            return ''
+
+        params = []
+        pragmas = []
+        for var in io_vars:
+            resolved = self._resolve_inplace_variable(var)
+            if resolved is not var:
+                # An inplace alias defines as 'auto& alias = parent', which is not a
+                # valid parameter. Declare the parameter with the parent's type but
+                # keep the alias name so the wrapped function body still compiles;
+                # the call site passes the parent channel.
+                proxy = copy(resolved)
+                proxy.name = var.name
+                params.append(proxy.definition_cpp(as_reference=True))
+            else:
+                params.append(var.definition_cpp(as_reference=True))
+            if getattr(var, 'pragma', None):
+                pragmas.append('    ' + self._make_array_pragma(var, layer.model) + '\n')
+
+        wrapper = '#pragma hls_design block\n'
+        wrapper += f'void {layer.name}_stage(\n'
+        wrapper += ',\n'.join(f'    {param}' for param in params)
+        wrapper += '\n) {\n'
+        wrapper += ''.join(pragmas)
+        wrapper += f'    {func_list[0].split("//", 1)[0].rstrip()}\n'
+        wrapper += '}\n\n'
+        return wrapper
+
+    @staticmethod
+    def _is_gemm_ip_weight(layer, weights):
+        if not bool(layer.get_attr('strategy') == 'gemm'):
+            return False
+        try:
+            return weights.name == layer.get_weights('weight').name
+        except Exception:
+            return False
+
+    def print_gemm_ip_weight_beats_to_cpp(self, var, layer, odir):
+        """Write GEMM-IP packed weight columns (shared implementation)."""
+        write_gemm_ip_weight_cols(var, layer, odir)
+
     def print_array_to_cpp(self, var, odir, write_txt_file=True):
         """Write a weights array to C++ header files.
 
@@ -51,6 +132,11 @@ class CatapultWriter(Writer):
         # fill c++ array.
         # not including internal brackets for multidimensional case
         sep = ''
+        if getattr(var, 'transpose', False):
+            # If transpose is requested, we iterate in column-major order
+            # This is handled by the __iter__ method in WeightVariable
+            pass
+            
         for x in var:
             h_file.write(sep + x)
             if write_txt_file:
@@ -132,11 +218,7 @@ class CatapultWriter(Writer):
             factor = 0
 
         if mode == 'stream':
-            fifo = model.config.get_config_value('FIFO')
-            if fifo is not None:
-                return f'// #pragma hls_fifo_depth {depth} {factor}'
-            else:
-                return ''
+            return f'#pragma hls_fifo_depth {depth}'
         else:
             return ''
 
@@ -234,6 +316,13 @@ class CatapultWriter(Writer):
         model_inputs = model.get_input_variables()
         model_outputs = model.get_output_variables()
         model_brams = [var for var in model.get_weight_variables() if var.storage.lower() == 'bram']
+        io_type = model.config.get_config_value('IOType')
+        stream_channel_scope = model.config.get_writer_config().get('StreamChannelScope', 'local_static')
+        stream_function_style = model.config.get_writer_config().get('StreamFunctionStyle', None)
+        use_stream_stage_wrappers = io_type == 'io_stream' and stream_function_style != 'inline'
+        use_parallel_stage_wrappers = False
+        use_stage_wrappers = use_stream_stage_wrappers or use_parallel_stage_wrappers
+        use_global_stream_channels = io_type in ('io_serial', 'io_stream') and stream_channel_scope == 'global'
 
         indent = '    '
 
@@ -241,6 +330,24 @@ class CatapultWriter(Writer):
             # Add headers to weights and biases
             if 'myproject' in line:
                 newline = line.replace('myproject', model.config.get_project_name())
+            elif '// hls-fpga-machine-learning insert global-layer-declarations' in line:
+                newline = line
+                if use_global_stream_channels:
+                    declared_vars = set()
+                    for layer in model.get_layers():
+                        for var in layer.get_variables():
+                            if var in model_inputs or var in model_outputs:
+                                continue
+                            def_cpp = var.definition_cpp()
+                            if def_cpp is not None and def_cpp not in declared_vars:
+                                declared_vars.add(def_cpp)
+                                newline += def_cpp + ';\n'
+                    newline += '\n'
+            elif '// hls-fpga-machine-learning insert stage-wrapper-definitions' in line:
+                newline = line
+                if use_stage_wrappers:
+                    for layer in model.get_layers():
+                        newline += self._emit_catapult_stage_wrapper(layer)
             elif '// hls-fpga-machine-learning insert header' in line:
                 inputs_str = ', '.join([i.definition_cpp(as_reference=True) for i in model_inputs])
                 outputs_str = ', '.join([o.definition_cpp(as_reference=True) for o in model_outputs])
@@ -276,7 +383,6 @@ class CatapultWriter(Writer):
                 all_inputs = [i.name for i in model_inputs]
                 all_outputs = [o.name for o in model_outputs]
                 all_brams = [b.name for b in model_brams]
-                io_type = model.config.get_config_value('IOType')
 
                 if io_type == 'io_serial' or io_type == 'io_stream':
                     # Eventually this will be amba.ccs_axi4stream_in and amba.ccs_axi4stream_out
@@ -293,7 +399,6 @@ class CatapultWriter(Writer):
                 all_inputs = [i.name for i in model_inputs]
                 all_outputs = [o.name for o in model_outputs]
                 all_brams = [b.name for b in model_brams]
-                io_type = model.config.get_config_value('IOType')
 
                 if io_type == 'io_parallel':
                     for i in model_inputs:
@@ -318,7 +423,6 @@ class CatapultWriter(Writer):
                     newline += indent + '// #pragma HLS DATAFLOW \n'
 
             elif '// hls-fpga-machine-learning insert layers' in line:
-                io_type = model.config.get_config_value('IOType')
                 newline = line + '\n'
                 for layer in model.get_layers():
                     vars = layer.get_variables()
@@ -326,10 +430,15 @@ class CatapultWriter(Writer):
                         if var not in model_inputs and var not in model_outputs:
                             def_cpp = var.definition_cpp()
                             if def_cpp is not None:
+                                depth = 1
+                                if var.pragma and type(var.pragma) is tuple and var.pragma[0] == 'stream':
+                                    depth = var.pragma[1]
+                                
                                 if var.pragma:
                                     newline += '    ' + self._make_array_fifo_pragma(var, model) + '\n'
                                 if io_type == 'io_serial' or io_type == 'io_stream':
-                                    newline += '    static ' + def_cpp + '; \n'
+                                    if not use_global_stream_channels:
+                                        newline += f'    static {def_cpp};\n'
                                 else:
                                     newline += '    ' + def_cpp + '; \n'
                                 if var.pragma:
@@ -338,7 +447,12 @@ class CatapultWriter(Writer):
                     if func:
                         if not isinstance(func, (list, set)):
                             func = [func]
-                        if len(func) == 1:
+                        if use_stage_wrappers and len(func) == 1:
+                            call_vars = self._layer_input_variables(layer) + self._layer_output_variables(layer)
+                            # Inplace aliases own no storage; pass the parent channel.
+                            call_args = ', '.join(self._resolve_inplace_variable(var).name for var in call_vars)
+                            newline += f'    {layer.name}_stage({call_args}); // {layer.name}\n'
+                        elif len(func) == 1:
                             newline += '    ' + func[0] + ' // ' + layer.name + '\n'
                         else:
                             newline += '    // ' + layer.name + '\n'
@@ -454,6 +568,12 @@ class CatapultWriter(Writer):
                     for w in layer.get_weights():
                         if w.storage.lower() != 'bram':
                             newline += f'#include "weights/{w.name}.h"\n'
+                            # ROM header included for both paths: the legacy streamed-weight
+                            # call and the weight-stationary csim behavioral model both use it.
+                            # (In synth-with-package the weight-stationary call is weightless and
+                            # this static array is unused → dead-code-eliminated.)
+                            if self._is_gemm_ip_weight(layer, w):
+                                newline += f'#include "weights/{w.name}_gemm_cols.h"\n'
 
             elif '// hls-fpga-machine-learning insert layer-config' in line:
                 newline = line
@@ -477,6 +597,15 @@ class CatapultWriter(Writer):
         for layer in model.get_layers():
             for weights in layer.get_weights():
                 self.print_array_to_cpp(weights, model.config.get_output_dir())
+                if self._is_gemm_ip_weight(layer, weights):
+                    # ROM header: source of truth for the legacy streamed-weight path AND
+                    # the weight-stationary csim behavioral model (native, no gemm-ip-gen).
+                    self.print_gemm_ip_weight_beats_to_cpp(weights, layer, model.config.get_output_dir())
+                    if bool(layer.get_attr('weights_in_core', False)):
+                        # Weight-stationary also emits raw-bits .dat for the external
+                        # generator to bake into the synth weightless core.
+                        from hls4ml.writer.gemm_ip_weights import write_gemm_ip_weight_dat
+                        write_gemm_ip_weight_dat(weights, layer, model.config.get_output_dir())
 
     def __make_dat_file(self, original_path, project_path):
         """
@@ -734,7 +863,7 @@ class CatapultWriter(Writer):
         fout.close()
 
     def write_build_script(self, model):
-        """Write the TCL/Shell build scripts (build_prj.tcl, build_lib.sh)
+        """Write the TCL/Shell build scripts.
 
         Args:
             model (ModelGraph): the hls4ml model.
@@ -745,6 +874,37 @@ class CatapultWriter(Writer):
         # build_prj.tcl
         srcpath = (filedir / '../templates/catapult/build_prj.tcl').resolve()
         dstpath = Path(f'{model.config.get_output_dir()}/build_prj.tcl').resolve()
+        
+        gemm_ip_pkg = model.config.get_writer_config().get('GemmIpPackage')
+        if gemm_ip_pkg is None:
+            gemm_ip_pkg = model.config.get_config_value('GemmIpPackage')
+        if gemm_ip_pkg is None:
+            # Direct access fallback
+            try:
+                gemm_ip_pkg = model.config.config['HLSConfig']['Model'].get('GemmIpPackage')
+            except Exception:
+                pass
+        
+        compiler_flags = '-DRANDOM_FRAMES=$opt(ran_frame)'
+        
+        if self._uses_gemm_ip(model):
+            compiler_flags += ' -DBLACKBOX_FLOW'
+            compiler_flags += ' -DGEMM_IP_HEADER'
+            if gemm_ip_pkg:
+                gemm_ip_pkg_path = Path(gemm_ip_pkg).resolve()
+                compiler_flags += f' -I{gemm_ip_pkg_path}'
+            else:
+                # Fixed-location convention: gemm-ip-gen writes the package to
+                # <project>/gemm_pkg, referenced relocatably through the tcl's $sfd
+                # (the project dir). No GemmIpPackage path needs to be injected into
+                # the config, so no post-generation reconvert is required.
+                # $sfd is relative ('.') because Catapult runs `dofile ./build_prj.tcl`;
+                # the SCVerify csim/cosim compiles run from a nested solution dir, so a
+                # relative -I./gemm_pkg would not resolve there. Normalize to an
+                # absolute path (evaluated by tcl when the tcl is sourced) so the include
+                # holds from any compile CWD.
+                compiler_flags += ' -I[file normalize $sfd/gemm_pkg]'
+
         with open(srcpath) as src, open(dstpath, 'w') as dst:
             for line in src.readlines():
                 indent = line[: len(line) - len(line.lstrip())]
@@ -762,17 +922,153 @@ class CatapultWriter(Writer):
                         else:
                             line = indent + 'setup_xilinx_part {{{}}}\n'.format(model.config.get_config_value('Part'))
                 elif '#hls-fpga-machine-learning insert invoke_args' in line:
+                    # The writer copies InputData/OutputPredictions into tb_data/ under
+                    # canonical names, so the testbench args must reference those names —
+                    # not the raw config value (which may be an absolute source path and
+                    # would produce a malformed $sfd/tb_data/<abspath>, silently falling
+                    # back to random frames).
                     tb_in_file = model.config.get_config_value('InputData')
                     tb_out_file = model.config.get_config_value('OutputPredictions')
                     invoke_args = '$sfd/firmware/weights'
                     if tb_in_file is not None:
-                        invoke_args = invoke_args + f' $sfd/tb_data/{tb_in_file}'
+                        invoke_args = invoke_args + ' $sfd/tb_data/tb_input_features.dat'
                     if tb_out_file is not None:
-                        invoke_args = invoke_args + f' $sfd/tb_data/{tb_out_file}'
+                        invoke_args = invoke_args + ' $sfd/tb_data/tb_output_predictions.dat'
                     line = indent + f'flow package option set /SCVerify/INVOKE_ARGS "{invoke_args}"\n'
                 elif 'set hls_clock_period 5' in line:
                     line = indent + 'set hls_clock_period {}\n'.format(model.config.get_config_value('ClockPeriod'))
+                elif 'options set Input/CompilerFlags' in line:
+                    # Presence-driven const softmax LUTs: when the two-pass header has been
+                    # generated next to the streaming activations, compile the exp/invert
+                    # tables as ROM (-DHLS4ML_SOFTMAX_CONST_TABLES) instead of a runtime build
+                    # that Catapult otherwise schedules into the streamed core (inflating the
+                    # softmax block throughput). Absent -> plain runtime build (unchanged).
+                    line = (
+                        indent + f'set _hls4ml_cxxflags "{compiler_flags}"\n'
+                        + indent + 'if { [file exists $sfd/firmware/nnet_utils/softmax_const_tables.h] } {\n'
+                        + indent + '  append _hls4ml_cxxflags " -DHLS4ML_SOFTMAX_CONST_TABLES"\n'
+                        + indent + '  logfile message "hls4ml: softmax_const_tables.h present -> softmax LUTs as ROM\\n" info\n'
+                        + indent + '}\n'
+                        + indent + 'options set Input/CompilerFlags $_hls4ml_cxxflags\n'
+                    )
+                elif '#hls-fpga-machine-learning insert blackboxes' in line:
+                    if self._uses_gemm_ip(model):
+                        if gemm_ip_pkg:
+                            line = (
+                                indent
+                                + 'logfile message "GEMM IP package is provided through GEMM_IP_HEADER and ac_blackbox bindings." info\n'
+                            )
+                        else:
+                            # Fixed-location convention: require the package at
+                            # $sfd/gemm_pkg at build time (generated by gemm-ip-gen
+                            # after hls4ml writes the project), and fail clearly if
+                            # the flow was not run.
+                            line = (
+                                indent + 'if { ![file exists $sfd/gemm_pkg] } {\n'
+                                + indent + '  logfile message "GEMM IP is used but $sfd/gemm_pkg was not found. Run gemm-ip-gen before building. Synthesis will fail." error\n'
+                                + indent + '  exit 1\n'
+                                + indent + '}\n'
+                                + indent + 'logfile message "GEMM IP package resolved at $sfd/gemm_pkg through GEMM_IP_HEADER and ac_blackbox bindings." info\n'
+                            )
+                    else:
+                        line = ''
+                elif '#hls-fpga-machine-learning insert pipeline-directives' in line:
+                    # Emit one hls4ml_pipeline_stage_loops call per io_stream + latency layer so
+                    # Catapult pipelines each stage's streaming driver loop at II=reuse_factor
+                    # (Vitis parity; Catapult ignores the in-source pipeline pragma). Each layer is
+                    # a <name>_stage block; the proc enumerates and pipelines its non-unrolled loops.
+                    io_type = model.config.get_config_value('IOType')
+                    style = model.config.get_writer_config().get('StreamFunctionStyle', None)
+                    use_stage_wrappers = io_type == 'io_stream' and style != 'inline'
+                    emitted = ''
+                    top = model.config.get_project_name()
+                    if use_stage_wrappers:
+                        for layer in model.get_layers():
+                            # Same gate as _emit_catapult_stage_wrapper: exactly one function_cpp.
+                            if len(self._as_list(layer.get_attr('function_cpp', None))) != 1:
+                                continue
+                            strategy = model.config.get_strategy(layer)
+                            if strategy is None or strategy.lower() != 'latency':
+                                continue
+                            try:
+                                ii = int(model.config.get_reuse_factor(layer))
+                            except Exception:
+                                ii = 1
+                            emitted += indent + f'hls4ml_pipeline_stage_loops {top} {{{layer.name}}} {ii}\n'
+                    if self._uses_gemm_ip(model):
+                        # Catapult ignores the in-source pipeline pragma the generated GEMM-IP
+                        # wrapper carries; this proc sets PIPELINE_INIT_INTERVAL=1 on its feed/drain
+                        # loops (matched by leaf name at any nesting depth).
+                        emitted += indent + f'hls4ml_pipeline_gemm_loops {top}\n'
+                    line = emitted  # '' is a safe no-op (io_parallel / all-resource designs)
                 dst.write(line)
+
+        # Optional bottom-up Tcl script
+        build_bup_tcl_src = (filedir / '../templates/catapult/build_prj_bup.tcl').resolve()
+        build_bup_tcl_dst = Path(f'{model.config.get_output_dir()}/build_prj_bup.tcl').resolve()
+        if build_bup_tcl_src.exists():
+            copyfile(build_bup_tcl_src, build_bup_tcl_dst)
+
+        # Optional bottom-up YAML flow description
+        build_bup_yml_src = (filedir / '../templates/catapult/build_prj_bup.yml').resolve()
+        build_bup_yml_dst = Path(f'{model.config.get_output_dir()}/build_prj_bup.yml').resolve()
+        if build_bup_yml_src.exists():
+            with open(build_bup_yml_src) as src, open(build_bup_yml_dst, 'w') as dst:
+                for line in src.readlines():
+                    indent = line[: len(line) - len(line.lstrip())]
+                    line = line.replace('myproject', model.config.get_project_name())
+                    line = line.replace('CATAPULT_DIR', model.config.get_project_dir())
+                    if '#hls-fpga-machine-learning insert build_options' in line:
+                        line = ''
+                        build_options = {
+                            'reset': 0,
+                            'csim': 0,
+                            'synth': 1,
+                            'cosim': 0,
+                            'validation': 0,
+                            'vhdl': 1,
+                            'verilog': 1,
+                            'export': 0,
+                            'vsynth': 0,
+                            'bitfile': 0,
+                            'fifo_opt': 0,
+                            'ran_frame': 2,
+                            'sw_opt': 0,
+                            'power': 0,
+                            'da': 0,
+                            'bup': 1,
+                        }
+                        for key, value in build_options.items():
+                            line += indent + f'{key}: {value}\n'
+                    elif '#hls-fpga-machine-learning insert techlibs' in line:
+                        if model.config.get_config_value('Technology') is None:
+                            if model.config.get_config_value('Part') is not None:
+                                line = indent + 'setup_xilinx_part {{{}}}\n'.format(model.config.get_config_value('Part'))
+                            elif model.config.get_config_value('ASICLibs') is not None:
+                                line = indent + 'setup_asic_libs {{{}}}\n'.format(
+                                    model.config.get_config_value('ASICLibs')
+                                )
+                        else:
+                            if model.config.get_config_value('Technology') == 'asic':
+                                line = indent + 'setup_asic_libs {{{}}}\n'.format(
+                                    model.config.get_config_value('ASICLibs')
+                                )
+                            else:
+                                line = indent + 'setup_xilinx_part {{{}}}\n'.format(model.config.get_config_value('Part'))
+                    elif '#hls-fpga-machine-learning insert invoke_args' in line:
+                        tb_in_file = model.config.get_config_value('InputData')
+                        tb_out_file = model.config.get_config_value('OutputPredictions')
+                        invoke_args = '$sfd/firmware/weights'
+                        if tb_in_file is not None:
+                            invoke_args = invoke_args + ' $sfd/tb_data/tb_input_features.dat'
+                        if tb_out_file is not None:
+                            invoke_args = invoke_args + ' $sfd/tb_data/tb_output_predictions.dat'
+                        line = indent + f'flow package option set /SCVerify/INVOKE_ARGS "{invoke_args}"\n'
+                    elif 'set hls_clock_period 5' in line:
+                        line = indent + 'set hls_clock_period {}\n'.format(model.config.get_config_value('ClockPeriod'))
+                    elif 'options set Input/CompilerFlags' in line:
+                        line = indent + f'options set Input/CompilerFlags "{compiler_flags}"\n'
+                    dst.write(line)
 
         # build_lib.sh
         build_lib_src = (filedir / '../templates/catapult/build_lib.sh').resolve()
@@ -784,6 +1080,26 @@ class CatapultWriter(Writer):
 
                 dst.write(line)
         build_lib_dst.chmod(build_lib_dst.stat().st_mode | stat.S_IEXEC)
+
+        # Optional VRA helper
+        build_vra_src = (filedir / '../templates/catapult/build_vra.sh').resolve()
+        build_vra_dst = Path(f'{model.config.get_output_dir()}/build_vra.sh').resolve()
+        if build_vra_src.exists():
+            with open(build_vra_src) as src, open(build_vra_dst, 'w') as dst:
+                for line in src.readlines():
+                    line = line.replace('myproject', model.config.get_project_name())
+                    line = line.replace('mystamp', model.config.get_config_value('Stamp'))
+                    if model.config.get_config_value('InputData') is not None:
+                        line = line.replace(
+                            'tb_input_features.dat', 'tb_data/' + os.path.basename(model.config.get_config_value('InputData'))
+                        )
+                    if model.config.get_config_value('OutputPredictions') is not None:
+                        line = line.replace(
+                            'tb_output_predictions.dat',
+                            'tb_data/' + os.path.basename(model.config.get_config_value('OutputPredictions')),
+                        )
+                    dst.write(line)
+            build_vra_dst.chmod(build_vra_dst.stat().st_mode | stat.S_IEXEC)
 
     def write_nnet_utils(self, model):
         """Copy the nnet_utils, AP types headers and any custom source to the project output directory
@@ -810,6 +1126,14 @@ class CatapultWriter(Writer):
 
         for h in headers:
             copyfile(srcpath + h, dstpath + h)
+
+        # Copy behavioral subdirectory
+        beh_srcpath = os.path.join(srcpath, 'behavioral/')
+        beh_dstpath = os.path.join(dstpath, 'behavioral/')
+        if os.path.exists(beh_srcpath):
+            if os.path.exists(beh_dstpath):
+                rmtree(beh_dstpath)
+            copytree(beh_srcpath, beh_dstpath)
 
         print('Copying NNET files to local firmware directory')
 
@@ -913,3 +1237,170 @@ class CatapultWriter(Writer):
         self.write_generated_code(model)
         self.write_yml(model)
         self.write_tar(model)
+        self.write_gemm_config(model)
+
+    @staticmethod
+    def _gemm_ip_interface(node):
+        # Interface is DERIVED from IOType, never guessed: io_parallel -> array,
+        # io_stream -> stream, uniformly for the unified Gemm/Im2ColGemm nodes and
+        # the (Phase 1) Einsum/EinsumDense GEMM-IP layers. Because the same IOType
+        # drives the instantiated call in the template, the declared interface can
+        # never disagree with the core that is actually built.
+        io_type = node.model.config.get_config_value('IOType')
+        is_gemm_ip = isinstance(node, (Gemm, Im2ColGemm, Einsum, EinsumDense)) and bool(
+            node.get_attr('strategy') == 'gemm'
+        )
+        if is_gemm_ip and io_type == 'io_parallel':
+            return 'array'
+        return 'stream'
+
+    @staticmethod
+    def _gemm_ip_protocol(interface):
+        if interface == 'array':
+            return {
+                'kind': 'catapult_ccore_array',
+                'input_valid': 'scheduled_en_and_in_valid',
+                'output_hold': 'fifo_until_en',
+                'internal_run': 'self_timed_after_start',
+                'result_order': 'row_major',
+                'input_beat_order': 'row_major',
+                'weight_layout': 'column_major',
+            }
+        # Row/column streaming contract:
+        #   A stream: one K-wide row per cycle (row_major)
+        #   B stream: one K-high column per cycle from w_gemm_cols[N][K] (column_major)
+        #   C stream: one N-wide row per cycle (row_major)
+        return {
+            'kind': 'catapult_ac_channel_stream',
+            'result_order': 'row_major',
+            'input_beat_order': 'row_major',
+            'weight_layout': 'column_major',
+        }
+
+    @staticmethod
+    def _gemm_ip_blackbox(node):
+        return {
+            'entity': f'{node.name}_core',
+            'rtl': f'{node.name}/{node.name}_core.v',
+            'clock': 'clk',
+            'reset': 'rst',
+            'reset_active': 'high',
+            'start': 'en',
+        }
+
+    def _gemm_ip_metadata(self, node):
+        interface = self._gemm_ip_interface(node)
+        return {
+            'layer_name': node.name,
+            'gemm_ip_id': node.name,
+            'gemm_ip_index': node.index,
+            'interface': interface,
+            'protocol': self._gemm_ip_protocol(interface),
+            'blackbox': self._gemm_ip_blackbox(node),
+            # The generator derives the blackbox combinational-delay budget
+            # from the project clock so the wrapper schedule and the core
+            # share one timing contract.
+            'clock_period_ns': node.model.config.get_config_value('ClockPeriod'),
+        }
+
+    def write_gemm_config(self, model):
+        """Write a JSON file containing details of GEMM templates used in the design."""
+        import json
+        gemm_info = {}
+        for node in model.graph.values():
+            use_gemm_ip = bool(node.get_attr('strategy') == 'gemm')
+            if use_gemm_ip:
+                if isinstance(node, Einsum):
+                    gemm_info[node.name] = {
+                        'type': node.class_name,
+                        'n_in': node.get_attr('n_in'),
+                        'n_out': node.get_attr('n_out'),
+                        'gemm_m': node.get_attr('gemm_m'),
+                        'gemm_k': node.get_attr('gemm_k'),
+                        'gemm_n': node.get_attr('gemm_n'),
+                        'n_inplace': node.get_attr('n_inplace'),
+                        'transpose_weights': True,
+                        # Einsum (QK^T / A.V) is two-operand with no bias; bias is never
+                        # in the IP here.
+                        'bias_in_core': False,
+                        'input_precision': str(node.get_input_variable(node.inputs[0]).type.precision),
+                        'rhs_precision': str(node.get_input_variable(node.inputs[1]).type.precision),
+                        'output_precision': str(node.get_output_variable().type.precision),
+                        'weight_precision': str(node.get_input_variable(node.inputs[1]).type.precision),
+                        'bias_precision': None,
+                        'accum_precision': str(node.types['accum_t'].precision) if 'accum_t' in node.types else None,
+                    }
+                    gemm_info[node.name].update(self._gemm_ip_metadata(node))
+                elif isinstance(node, EinsumDense):
+                    gemm_info[node.name] = {
+                        'type': node.class_name,
+                        'n_in': node.get_attr('n_in'),
+                        'n_out': node.get_attr('n_out'),
+                        'gemm_m': node.get_attr('gemm_m', node.get_attr('n_free_data')),
+                        'gemm_k': node.get_attr('gemm_k', node.get_attr('n_contract')),
+                        'gemm_n': node.get_attr('gemm_n', node.get_attr('n_free_kernel')),
+                        # EinsumDense-specific shape fields; useful for RTL tooling
+                        # that needs to know the original contraction dimensions
+                        # rather than the packed GEMM tile sizes.
+                        'n_free_data': node.get_attr('n_free_data'),
+                        'n_free_kernel': node.get_attr('n_free_kernel'),
+                        'n_contract': node.get_attr('n_contract'),
+                        'n_inplace': node.get_attr('n_inplace'),
+                        'transpose_weights': True,
+                        # The einsum_dense GEMM path feeds the IP a zero bias and adds
+                        # the (possibly per-element) bias in the wrapper, so the IP omits it.
+                        'bias_in_core': False,
+                        'input_precision': str(node.get_input_variable().type.precision),
+                        'output_precision': str(node.get_output_variable().type.precision),
+                        'weight_precision': str(node.get_weights('weight').type.precision),
+                        'bias_precision': str(node.get_weights('bias').type.precision) if node.get_weights('bias') else None,
+                        'accum_precision': str(node.types['accum_t'].precision) if 'accum_t' in node.types else None,
+                    }
+                    gemm_info[node.name].update(self._gemm_ip_metadata(node))
+                else:
+                    gemm_info[node.name] = {
+                        'type': node.class_name,
+                        'n_in': node.get_attr('n_in'),
+                        'n_out': node.get_attr('n_out'),
+                        'gemm_m': node.get_attr('gemm_m', node.get_attr('n_patches', 1)),
+                        'gemm_k': node.get_attr('gemm_k', node.get_attr('n_in')),
+                        'gemm_n': node.get_attr('gemm_n', node.get_attr('n_out')),
+                        'transpose_weights': bool(node.get_attr('strategy') == 'gemm')
+                        or node.model.config.get_layer_config_value(node, 'TransposeWeights', False),
+                        # Weight-stationary: the external GEMM IP holds the packed
+                        # weights internally and hls4ml calls the weightless signature.
+                        'weights_in_core': bool(node.get_attr('weights_in_core', False)),
+                        # Whether the IP itself should include the bias adder. True only
+                        # for the per-column weight-stationary case, where hls4ml feeds
+                        # the real bias to the IP's bias port. False when hls4ml feeds a
+                        # zero and adds bias in the generated wrapper instead: two-operand
+                        # GEMM (QK^T / A.V, no bias) and row-varying EinsumDense bias
+                        # (per-element add the per-column port can't express). gemm-ip-gen
+                        # honors this to omit the bias adder/port (a later gemm-ip-gen phase).
+                        'bias_in_core': bool(node.get_attr('weights_in_core', False))
+                        and not bool(node.get_attr('_row_varying_bias', False)),
+                        'input_precision': str(node.get_input_variable().type.precision),
+                        'output_precision': str(node.get_output_variable().type.precision),
+                        # Two-operand Gemm (attention QK^T / A.V) has no constant weight/bias.
+                        'weight_precision': str(node.get_weights('weight').type.precision)
+                        if node.get_attr('weight') is not None else None,
+                        'bias_precision': str(node.get_weights('bias').type.precision)
+                        if node.get_attr('bias') is not None else None,
+                        'accum_precision': str(node.types['accum_t'].precision) if 'accum_t' in node.types else None,
+                    }
+                    gemm_info[node.name].update(self._gemm_ip_metadata(node))
+                # Weight-stationary: point the external generator at the raw-bits .dat.
+                if bool(node.get_attr('weights_in_core', False)):
+                    try:
+                        wname = node.get_weights('weight').name
+                        # Path is relative to gemm_config.json (in output_dir); the .dat
+                        # lives under output_dir/firmware/weights/.
+                        gemm_info[node.name]['weight_file'] = f'firmware/weights/{wname}_gemm_cols.dat'
+                    except Exception:
+                        pass
+
+        if gemm_info:
+            output_dir = model.config.get_output_dir()
+            with open(f'{output_dir}/gemm_config.json', 'w') as f:
+                json.dump(gemm_info, f, indent=4)
+            print(f'Wrote GEMM configuration to {output_dir}/gemm_config.json')
