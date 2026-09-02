@@ -52,7 +52,12 @@ class QUnaryLUTHandler(QLayerHandler, KerasV3LayerHandler):
             config.update(self.default_config)
             table = layer.activation(all_inputs)
             if layer.enable_oq:
-                table = layer.oq(table[None, ...])[0]
+                # oq bitwidth rank follows the layer's data rank (e.g. rank-3 for a
+                # transformer gelu on (B, seq, feat)); reshape the 1-D table to that
+                # rank so the (homogeneous) quantizer broadcasts. Rank-2 -> table[None].
+                oq_ndim = len(layer.oq.quantizer.bits.shape)
+                t = ops.reshape(table, (1,) * (oq_ndim - 1) + (int(table.shape[-1]),))
+                table = ops.reshape(layer.oq(t), (-1,))
             table = ops.convert_to_numpy(table)
             if k:
                 # idx by binary repr, move the positive part to the front
