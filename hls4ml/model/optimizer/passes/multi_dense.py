@@ -12,7 +12,16 @@ class ReplaceMultidimensionalDenseWithConv(OptimizerPass):
     """
 
     def match(self, node):
-        return isinstance(node, Dense) and len(node.get_input_variable().shape) > 1
+        # Skip the Dense→Conv rewrite when the GEMM IP path is requested, so a
+        # multidimensional GEMM Dense stays a Dense (→ ReplaceDenseGemm) instead of
+        # being turned into a Conv. This runs before backend init sets the strategy
+        # attribute, so resolve Strategy: GEMM from the config directly.
+        # Imported lazily: hls4ml.backends pulls in template at load and would cycle
+        # with this model-side pass.
+        from hls4ml.backends.gemm_ip_config import is_gemm_strategy
+
+        gemm = is_gemm_strategy(node)
+        return isinstance(node, Dense) and len(node.get_input_variable().shape) > 1 and not gemm
 
     def transform(self, model, node):
         dim = len(node.get_input_variable().shape) - 1
