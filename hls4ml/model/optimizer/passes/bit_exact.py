@@ -28,7 +28,6 @@ from hls4ml.model.layers import (
     GlobalPooling2D,
     Input,
     Layer,
-    LayerNormalization,
     Merge,
     ParametrizedActivation,
     Pooling1D,
@@ -1277,33 +1276,3 @@ def _(layer):
     return ((k[sl], i[sl], f[sl]),)
 
 
-@_produce_kif.register
-def _(layer: LayerNormalization):
-    # LayerNorm's exact output range is data-dependent (mean/var/rsqrt), and the
-    # generic hls4ml LN kernel is not bit-exact anyway. Produce a generous KIF so the
-    # downstream HGQ2 input quantizer clamps it to the real trained precision; this
-    # keeps the surrounding compute layers bit-exact while treating LN as a boundary.
-    shape = get_output_shape(layer)
-    k = np.ones(shape, dtype=np.int16)
-    i = f = np.full(shape, 126, dtype=np.int16)
-    return k, i, f
-
-
-@register_precision.register
-def _(node: LayerNormalization):
-    # The generic LN produce_kif is an unbounded stopgap (i=f=126), so the default
-    # accum_t derived from it is ap_fixed<253,...> and cannot be instantiated. Size
-    # accum_t instead from the *input* precision plus the reduction headroom the LN
-    # kernel actually needs. The widest intermediate is the running sum of `dim`
-    # squared mean-diffs (sum_cache2): diff ~ (i_in+1, f_in) -> diff^2 ~
-    # (2*(i_in+1), 2*f_in) -> summing `dim` of them adds ceil(log2(dim)) integer
-    # bits. This also covers sum_cache (Sigma of `dim` inputs) and mean/var.
-    default_register_precision(node)
-    _k, _i, _f = get_input_kifs(node)[0]
-    i_in, f_in = int(np.max(_i)), int(np.max(_f))
-    dim = int(get_input_shapes(node)[0][-1])
-    scale = ceil(log2(max(dim, 1)))
-    acc_i = 2 * (i_in + 1) + scale
-    acc_f = 2 * f_in
-    accum_t = to_hls4ml_fixed(1, acc_i, acc_f, f'{node.name}_accum_t')
-    node.attributes['accum_t'] = accum_t

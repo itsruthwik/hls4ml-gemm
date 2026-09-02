@@ -1265,8 +1265,6 @@ class LayerNormalization(Layer):
         Attribute('seq_len'),
         Attribute('axis', value_type=int, default=2),
         Attribute('epsilon_power_of_10', value_type=int, default=3),
-        Attribute('table_size', value_type=int, default=1024),
-        Attribute('rsqrt_addr_f', value_type=int, default=10),
         WeightAttribute('scale'),
         WeightAttribute('bias'),
         TypeAttribute('scale'),
@@ -1283,17 +1281,6 @@ class LayerNormalization(Layer):
 
         self.add_weights_variable(name='scale', var_name='s{index}', data=scale)
         self.add_weights_variable(name='bias', var_name='b{index}', data=bias)
-
-        # HGQ2's bit-exact rsqrt LUT (a QUnaryFunctionLUT), addressed by the
-        # quantized per-token variance. Registered as a table weight so it is
-        # emitted and loaded like the other coefficient tables.
-        rsqrt_table = self.get_attr('rsqrt_table_data')
-        if rsqrt_table is not None:
-            self.set_attr('table_size', int(len(rsqrt_table)))
-            self.add_weights_variable(
-                name='rsqrt_table', var_name='rsqrt{index}', data=rsqrt_table,
-                type_name='rsqrt_table_t', precision=self.get_attr('rsqrt_table_t'),
-            )
 
 
 class Merge(Layer):
