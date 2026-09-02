@@ -706,6 +706,33 @@ class Conv2DBatchnorm(Conv2D):
             self.weights['bias'].data = bias_q(folded_bias)
 
 
+class Im2Col(Layer):
+    """Im2Col layer to transform spatial input into a sequence of patches."""
+
+    _expected_attributes = [
+        Attribute('in_height'),
+        Attribute('in_width'),
+        Attribute('n_chan'),
+        Attribute('filt_height'),
+        Attribute('filt_width'),
+        Attribute('stride_height'),
+        Attribute('stride_width'),
+        Attribute('pad_top'),
+        Attribute('pad_bottom'),
+        Attribute('pad_left'),
+        Attribute('pad_right'),
+        Attribute('out_height'),
+        Attribute('out_width'),
+        Attribute('data_format', value_type=str),
+    ]
+
+    def initialize(self):
+        # Output shape is [N_PATCHES, PATCH_SIZE]
+        n_patches = self.attributes['out_height'] * self.attributes['out_width']
+        patch_size = self.attributes['filt_height'] * self.attributes['filt_width'] * self.attributes['n_chan']
+        self.add_output_variable([n_patches, patch_size])
+
+
 class SeparableConv2D(Layer):
     _expected_attributes = [
         Attribute('in_height'),
@@ -2020,6 +2047,7 @@ layer_map = {
     'BinaryConv2D': Conv2D,
     'QConv2D': Conv2D,
     'QConv2DBatchnorm': Conv2DBatchnorm,
+    'Im2Col': Im2Col,
     'SeparableConv1D': SeparableConv1D,
     'QSeparableConv1D': SeparableConv1D,
     'DepthwiseConv1D': DepthwiseConv1D,
