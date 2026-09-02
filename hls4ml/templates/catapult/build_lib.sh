@@ -2,7 +2,7 @@
 set -e
 
 CC=g++
-CFLAGS="-O3 -fPIC -std=c++11"
+CFLAGS="-O3 -fPIC -std=c++17"
 
 # Include -fno-gnu-unique if it is there
 if echo "" | ${CC} -Werror -fsyntax-only -fno-gnu-unique -xc++ - -o /dev/null &> /dev/null; then
@@ -11,8 +11,8 @@ fi
 
 LDFLAGS=
 
-# Pick up AC libraries from Catapult install first
-INCFLAGS="-I$MGC_HOME/shared/include -I$MGC_HOME/shared/include/nnet_utils -Ifirmware/ac_types/include -Ifirmware/ac_math/include -Ifirmware/ac_simutils/include -Ifirmware/nnet_utils"
+# Local headers first
+INCFLAGS="-Ifirmware/ac_types/include -Ifirmware/ac_math/include -Ifirmware/ac_simutils/include -Ifirmware/nnet_utils -I$MGC_HOME/shared/include -I$MGC_HOME/shared/include/nnet_utils"
 PROJECT=myproject
 LIB_STAMP=mystamp
 

@@ -18,6 +18,8 @@ array set opt {
   power      0
   da         0
   bup        0
+  fifo_depth 1
+  fifo_depth_bypass 0
 }
 
 # Get pathname to this script to use as dereference path for relative file pathnames
@@ -35,6 +37,11 @@ if { [info exists ::argv] } {
     }
   }
 }
+
+# Reconvergent-bypass (*_cpy*) channels need a deeper FIFO than regular (*_out)
+# interconnect; fifo_depth_bypass sizes only the bypass class. A sentinel 0 means
+# "not set" -> fall back to fifo_depth so existing single-knob builds are unchanged.
+if { $opt(fifo_depth_bypass) == 0 } { set opt(fifo_depth_bypass) $opt(fifo_depth) }
 
 puts "***** INVOKE OPTIONS *****"
 foreach x [lsort [array names opt]] {
@@ -149,6 +156,8 @@ set design_top myproject
 solution file add $sfd/firmware/myproject.cpp
 solution file add $sfd/myproject_test.cpp -exclude true
 
+#hls-fpga-machine-learning insert blackboxes
+
 # Parse parameters.h to determine config info to control directives/pragmas
 set IOType io_stream
 if { ![file exists $sfd/firmware/parameters.h] } {
@@ -176,6 +185,68 @@ set hls_clock_period 5
 
 go analyze
 
+# Pipeline the streaming loops of one io_stream+latency layer stage at the given II. The in-source
+# #pragma hls_pipeline_init_interval is ignored by Catapult; only this directive is honored. Each
+# hls4ml layer L is emitted as block L_stage, so its loops live under /<top>/L_stage[:inst]/core/...
+# We enumerate the loops actually present and pipeline those NOT marked for unroll (the dense MAC
+# loops carry #pragma hls_unroll and must stay unrolled; the per-pixel/per-element STREAMING driver
+# loop has no unroll attr -> that is the one Vitis pipelines via #pragma HLS PIPELINE). A bare
+# cross-"/" glob errors with "Unknown path", so we ENUMERATE via `directive get` then set. No-op
+# safe for io_parallel / non-matching layers.
+proc hls4ml_pipeline_stage_loops { top stage ii } {
+  foreach base [list "/$top/${stage}_stage" "/$top/${stage}_stage:inst"] {
+    # shallow depths only: streaming drivers sit at core/<loop> or core/main/<loop>;
+    # the unrolled MAC loops are deeper inside the inlined dense and must not be matched.
+    foreach pat [list "$base/core/*/PIPELINE_INIT_INTERVAL" \
+                      "$base/core/*/*/PIPELINE_INIT_INTERVAL"] {
+      foreach p [directive get -match glob -checkpath 0 -ret p $pat] {
+        set loop [string range $p 0 end-[expr {[string length "/PIPELINE_INIT_INTERVAL"]}]]
+        # Pooling reduction loops are rolled-but-serial at reuse_factor>1 and must NOT be pipelined:
+        # Catapult cannot nest a pipeline inside the already-pipelined per-pixel driver, which carries
+        # II=reuse_factor instead. (FiltInner/PoolLoop also carry hls_unroll, so the UNROLL check below
+        # skips them; the rolled outer FiltLoop has no UNROLL attr, so it must be skipped by name here.)
+        # The dense ReuseLoop is intentionally NOT skipped -- it is the loop we want pipelined at II=rf.
+        set loop_name [lindex [split $loop "/"] end]
+        if { $loop_name eq "FiltLoop" || $loop_name eq "FiltReuse" || $loop_name eq "FiltInner" || $loop_name eq "PoolLoop" || $loop_name eq "PoolReuse" } {
+          continue
+        }
+        set unroll ""
+        catch { set unroll [directive get -checkpath 0 -ret v "$loop/UNROLL"] }
+        if { $unroll eq "" || [string tolower $unroll] eq "no" || $unroll == 0 } {
+          logfile message "hls4ml: directive set $p $ii\n" info
+          directive set $p $ii
+        }
+      }
+    }
+  }
+}
+
+# Pipeline the GEMM-IP wrapper feed/drain loops at II=1. Like the dense MAC above, Catapult ignores
+# the in-source #pragma hls_pipeline_init_interval the generated wrapper carries; only this directive
+# is honored. The wrapper is inlined from the GemmIpPackage header at a variable, often deep nesting
+# level (layer core -> einsum/dense compute -> gemm_ip wrapper -> RUN), so the fixed shallow globs
+# used by hls4ml_pipeline_stage_loops do not reach it. We instead match the wrapper loops by their
+# unique leaf names at any depth. A bare cross-"/" glob errors with "Unknown path", so we sweep a
+# range of fixed depths and filter by leaf name. No-op safe when no GEMM IP is present.
+proc hls4ml_pipeline_gemm_loops { top } {
+  # Full-K-spatial wrapper loops only (chunked-mode loops intentionally out of scope for now).
+  set gemm_loops [list RUN RUN_ARRAY DRAIN_PADDED_ROWS DRAIN_ARRAY_PADDED_ROWS READ_B_COLS]
+  foreach base [list "/$top" "/$top:inst"] {
+    set stars ""
+    for {set depth 1} {$depth <= 8} {incr depth} {
+      set stars "$stars/*"
+      foreach p [directive get -match glob -checkpath 0 -ret p "$base$stars/PIPELINE_INIT_INTERVAL"] {
+        set loop [string range $p 0 end-[expr {[string length "/PIPELINE_INIT_INTERVAL"]}]]
+        set loop_name [lindex [split $loop "/"] end]
+        if { [lsearch -exact $gemm_loops $loop_name] >= 0 } {
+          logfile message "hls4ml: directive set $p 1 (gemm)\n" info
+          directive set $p 1
+        }
+      }
+    }
+  }
+}
+
 # NORMAL TOP DOWN FLOW
 if { ! $opt(bup) } {
 
@@ -194,11 +265,38 @@ puts "***** SETTING TECHNOLOGY LIBRARIES *****"
 
 directive set -CLOCKS [list clk [list -CLOCK_PERIOD $hls_clock_period -CLOCK_EDGE rising -CLOCK_OFFSET 0.000000 -CLOCK_UNCERTAINTY 0.0 -RESET_KIND sync -RESET_SYNC_NAME rst -RESET_SYNC_ACTIVE high -RESET_ASYNC_NAME arst_n -RESET_ASYNC_ACTIVE low -ENABLE_NAME {} -ENABLE_ACTIVE high]]
 
+# Optimize for latency rather than the default area goal. Area goal drives rshare to
+# time-multiplex the fully-unrolled multiplier cone across many FSM states; latency goal
+# keeps the spatial unroll the per-loop hls_unroll pragmas intend.
+directive set -DESIGN_GOAL latency
+
+# Pipeline io_stream + latency streaming loops at II=reuse_factor (writer-emitted, one
+# hls4ml_pipeline_stage_loops call per qualifying layer; see proc above). We deliberately DO NOT
+# use a global `-UNROLL yes`: it silently disconnects an output lane (stuck constant, fails cosim)
+# and breaks timing. The MAC loops already carry per-loop `#pragma hls_unroll`.
+#hls-fpga-machine-learning insert pipeline-directives
+
 if {$opt(synth)} {
   puts "***** C/RTL SYNTHESIS *****"
   set time_start [clock clicks -milliseconds]
 
   go assembly
+  set design [solution get -name]
+  logfile message "Adjusting FIFO_DEPTH for top-level interconnect channels\n" warning
+  # FIFO interconnect between layers
+  foreach ch_fifo_m2m [directive get -match glob -checkpath 0 -ret p $design/*_out:cns/MAP_TO_MODULE] {
+    set ch_fifo [join [lrange [split $ch_fifo_m2m '/'] 0 end-1] /]/FIFO_DEPTH
+    logfile message "directive set -match glob $ch_fifo $opt(fifo_depth)\n" info
+    directive set -match glob "$ch_fifo" $opt(fifo_depth)
+  }
+  # Bypass/reconvergent paths (e.g. clone fan-out feeding a late einsum operand) need depth
+  # > 1 to avoid dataflow deadlock; honor the build-time fifo_depth (the in-source
+  # #pragma hls_fifo_depth the writer emits is ignored by Catapult; only this directive is).
+  foreach ch_fifo_m2m [directive get -match glob -checkpath 0 -ret p $design/*_cpy*:cns/MAP_TO_MODULE] {
+    set ch_fifo [join [lrange [split $ch_fifo_m2m '/'] 0 end-1] /]/FIFO_DEPTH
+    logfile message "directive set -match glob $ch_fifo $opt(fifo_depth_bypass) (bypass)\n" info
+    directive set -match glob "$ch_fifo" $opt(fifo_depth_bypass)
+  }
 
   go architect
 
@@ -280,15 +378,16 @@ if {$opt(synth)} {
   # FIFO interconnect between layers
   foreach ch_fifo_m2m [directive get -match glob -checkpath 0 -ret p $design/*_out:cns/MAP_TO_MODULE] {
     set ch_fifo [join [lrange [split $ch_fifo_m2m '/'] 0 end-1] /]/FIFO_DEPTH
-    logfile message "directive set -match glob $ch_fifo 1\n" info
-    directive set -match glob "$ch_fifo" 1
+    logfile message "directive set -match glob $ch_fifo $opt(fifo_depth)\n" info
+    directive set -match glob "$ch_fifo" $opt(fifo_depth)
   }
-  # For bypass paths - the depth will likely need to be larger than 1
+  # Bypass/reconvergent paths (e.g. clone fan-out feeding a late einsum operand) need depth
+  # > 1 to avoid dataflow deadlock; honor the build-time fifo_depth (the in-source
+  # #pragma hls_fifo_depth the writer emits is ignored by Catapult; only this directive is).
   foreach ch_fifo_m2m [directive get -match glob -checkpath 0 -ret p $design/*_cpy*:cns/MAP_TO_MODULE] {
     set ch_fifo [join [lrange [split $ch_fifo_m2m '/'] 0 end-1] /]/FIFO_DEPTH
-    logfile message "Bypass FIFO '$ch_fifo' depth set to 1 - larger value may be required to prevent deadlock\n" warning
-    logfile message "directive set -match glob $ch_fifo 1\n" info
-    directive set -match glob "$ch_fifo" 1
+    logfile message "directive set -match glob $ch_fifo $opt(fifo_depth_bypass) (bypass)\n" info
+    directive set -match glob "$ch_fifo" $opt(fifo_depth_bypass)
   }
   go architect
   go allocate

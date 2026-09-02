@@ -137,10 +137,11 @@ if {$opt(reset)} {
     open_project ${project_name}_prj
 }
 set_top ${project_name}
-add_files firmware/${project_name}.cpp -cflags "-std=c++0x"
+add_files firmware/${project_name}.cpp -cflags "-std=c++0x -I firmware"
 add_files -tb ${project_name}_test.cpp -cflags "-std=c++0x"
 add_files -tb firmware/weights
 add_files -tb tb_data
+#hls-fpga-machine-learning insert blackboxes
 if {$opt(reset)} {
     open_solution -reset "solution1"
 } else {

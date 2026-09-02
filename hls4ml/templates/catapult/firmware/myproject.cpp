@@ -5,6 +5,9 @@
 
 #include <mc_scverify.h>
 
+// hls-fpga-machine-learning insert global-layer-declarations
+// hls-fpga-machine-learning insert stage-wrapper-definitions
+
 #pragma hls_design top
 // hls-fpga-machine-learning insert IFSynPragmas
 void CCS_BLOCK(myproject)(
