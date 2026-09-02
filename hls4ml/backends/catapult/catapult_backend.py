@@ -339,7 +339,11 @@ class CatapultBackend(FPGABackend):
                     f'Layer "{layer.name}" requested Strategy: GEMM, but Catapult Conv GEMM does not support dilation > 1.'
                 )
         else:
-            if layer.get_attr('dilation_width', 1) != 1 or layer.get_attr('dilation_height', 1) != 1:
+            if (
+                layer.get_attr('dilation', 1) != 1
+                or layer.get_attr('dilation_width', 1) != 1
+                or layer.get_attr('dilation_height', 1) != 1
+            ):
                 raise ValueError(
                     f'Layer "{layer.name}" requested Strategy: GEMM, but Catapult Conv GEMM does not support dilation > 1.'
                 )
