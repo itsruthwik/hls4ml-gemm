@@ -10,10 +10,15 @@ from .reshaping_templates import transpose_config_template
 dense_config_template = """struct config{index}_dense : nnet::dense_config {{
     static const unsigned n_in = {n_in};
     static const unsigned n_out = {n_out};
+    static const unsigned gemm_m = {gemm_m};
+    static const unsigned gemm_k = {gemm_k};
+    static const unsigned gemm_n = {gemm_n};
+    static const unsigned gemm_ip_id = {index};
     static const unsigned reuse_factor = {reuse};
     static const unsigned strategy = nnet::{strategy};
     static const unsigned n_zeros = {nzeros};
     static const unsigned multiplier_limit = DIV_ROUNDUP(n_in * n_out, reuse_factor) - n_zeros / reuse_factor;
+    static const bool transpose_weights = true;
     typedef {accum_t.name} accum_t;
     typedef {bias_t.name} bias_t;
     typedef {weight_t.name} weight_t;
@@ -32,6 +37,7 @@ struct config{index} {{
 
     typedef {accum_t.name} accum_t;
     typedef {bias_t.name} bias_t;
+    typedef {weight_t.name} weight_t;
 
     {kernel_config};
 
@@ -40,17 +46,31 @@ struct config{index} {{
     static const unsigned n_free_kernel = {n_free_kernel};
     static const unsigned n_contract = {n_contract};
     static const unsigned n_inplace = {n_inplace};
+    static const unsigned n_in = {n_in};
+    static const unsigned n_out = {n_out};
+    static const unsigned gemm_m = {gemm_m};
+    static const unsigned gemm_k = {gemm_k};
+    static const unsigned gemm_n = {gemm_n};
+    static const unsigned gemm_ip_id = {index};
+    static const bool transpose_weights = true;
 
     // Resource reuse info
     static const unsigned io_type = nnet::{iotype};
     static const unsigned strategy = nnet::{strategy};
     static const unsigned reuse_factor = {reuse_factor};
     static const unsigned parallelization_factor = {parallelization_factor}; // Only useful when n_inplace > 1
+    static const unsigned n_zeros = {nzeros};
+    static const unsigned multiplier_limit = DIV_ROUNDUP(n_in * n_out, reuse_factor);
+
+    template<class x_T, class y_T>
+    using product = nnet::product::{product_type}<x_T, y_T>;
 }};
 """
 
 einsum_dense_function_template = 'nnet::einsum_dense<{input_t}, {output_t}, {config}>({input}, {output}, {w}, {b});'
 einsum_dense_da_function_template = 'nnet::einsum_dense<{input_t}, {output_t}, {config}>({input}, {output}, {b});'
+# GEMM-IP EinsumDense no longer emits from this template — it is lowered to a Gemm
+# node (see LowerEinsumToGemm) and materialized by the shared Gemm codegen.
 
 einsum_dense_include_list = ['nnet_utils/nnet_einsum_dense.h', 'nnet_utils/nnet_dense.h']
 
@@ -67,6 +87,9 @@ class EinsumDenseConfigTemplate(LayerConfigTemplate):
         dense_params['strategy'] = strategy
         dense_params['n_in'] = node.attributes['n_contract']
         dense_params['n_out'] = node.attributes['n_free_kernel']
+        dense_params['gemm_m'] = node.get_attr('gemm_m', node.attributes['n_free_data'])
+        dense_params['gemm_k'] = node.get_attr('gemm_k', node.attributes['n_contract'])
+        dense_params['gemm_n'] = node.get_attr('gemm_n', node.attributes['n_free_kernel'])
         if node.attributes['n_inplace'] == 1:
             dense_params['nzeros'] = node.get_weights('weight').nzeros  # type: ignore
         else:
@@ -75,7 +98,6 @@ class EinsumDenseConfigTemplate(LayerConfigTemplate):
             node.get_input_variable().type.precision,
             node.get_weights('weight').type.precision,  # type: ignore
         )
-
         dense_params['dense_function'] = 'DenseLatency'  # Latency only for now
 
         dense_config = self.dense_template.format(**dense_params)
@@ -96,6 +118,19 @@ class EinsumDenseConfigTemplate(LayerConfigTemplate):
         params['n_free_kernel'] = node.attributes['n_free_kernel']
         params['n_contract'] = node.attributes['n_contract']
         params['n_inplace'] = node.attributes['n_inplace']
+        params['n_in'] = node.get_attr('n_in', node.attributes['n_contract'])
+        params['n_out'] = node.get_attr('n_out', node.attributes['n_free_kernel'])
+        params['gemm_m'] = node.get_attr('gemm_m', node.attributes['n_free_data'])
+        params['gemm_k'] = node.get_attr('gemm_k', node.attributes['n_contract'])
+        params['gemm_n'] = node.get_attr('gemm_n', node.attributes['n_free_kernel'])
+        params['product_type'] = get_backend('vivado').product_type(
+            node.get_input_variable().type.precision,
+            node.get_weights('weight').type.precision,  # type: ignore
+        )
+        if node.attributes['n_inplace'] == 1:
+            params['nzeros'] = node.get_weights('weight').nzeros
+        else:
+            params['nzeros'] = '-1'
         if strategy.lower() == 'latency':
             params['kernel_config'] = f'typedef config{node.index}_dense dense_conf'
         else:
@@ -145,4 +180,16 @@ class EinsumDenseFunctionTemplate(FunctionCallTemplate):
             return einsum_dense_da_function_template.format(**params)
 
         params['w'] = node.get_weights('weight').name
+        params['weight_t'] = node.get_weights('weight').type
+        params['gemm_k'] = node.get_attr('gemm_k', node.attributes['n_contract'])
+        if node.get_attr('strategy') == 'gemm':
+            # A gemm_ip EinsumDense must be rewritten to a weightless Gemm node by
+            # LowerEinsumToGemm before templates run — the einsum template no longer
+            # emits GEMM (GEMM lives in the IR now). Reaching here means the lowering
+            # pass did not run; fail loudly rather than silently emit the old path.
+            raise Exception(
+                f"EinsumDense '{node.name}' still has Strategy: GEMM at codegen time. It should have "
+                "been lowered to a Gemm node by the 'lower_einsum_to_gemm' pass. This indicates the "
+                "pass is not registered/flow-wired in the backend."
+            )
         return einsum_dense_function_template.format(**params)

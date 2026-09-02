@@ -62,7 +62,7 @@ class VitisWriter(VivadoWriter):
         # build_prj.tcl
         srcpath = (filedir / '../templates/vitis/build_prj.tcl').resolve()
         dstpath = f'{model.config.get_output_dir()}/build_prj.tcl'
-        copyfile(srcpath, dstpath)
+        self._write_build_prj_tcl(model, srcpath, dstpath)
 
     def write_hls(self, model):
         """

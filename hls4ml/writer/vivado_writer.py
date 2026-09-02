@@ -2,19 +2,203 @@ import glob
 import os
 import stat
 import tarfile
+import json
 from collections import OrderedDict
 from pathlib import Path
 from shutil import copyfile, copytree, rmtree
 
 import numpy as np
+
+from hls4ml.writer.gemm_ip_weights import write_gemm_ip_weight_cols
 import yaml
 
+from hls4ml.backends.fpga.passes.gemm_nodes import Gemm, Im2ColGemm
+from hls4ml.model.layers import Einsum, EinsumDense
 from hls4ml.writer.writers import Writer
 
 config_filename = 'hls4ml_config.yml'
 
 
 class VivadoWriter(Writer):
+    @staticmethod
+    def _uses_gemm_ip(model):
+        """Return True if any layer in the model uses GEMM IP."""
+        return any(bool(node.get_attr('strategy') == 'gemm') for node in model.graph.values())
+
+    @staticmethod
+    def _gemm_ip_metadata(node):
+        interface = VivadoWriter._gemm_ip_interface(node)
+        return {
+            'layer_name': node.name,
+            'gemm_ip_id': node.name,
+            'gemm_ip_index': node.index,
+            'interface': interface,
+            'protocol': VivadoWriter._gemm_ip_protocol(interface),
+            'blackbox': VivadoWriter._gemm_ip_blackbox(node),
+            # The generator derives the blackbox combinational-delay budget
+            # from the project clock so the wrapper schedule and the core
+            # share one timing contract.
+            'clock_period_ns': node.model.config.get_config_value('ClockPeriod'),
+            'part': node.model.config.get_config_value('Part'),
+            'clock_uncertainty': node.model.config.get_config_value('ClockUncertainty'),
+            # Config resolved onto the node at GEMM lowering (resolve-then-store).
+            'strategy': node.get_attr('strategy', 'latency'),
+            'reuse_factor': node.get_attr('reuse_factor', 1),
+            'parallelization_factor': node.get_attr('parallelization_factor', 1),
+            'target_cycles': node.get_attr('target_cycles', None),
+            'sparse': bool(node.get_attr('sparse', False)),
+            'has_bias': bool(node.get_attr('has_bias', True)),
+            # Two-operand only: the actual B beat layout the emitted call uses. row_major =
+            # N-wide beats (one contraction row/beat, mvau IP); col_major = K-wide beats
+            # (one output column/beat, default). Weightless nodes are always False here.
+            'second_operand_row_major': bool(node.get_attr('second_operand_row_major', False)),
+            'second_operand_beat_order': (
+                'row_major' if node.get_attr('second_operand_row_major', False) else 'col_major'
+            ),
+        }
+
+    @staticmethod
+    def _gemm_ip_interface(node):
+        io_type = node.model.config.get_config_value('IOType')
+        if isinstance(node, (Gemm, Im2ColGemm, Einsum, EinsumDense)) and io_type == 'io_parallel' and bool(
+            node.get_attr('strategy') == 'gemm'
+        ):
+            return 'array'
+        return 'stream'
+
+    @staticmethod
+    def _gemm_ip_protocol(interface):
+        protocol = {
+            'result_order': 'row_major',
+            'input_beat_order': 'row_major',
+            'weight_layout': 'column_major',
+        }
+        if interface == 'array':
+            return {
+                'kind': 'xilinx_hls_array',
+                'input_valid': 'ap_vld',
+                'output_hold': 'ap_stable',
+                'internal_run': 'self_timed_after_start',
+                **protocol,
+            }
+        return {'kind': 'xilinx_hls_stream', **protocol}
+
+    @staticmethod
+    def _gemm_ip_blackbox(node):
+        return {
+            'entity': f'{node.name}_wrapper',
+            'rtl': f'{node.name}/{node.name}.v',
+            'clock': 'ap_clk',
+            'reset': 'ap_rst',
+            'reset_active': 'high',
+            'start': 'ap_start',
+            'done': 'ap_done',
+            'idle': 'ap_idle',
+            'ready': 'ap_ready',
+        }
+
+    def write_gemm_config(self, model):
+        """Write a JSON file containing details of GEMM IP templates used in the design."""
+        gemm_info = {}
+        for node in model.graph.values():
+            use_gemm_ip = bool(node.get_attr('strategy') == 'gemm')
+            if not use_gemm_ip:
+                continue
+
+            has_weights = 'weight' in node.weights
+            has_bias = 'bias' in node.weights
+            if isinstance(node, Einsum):
+                info = {
+                    'type': node.class_name,
+                    'n_in': node.get_attr('n_in'),
+                    'n_out': node.get_attr('n_out'),
+                    'gemm_m': node.get_attr('gemm_m'),
+                    'gemm_k': node.get_attr('gemm_k'),
+                    'gemm_n': node.get_attr('gemm_n'),
+                    'n_inplace': node.get_attr('n_inplace'),
+                    'transpose_weights': True,
+                    'input_precision': str(node.get_input_variable(node.inputs[0]).type.precision),
+                    'rhs_precision': str(node.get_input_variable(node.inputs[1]).type.precision),
+                    'output_precision': str(node.get_output_variable().type.precision),
+                    'weight_precision': str(node.get_input_variable(node.inputs[1]).type.precision),
+                    'bias_precision': None,
+                    'accum_precision': str(node.types['accum_t'].precision) if 'accum_t' in node.types else None,
+                }
+            elif isinstance(node, EinsumDense):
+                info = {
+                    'type': node.class_name,
+                    'n_in': node.get_attr('n_in'),
+                    'n_out': node.get_attr('n_out'),
+                    'gemm_m': node.get_attr('gemm_m', node.get_attr('n_free_data')),
+                    'gemm_k': node.get_attr('gemm_k', node.get_attr('n_contract')),
+                    'gemm_n': node.get_attr('gemm_n', node.get_attr('n_free_kernel')),
+                    'n_free_data': node.get_attr('n_free_data'),
+                    'n_free_kernel': node.get_attr('n_free_kernel'),
+                    'n_contract': node.get_attr('n_contract'),
+                    'n_inplace': node.get_attr('n_inplace'),
+                    'transpose_weights': True,
+                    'input_precision': str(node.get_input_variable().type.precision),
+                    'output_precision': str(node.get_output_variable().type.precision),
+                    'weight_precision': str(node.get_weights('weight').type.precision) if has_weights else None,
+                    'bias_precision': str(node.get_weights('bias').type.precision) if has_bias else None,
+                    'accum_precision': str(node.types['accum_t'].precision) if 'accum_t' in node.types else None,
+                }
+            else:
+                info = {
+                    'type': node.class_name,
+                    'n_in': node.get_attr('n_in'),
+                    'n_out': node.get_attr('n_out'),
+                    'gemm_m': node.get_attr('gemm_m', node.get_attr('n_patches', 1)),
+                    'gemm_k': node.get_attr('gemm_k', node.get_attr('n_in')),
+                    'gemm_n': node.get_attr('gemm_n', node.get_attr('n_out')),
+                    'transpose_weights': use_gemm_ip
+                    or node.model.config.get_layer_config_value(node, 'TransposeWeights', False),
+                    # Weight-stationary: the external GEMM IP holds the packed
+                    # weights internally and hls4ml calls the weightless signature.
+                    'weights_in_core': bool(node.get_attr('weights_in_core', False)),
+                    # Whether the IP itself should include the bias adder. True only
+                    # for the per-column weight-stationary case, where hls4ml feeds
+                    # the real bias to the IP's bias port. False when hls4ml feeds a
+                    # zero and adds bias in the generated wrapper instead: two-operand
+                    # GEMM (QK^T / A.V, no bias) and row-varying EinsumDense bias
+                    # (per-element add the per-column port can't express). gemm-ip-gen
+                    # honors this to omit the bias adder/port (a later gemm-ip-gen phase).
+                    'bias_in_core': bool(node.get_attr('weights_in_core', False))
+                    and not bool(node.get_attr('_row_varying_bias', False)),
+                    'input_precision': str(node.get_input_variable().type.precision),
+                    'output_precision': str(node.get_output_variable().type.precision),
+                    # Weight precision: the static weight tensor for a weight-stationary
+                    # GEMM; for a two-operand GEMM (QK^T / A.V, no static weight) the
+                    # "weight" is the second runtime operand B = inputs[1], so take its
+                    # precision -- the MVU weight port carries B, and gemm-ip-gen needs
+                    # its width/frac to size the core and the requant scale.
+                    'weight_precision': (
+                        str(node.get_weights('weight').type.precision) if has_weights
+                        else str(node.get_input_variable(node.inputs[1]).type.precision)
+                        if len(node.inputs) > 1 else None
+                    ),
+                    'bias_precision': str(node.get_weights('bias').type.precision) if has_bias else None,
+                    'accum_precision': str(node.types['accum_t'].precision) if 'accum_t' in node.types else None,
+                }
+            if use_gemm_ip:
+                info.update(self._gemm_ip_metadata(node))
+            # Weight-stationary: point the external generator at the raw-bits .dat.
+            if bool(node.get_attr('weights_in_core', False)):
+                try:
+                    wname = node.get_weights('weight').name
+                    # Path is relative to gemm_config.json (in output_dir); the .dat
+                    # lives under output_dir/firmware/weights/.
+                    info['weight_file'] = f'firmware/weights/{wname}_gemm_cols.dat'
+                except Exception:
+                    pass
+            gemm_info[node.name] = info
+
+        if gemm_info:
+            output_dir = model.config.get_output_dir()
+            with open(f'{output_dir}/gemm_config.json', 'w') as f:
+                json.dump(gemm_info, f, indent=4)
+            print(f'Wrote GEMM configuration to {output_dir}/gemm_config.json')
+
     def print_array_to_cpp(self, var, odir, namespace=None, write_txt_file=True):
         """Write a weights array to C++ header files.
 
@@ -53,6 +237,11 @@ class VivadoWriter(Writer):
         # fill c++ array.
         # not including internal brackets for multidimensional case
         sep = ''
+        if getattr(var, 'transpose', False):
+            # If transpose is requested, we iterate in column-major order
+            # This is handled by the __iter__ method in WeightVariable
+            pass
+
         for x in var:
             h_file.write(sep + x)
             if write_txt_file:
@@ -456,6 +645,8 @@ class VivadoWriter(Writer):
                     for w in layer.get_weights():
                         if w.storage.lower() != 'bram':
                             newline += f'#include "weights/{w.name}.h"\n'
+                            if self._is_gemm_ip_weight(layer, w):
+                                newline += f'#include "weights/{w.name}_gemm_cols.h"\n'
 
             elif '// hls-fpga-machine-learning insert layer-config' in line:
                 newline = line
@@ -485,6 +676,18 @@ class VivadoWriter(Writer):
         f.close()
         fout.close()
 
+    def _is_gemm_ip_weight(self, layer, weights):
+        if not bool(layer.get_attr('strategy') == 'gemm'):
+            return False
+        try:
+            return weights.name == layer.get_weights('weight').name
+        except Exception:
+            return False
+
+    def print_gemm_ip_weight_beats_to_cpp(self, var, layer, odir):
+        """Write GEMM-IP packed weight columns (shared implementation)."""
+        write_gemm_ip_weight_cols(var, layer, odir)
+
     def write_weights(self, model):
         """Write the weights into header files
 
@@ -498,6 +701,16 @@ class VivadoWriter(Writer):
                 self.print_array_to_cpp(
                     weights, model.config.get_output_dir(), namespace=namespace, write_txt_file=write_txt
                 )
+                if self._is_gemm_ip_weight(layer, weights):
+                    # ROM header: source of truth for the streamed-weight path AND
+                    # the weight-stationary csim behavioral model (native, no gemm-ip-gen).
+                    self.print_gemm_ip_weight_beats_to_cpp(weights, layer, model.config.get_output_dir())
+                    if bool(layer.get_attr('weights_in_core', False)):
+                        # Weight-stationary also emits raw-bits .dat for the external
+                        # generator to bake into the synth weightless core.
+                        from hls4ml.writer.gemm_ip_weights import write_gemm_ip_weight_dat
+
+                        write_gemm_ip_weight_dat(weights, layer, model.config.get_output_dir())
 
     def write_multigraph_weights(self, model):
         """Write the weights into header files
@@ -957,6 +1170,66 @@ class VivadoWriter(Writer):
         f.close()
         fout.close()
 
+    def _write_build_prj_tcl(self, model, srcpath, dstpath):
+        """Generate build_prj.tcl from a template with GEMM IP cflags/blackbox injection."""
+
+        gemm_ip_pkg = model.config.get_writer_config().get('GemmIpPackage')
+        if gemm_ip_pkg is None:
+            gemm_ip_pkg = model.config.get_config_value('GemmIpPackage')
+        if gemm_ip_pkg is None:
+            try:
+                gemm_ip_pkg = model.config.config['HLSConfig']['Model'].get('GemmIpPackage')
+            except Exception:
+                pass
+
+        uses_gemm_ip = self._uses_gemm_ip(model)
+        extra_cflags = ''
+        # The one tcl line hls4ml sources to bring the GEMM IP into the project. hls4ml
+        # stays target-blind: it only provides the include path + the source hook, and
+        # gemm-ip-gen's per-target gemm_ip_sources.tcl decides HOW the IP enters the
+        # build — `add_files -blackbox <wrapper.json>` for an RTL-blackbox target, or a
+        # header-only no-op for a behavioral-HLS (plain Vitis) target. Either way the
+        # firmware includes gemm_ip_combined.h from the include path below.
+        sources_tcl_line = ''
+
+        if uses_gemm_ip:
+            extra_cflags += ' -DBLACKBOX_FLOW -DGEMM_IP_HEADER'
+            if gemm_ip_pkg:
+                # Explicit package: absolute include path, and source the package's
+                # sources tcl directly from its (absolute) location.
+                gemm_ip_pkg_path = Path(gemm_ip_pkg).resolve()
+                extra_cflags += f' -I{gemm_ip_pkg_path}'
+                sources_tcl_line = 'source {' + str(gemm_ip_pkg_path / 'gemm_ip_sources.tcl') + '}'
+            else:
+                # No GemmIpPackage configured: fall back to the fixed-location convention
+                # (mirrors Catapult). gemm-ip-gen writes its package to <project>/gemm_pkg
+                # after hls4ml generates the project, so bake in an include path pointing
+                # there. It is referenced relocatably through the tcl's $tcldir (the build
+                # script's directory == the project dir) and normalized to an absolute path,
+                # so the include still resolves from the nested csim/cosim solution dir the
+                # HLS tool compiles from. This lets tool-driven csim find gemm_ip_combined.h
+                # without a per-config GemmIpPackage.
+                extra_cflags += ' -I[file normalize $tcldir/gemm_pkg]'
+                # Source the target's sources tcl from the same fixed location, relocatably
+                # through $tcldir so it resolves from the nested csim/cosim solution dir.
+                sources_tcl_line = 'source [file normalize $tcldir/gemm_pkg/gemm_ip_sources.tcl]'
+
+        with open(srcpath) as src, open(dstpath, 'w') as dst:
+            for line in src:
+                if 'add_files firmware/${project_name}.cpp -cflags "-std=c++0x' in line:
+                    if extra_cflags:
+                        line = line.replace(
+                            '-cflags "-std=c++0x',
+                            f'-cflags "-std=c++0x{extra_cflags}'
+                        )
+                    dst.write(line)
+                elif '#hls-fpga-machine-learning insert blackboxes' in line:
+                    dst.write(line)
+                    if sources_tcl_line:
+                        dst.write(sources_tcl_line + '\n')
+                else:
+                    dst.write(line)
+
     def write_build_script(self, model):
         """Write the TCL/Shell build scripts (project.tcl, build_prj.tcl, vivado_synth.tcl, build_lib.sh)
 
@@ -987,7 +1260,7 @@ class VivadoWriter(Writer):
         # build_prj.tcl
         srcpath = (filedir / '../templates/vivado/build_prj.tcl').resolve()
         dstpath = f'{model.config.get_output_dir()}/build_prj.tcl'
-        copyfile(srcpath, dstpath)
+        self._write_build_prj_tcl(model, srcpath, dstpath)
 
         # vivado_synth.tcl
         srcpath = (filedir / '../templates/vivado/vivado_synth.tcl').resolve()
@@ -1000,7 +1273,7 @@ class VivadoWriter(Writer):
         with open(build_lib_src) as src, open(build_lib_dst, 'w') as dst:
             for line in src.readlines():
                 line = line.replace('myproject', model.config.get_project_name())
-                line = line.replace('mystamp', model.config.get_config_value('Stamp'))
+                line = line.replace('mystamp', model.config.get_config_value('Stamp') or '')
 
                 dst.write(line)
         build_lib_dst.chmod(build_lib_dst.stat().st_mode | stat.S_IEXEC)
@@ -1145,6 +1418,7 @@ class VivadoWriter(Writer):
             self.write_nnet_utils(model)
             self.write_generated_code(model)
             self.write_yml(model)
+            self.write_gemm_config(model)
             self.write_tar(model)
         else:
             self.write_project_dir(model)

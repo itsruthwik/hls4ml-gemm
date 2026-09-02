@@ -6,6 +6,7 @@ import numpy as np
 
 from hls4ml.backends import FPGABackend
 from hls4ml.backends.fpga.fpga_types import APTypeConverter, HLSTypeConverter
+from hls4ml.backends.gemm_ip_config import is_gemm_strategy
 from hls4ml.backends.vivado.vivado_types import VivadoArrayVariableConverter
 from hls4ml.model.attributes import ChoiceAttribute, ConfigurableAttribute, TypeAttribute
 from hls4ml.model.flow import register_flow
@@ -32,6 +33,13 @@ from hls4ml.model.layers import (
     SimpleRNN,
     TimeDistributed,
 )
+from hls4ml.backends.vivado.passes.gemm_nodes import (
+    LowerEinsumToGemm,
+    SplitConvGemm,
+    ReplaceDenseGemm,
+    TransposeWeightsForGemmIP,
+    ValidateGemm,
+)
 from hls4ml.model.optimizer import get_backend_passes, layer_optimizer
 from hls4ml.model.types import FixedPrecisionType, IntegerPrecisionType, NamedType, PackedType, RoundingMode, SaturationMode
 from hls4ml.report import parse_vivado_report
@@ -43,6 +51,26 @@ class VivadoBackend(FPGABackend):
     def __init__(self):
         super().__init__('Vivado')
         self._register_layer_attributes()
+        try:
+            self.register_pass('transpose_weights_for_gemm', TransposeWeightsForGemmIP)
+        except Exception:
+            pass
+        try:
+            self.register_pass('split_conv_gemm', SplitConvGemm)
+        except Exception:
+            pass
+        try:
+            self.register_pass('replace_dense_gemm', ReplaceDenseGemm)
+        except Exception:
+            pass
+        try:
+            self.register_pass('lower_einsum_to_gemm', LowerEinsumToGemm)
+        except Exception:
+            pass
+        try:
+            self.register_pass('validate_gemm', ValidateGemm)
+        except Exception:
+            pass
         self._register_flows()
 
     def _register_layer_attributes(self):
@@ -140,6 +168,47 @@ class VivadoBackend(FPGABackend):
         )
         self.attribute_map[TimeDistributed] = attrs
 
+    # -----------------------------------------------------------------------
+    # GEMM IP config helpers
+    # -----------------------------------------------------------------------
+
+    def _validate_gemm_ip_conv_support(self, layer):
+        """Raise ValueError for unsupported Strategy: GEMM + Conv combinations."""
+        if not is_gemm_strategy(layer):
+            return
+        if layer.get_attr('data_format') != 'channels_last':
+            raise ValueError(
+                f'Layer "{layer.name}" requested Strategy: GEMM, but Vivado Conv GEMM requires channels_last data format.'
+            )
+        if layer.class_name in ('Conv1D', 'PointwiseConv1D', 'Conv1DBatchnorm'):
+            if layer.get_attr('dilation', 1) != 1:
+                raise ValueError(
+                    f'Layer "{layer.name}" requested Strategy: GEMM, but Vivado Conv GEMM does not support dilation > 1.'
+                )
+        else:
+            if layer.get_attr('dilation_width', 1) != 1 or layer.get_attr('dilation_height', 1) != 1:
+                raise ValueError(
+                    f'Layer "{layer.name}" requested Strategy: GEMM, but Vivado Conv GEMM does not support dilation > 1.'
+                )
+
+        # Row/column streaming requires stride 1 and valid (zero) padding.
+        stride_h = layer.get_attr('stride_height', 1)
+        stride_w = layer.get_attr('stride_width', 1)
+        if stride_h != 1 or stride_w != 1:
+            raise ValueError(
+                f'Layer "{layer.name}" requested Strategy: GEMM, but only stride=1 is supported '
+                f'by the row/column GEMM IP (got stride={stride_h}x{stride_w}).'
+            )
+        pad_top = layer.get_attr('pad_top', 0)
+        pad_bottom = layer.get_attr('pad_bottom', 0)
+        pad_left = layer.get_attr('pad_left', 0)
+        pad_right = layer.get_attr('pad_right', 0)
+        if pad_top != 0 or pad_bottom != 0 or pad_left != 0 or pad_right != 0:
+            raise ValueError(
+                f'Layer "{layer.name}" requested Strategy: GEMM, but only valid padding is supported '
+                f'by the row/column GEMM IP (got pad=[{pad_top},{pad_bottom},{pad_left},{pad_right}]).'
+            )
+
     def _register_flows(self):
         initializers = self._get_layer_initializers()
         init_flow = register_flow('init_layers', initializers, requires=['optimize'], backend=self.name)
@@ -165,6 +234,10 @@ class VivadoBackend(FPGABackend):
         optimization_passes = [
             'vivado:sparse_graph_optimizer',
             'vivado:sparse_fix_input_precision',
+            'vivado:split_conv_gemm',
+            'vivado:replace_dense_gemm',
+            'vivado:split_attention_heads',
+            'vivado:lower_einsum_to_gemm',
             'vivado:remove_final_reshape',
             'vivado:optimize_pointwise_conv',
             'vivado:inplace_parallel_reshape',
@@ -182,6 +255,7 @@ class VivadoBackend(FPGABackend):
         vivado_types = [
             'vivado:transform_types',
             'vivado:register_bram_weights',
+            'vivado:transpose_weights_for_gemm',
             'vivado:generate_conv_streaming_instructions',
             'vivado:apply_resource_strategy',
             'vivado:generate_conv_im2col',
@@ -190,6 +264,7 @@ class VivadoBackend(FPGABackend):
             'vivado:d_a_latency_dense_template',
             'vivado:d_a_latency_conv_template',
             'vivado:d_a_combinational_template',
+            'vivado:validate_gemm',
         ]
         vivado_types_flow = register_flow('specific_types', vivado_types, requires=[init_flow], backend=self.name)
 
@@ -335,8 +410,24 @@ class VivadoBackend(FPGABackend):
     @layer_optimizer(Dense)
     def init_dense(self, layer):
         index_t = IntegerPrecisionType(width=1, signed=False)
+
+        # GEMM shape attributes — must be set before the graph rewrite passes run.
+        input_shape = layer.get_input_variable().shape
+        # gemm_m is set by ReplaceDenseGemm (n_patches) for the GEMM path;
+        # for non-GEMM, set n_patches directly.
+        gemm_m = int(np.prod(input_shape[:-1])) if len(input_shape) > 1 else 1
+        layer.set_attr('gemm_m', gemm_m)
+        layer.set_attr('gemm_k', input_shape[-1])
+        layer.set_attr('gemm_n', layer.get_attr('n_out'))
+
         compression = layer.model.config.get_compression(layer)
-        if layer.model.config.is_resource_strategy(layer):
+        if is_gemm_strategy(layer):
+            # GEMM is a mutually-exclusive strategy: the matmul is realized by the GEMM
+            # IP, not by latency/resource soft logic. ReuseFactor is left as configured —
+            # it sizes the GEMM core (II / multiplier allocation), it is not a
+            # latency/resource choice.
+            layer.set_attr('strategy', 'gemm')
+        elif layer.model.config.is_resource_strategy(layer):
             n_in, n_out = self.get_layer_mult_size(layer)
             self.set_target_reuse_factor(layer)
             self.set_closest_reuse_factor(layer, n_in, n_out)
@@ -373,10 +464,14 @@ class VivadoBackend(FPGABackend):
     # TODO consolidate these functions into a single `init_conv`
     @layer_optimizer(Conv1D)
     def init_conv1d(self, layer):
+        self._validate_gemm_ip_conv_support(layer)
+
         if len(layer.weights['weight'].data.shape) == 2:  # This can happen if we assign weights of Dense layer to 1x1 Conv1D
             layer.weights['weight'].data = np.expand_dims(layer.weights['weight'].data, axis=(0, 1))
 
-        if layer.model.config.is_resource_strategy(layer):
+        if is_gemm_strategy(layer):
+            layer.set_attr('strategy', 'gemm')
+        elif layer.model.config.is_resource_strategy(layer):
             layer.set_attr('strategy', 'resource')
             n_in, n_out = self.get_layer_mult_size(layer)
             self.set_target_reuse_factor(layer)
@@ -493,10 +588,14 @@ class VivadoBackend(FPGABackend):
 
     @layer_optimizer(Conv2D)
     def init_conv2d(self, layer):
+        self._validate_gemm_ip_conv_support(layer)
+
         if len(layer.weights['weight'].data.shape) == 2:  # This can happen if we assign weights of Dense layer to 1x1 Conv2D
             layer.weights['weight'].data = np.expand_dims(layer.weights['weight'].data, axis=(0, 1))
 
-        if layer.model.config.is_resource_strategy(layer):
+        if is_gemm_strategy(layer):
+            layer.set_attr('strategy', 'gemm')
+        elif layer.model.config.is_resource_strategy(layer):
             layer.set_attr('strategy', 'resource')
             self.set_target_reuse_factor(layer)
             n_in, n_out = self.get_layer_mult_size(layer)
@@ -825,13 +924,22 @@ class VivadoBackend(FPGABackend):
         layer.attributes['n_free_kernel'] = recipe['L1']
         layer.attributes['n_inplace'] = recipe['I']
         layer.attributes['n_contract'] = recipe['C']
+        layer.attributes['n_in'] = recipe['C']
+        layer.attributes['n_out'] = recipe['L1']
+        layer.attributes['gemm_m'] = recipe['L0']
+        layer.attributes['gemm_k'] = recipe['C']
+        layer.attributes['gemm_n'] = recipe['L1']
         pf = layer.attributes.get('parallelization_factor', recipe['L0'])
         layer.attributes['parallelization_factor'] = pf
 
         layer.add_weights(compression=layer.model.config.get_compression(layer))
         layer.add_bias()
 
+        if is_gemm_strategy(layer):
+            layer.set_attr('strategy', 'gemm')
+            return
         strategy: str | None = layer.model.config.get_strategy(layer)
+        strategy = strategy.lower() if strategy else strategy
         if not strategy:
             layer.set_attr('strategy', 'latency')
             return
@@ -861,6 +969,16 @@ class VivadoBackend(FPGABackend):
         layer.attributes['n_inplace'] = recipe['I']
         layer.attributes['n_contract'] = recipe['C']
         layer.attributes['out_interpert_shape'] = recipe['out_interpert_shape']
+        layer.attributes['gemm_m'] = recipe['L0']
+        layer.attributes['gemm_n'] = recipe['L1']
+        layer.attributes['gemm_k'] = recipe['C']
+        layer.attributes['n_in'] = recipe['C']
+        layer.attributes['n_out'] = recipe['L1']
+
+        if is_gemm_strategy(layer) and (recipe['L0'] <= 0 or recipe['L1'] <= 0 or recipe['C'] <= 0):
+            raise ValueError(
+                f'Layer "{layer.name}" requested Strategy: GEMM, but its Einsum equation is not GEMM-compatible.'
+            )
 
         layer.attributes['inp0_tpose_idxs'] = inp0_tpose_idxs
         layer.attributes['inp1_tpose_idxs'] = inp1_tpose_idxs
@@ -869,14 +987,18 @@ class VivadoBackend(FPGABackend):
         pf = layer.attributes.get('parallelization_factor', recipe['L0'])
         layer.attributes['parallelization_factor'] = pf
 
+        if is_gemm_strategy(layer):
+            layer.set_attr('strategy', 'gemm')
+            return
         strategy: str | None = layer.model.config.get_strategy(layer)
+        strategy = strategy.lower() if strategy else strategy
         if not strategy:
             layer.set_attr('strategy', 'latency')
             return
-        if strategy.lower() == 'resource':
+        if strategy == 'resource':
             layer.set_attr('strategy', 'resource')
             return
-        if strategy.lower() in ('latency', 'distributed_arithmetic'):
+        if strategy in ('latency', 'distributed_arithmetic'):
             layer.set_attr('strategy', 'latency')
             return
         warn(f'Invalid strategy "{strategy}" for Einsum layer "{layer.name}". Using "latency" strategy instead.')

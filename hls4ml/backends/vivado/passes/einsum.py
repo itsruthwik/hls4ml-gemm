@@ -17,12 +17,21 @@ struct config{index} {{
     typedef config{index}_tpose_out tpose_out_conf;
 
     typedef {accum_t.name} accum_t;
+    typedef {input1_t} weight_t;
+    typedef {output_t} bias_t;
 
     // Layer Sizes
     static const unsigned n_free0 = {n_free0};
     static const unsigned n_free1 = {n_free1};
     static const unsigned n_contract = {n_contract};
     static const unsigned n_inplace = {n_inplace};
+    static const unsigned n_in = {n_in};
+    static const unsigned n_out = {n_out};
+    static const unsigned gemm_m = {gemm_m};
+    static const unsigned gemm_n = {gemm_n};
+    static const unsigned gemm_k = {gemm_k};
+    static const unsigned gemm_ip_id = {index};
+    static const bool transpose_weights = true;
 
     // Resource reuse info
     static const unsigned io_type = nnet::{iotype};
@@ -62,6 +71,13 @@ class EinsumConfigTemplate(LayerConfigTemplate):
         params['n_free1'] = node.attributes['n_free1']
         params['n_contract'] = node.attributes['n_contract']
         params['n_inplace'] = node.attributes['n_inplace']
+        params['n_in'] = node.get_attr('n_in', node.attributes['n_contract'])
+        params['n_out'] = node.get_attr('n_out', node.attributes['n_free1'])
+        params['gemm_m'] = node.get_attr('gemm_m', node.attributes['n_free0'])
+        params['gemm_n'] = node.get_attr('gemm_n', node.attributes['n_free1'])
+        params['gemm_k'] = node.get_attr('gemm_k', node.attributes['n_contract'])
+        params['input1_t'] = node.get_input_variable(node.inputs[1]).type.name
+        params['output_t'] = node.get_output_variable().type.name
         inp0_t = node.get_input_variable(node.inputs[0]).type.precision
         inp1_t = node.get_input_variable(node.inputs[1]).type.precision
         params['product_type'] = get_backend('vivado').product_type(inp0_t, inp1_t)
@@ -106,4 +122,7 @@ class EinsumFunctionTemplate(FunctionCallTemplate):
         params['input0'] = node.get_input_variable(node.inputs[0]).name
         params['input1'] = node.get_input_variable(node.inputs[1]).name
         params['output'] = node.get_output_variable().name
+        # A gemm_ip Einsum never reaches this template: LowerEinsumToGemm lowers it to a
+        # Gemm node in the IR before templates run (GEMM lives in the IR now). This
+        # template only serves the baseline einsum path.
         return self.template.format(**params)
