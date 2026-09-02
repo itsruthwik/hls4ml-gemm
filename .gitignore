@@ -17,3 +17,6 @@ hls4mlprj_*
 *.ipynb
 *.ipynb_checkpoints/
 *.bak
+
+# Local dedicated environment for the ATLAS GEMM port
+.venv/
