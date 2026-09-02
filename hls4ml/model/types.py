@@ -705,7 +705,8 @@ class WeightVariable(Variable):
         self.quantizer = quantizer
 
     def __iter__(self):
-        self._iterator = np.nditer(self.data, order='C')
+        order = 'F' if getattr(self, 'transpose', False) else 'C'
+        self._iterator = np.nditer(self.data, order=order)
         return self
 
     def __next__(self):

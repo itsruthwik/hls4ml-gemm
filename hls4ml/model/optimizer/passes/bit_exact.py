@@ -28,6 +28,7 @@ from hls4ml.model.layers import (
     GlobalPooling2D,
     Input,
     Layer,
+    LayerNormalization,
     Merge,
     ParametrizedActivation,
     Pooling1D,
@@ -616,7 +617,11 @@ def _(layer: Pooling1D | Pooling2D | GlobalPooling1D | GlobalPooling2D):
         f_out += f_add
 
     if isinstance(layer, (GlobalPooling1D, GlobalPooling2D)):
-        k_out, i_out, f_out = k_out[0], i_out[0], f_out[0]
+        # Global pooling collapses ALL spatial dims -> output is (channels,). A single
+        # k_out[0] only strips one leading spatial dim (fine for 1D, but leaves a stray
+        # size-1 dim for 2D, e.g. (1, C)); reshape to (ch_out,) squeezes both correctly.
+        ch_out = layer.attributes['n_filt']
+        k_out, i_out, f_out = k_out.reshape(ch_out), i_out.reshape(ch_out), f_out.reshape(ch_out)
     return k_out, i_out, f_out
 
 
@@ -1191,6 +1196,22 @@ class FixInputPrecision(OptimizerPass):
         return node.get_output_variable().type.precision.width > 100
 
     def transform(self, model, node: Layer):
+        # Trusted integer-index input feeding an Embedding (gather): the index is not
+        # a quantized value, so its precision can't be inferred from a downstream
+        # quantizer (get_output_layers_and_quantizers would abort on the
+        # Input->Embedding chain). Size it to address the vocab (unsigned int, no
+        # fraction) and mark it trusted; the embedding output precision is handled by
+        # Embedding's own produce_kif.
+        emb = next((c for c in get_output_layers(node) if isinstance(c, Embedding)), None)
+        if emb is not None:
+            vocab = int(emb.attributes['vocab_size'])
+            i = max(1, (vocab - 1).bit_length())
+            new_type = to_hls4ml_fixed(0, i, 0, f'{node.name}_t')
+            node.get_output_variable().type = new_type
+            node.model.config.layer_name_precision[node.name] = str(new_type)
+            node.attributes['trusted'] = True
+            return False
+
         layers, out_quantizers = get_output_layers_and_quantizers(node)
 
         if len(out_quantizers) == 0:  # Input connected to nothing
@@ -1239,3 +1260,50 @@ class FixInputPrecision(OptimizerPass):
             if '_request_kif' in layer.attributes:
                 del layer.attributes['_request_kif']
         return False
+
+
+@_request_kif.register(ZeroPadding1D)
+@_request_kif.register(ZeroPadding2D)
+def _(layer):
+    # map the request on the padded output back to the input by slicing off the pad
+    k, i, f = requested_kif(layer)
+    if layer.class_name.endswith('2D'):
+        pt, pb = layer.attributes['pad_top'], layer.attributes['pad_bottom']
+        pl, pr = layer.attributes['pad_left'], layer.attributes['pad_right']
+        sl = (slice(pt, k.shape[0] - pb), slice(pl, k.shape[1] - pr))
+    else:
+        pl, pr = layer.attributes['pad_left'], layer.attributes['pad_right']
+        sl = (slice(pl, k.shape[0] - pr),)
+    return ((k[sl], i[sl], f[sl]),)
+
+
+@_produce_kif.register
+def _(layer: LayerNormalization):
+    # LayerNorm's exact output range is data-dependent (mean/var/rsqrt), and the
+    # generic hls4ml LN kernel is not bit-exact anyway. Produce a generous KIF so the
+    # downstream HGQ2 input quantizer clamps it to the real trained precision; this
+    # keeps the surrounding compute layers bit-exact while treating LN as a boundary.
+    shape = get_output_shape(layer)
+    k = np.ones(shape, dtype=np.int16)
+    i = f = np.full(shape, 126, dtype=np.int16)
+    return k, i, f
+
+
+@register_precision.register
+def _(node: LayerNormalization):
+    # The generic LN produce_kif is an unbounded stopgap (i=f=126), so the default
+    # accum_t derived from it is ap_fixed<253,...> and cannot be instantiated. Size
+    # accum_t instead from the *input* precision plus the reduction headroom the LN
+    # kernel actually needs. The widest intermediate is the running sum of `dim`
+    # squared mean-diffs (sum_cache2): diff ~ (i_in+1, f_in) -> diff^2 ~
+    # (2*(i_in+1), 2*f_in) -> summing `dim` of them adds ceil(log2(dim)) integer
+    # bits. This also covers sum_cache (Sigma of `dim` inputs) and mean/var.
+    default_register_precision(node)
+    _k, _i, _f = get_input_kifs(node)[0]
+    i_in, f_in = int(np.max(_i)), int(np.max(_f))
+    dim = int(get_input_shapes(node)[0][-1])
+    scale = ceil(log2(max(dim, 1)))
+    acc_i = 2 * (i_in + 1) + scale
+    acc_f = 2 * f_in
+    accum_t = to_hls4ml_fixed(1, acc_i, acc_f, f'{node.name}_accum_t')
+    node.attributes['accum_t'] = accum_t

@@ -131,6 +131,17 @@ class FuseFixedPointQuantizer(OptimizerPass):
 
         inp_layer = get_input_layers(node)[0]
         can_fuse = len(get_output_layers(inp_layer)) == 1
+        if can_fuse and node.attributes.get('_merged_fanout_quantizer', False):
+            from hls4ml.model.layers import Input as InputLayer
+
+            # This quantizer only became fusible because MergeIdenticalFixedPointQuantizers
+            # collapsed a fan-out onto it. Folding it into a *model input* would move the
+            # quantization onto the input port: the port narrows, and one rounding replaces
+            # two (float -> input precision -> quantizer precision). That is a change to what
+            # the design computes, not a simplification of it, so decline. Folding into a
+            # real producer layer stays inside the design and is still allowed.
+            if isinstance(inp_layer, InputLayer):
+                can_fuse = False
         attributes = copy(node.attributes)
         attributes['activation'] = 'linear'
         attributes['table_size'] = -1
@@ -197,6 +208,92 @@ class EnforceProxyModelEmbeddedConfig(OptimizerPass):
         return graph_changed
 
 
+def _quantizer_signature(node: 'FixedPointQuantizer'):
+    """Identity of a quantizer's behaviour: which tensor it reads and what it does to it.
+    Two quantizers with equal signatures are interchangeable, so one can serve both."""
+    k, b, i = node.mask_kbi
+    return (
+        node.inputs[0],
+        node.RND,
+        node.SAT,
+        k.shape,
+        k.tobytes(),
+        b.tobytes(),
+        i.tobytes(),
+    )
+
+
+class MergeIdenticalFixedPointQuantizers(OptimizerPass):
+    """Collapse sibling FixedPointQuantizers that read the same tensor and apply the same
+    quantization onto a single instance, rewiring their consumers to it.
+
+    HGQ2 attaches an input quantizer to every QDense, so N dense layers reading one tensor
+    produce N identical quantizers. They cannot be merged at the Keras level (the quantizer
+    lives inside QDense), and FuseFixedPointQuantizer declines them because their shared
+    producer has fan-out > 1 -- so without this pass they are emitted N times.
+
+    This is the fan-out analogue of that pass, and of ScaleDownAdd in move_scales.py, which
+    likewise moves an identical op across a branch point. It leaves the producer feeding a
+    single quantizer, which FuseFixedPointQuantizer may then be able to fold away entirely.
+    """
+
+    def match(self, node: Layer):
+        # Same precondition as FuseFixedPointQuantizer: only act once bit_exact has
+        # finalised precisions, or this rewrites the graph under an in-progress analysis.
+        if not node.attributes.get('bit_exact_transformed', False):
+            return False
+        if not isinstance(node, FixedPointQuantizer):
+            return False
+        if node.mask_kbi is None:
+            return False
+        # A quantizer that IS a model output must keep its own tensor.
+        if any(o in node.model.outputs for o in node.outputs):
+            return False
+        return self._canonical(node) is not None
+
+    def _canonical(self, node: 'FixedPointQuantizer'):
+        """The first same-signature sibling in graph order, or None if `node` is itself the
+        first. Graph order is insertion order, so the choice is deterministic and a build is
+        reproducible."""
+        sig = _quantizer_signature(node)
+        for other in node.model.graph.values():
+            if other.name == node.name:
+                return None  # `node` is the canonical one; nothing to do
+            if not isinstance(other, FixedPointQuantizer) or other.mask_kbi is None:
+                continue
+            if any(o in node.model.outputs for o in other.outputs):
+                continue
+            if _quantizer_signature(other) == sig:
+                return other
+        return None
+
+    def transform(self, model: 'ModelGraph', node: 'FixedPointQuantizer'):
+        canonical = self._canonical(node)
+        if canonical is None:
+            return False
+
+        # Output precisions must agree, or consumers would silently see a different type.
+        if node.get_output_variable().type.precision != canonical.get_output_variable().type.precision:
+            return False
+
+        dead, keep = node.outputs[0], canonical.outputs[0]
+        for consumer in model.graph.values():
+            for idx, inp in enumerate(consumer.inputs):
+                if inp == dead:
+                    consumer.inputs[idx] = keep
+
+        # Mark the survivor: it now carries a fan-out that it did not originally have.
+        # FuseFixedPointQuantizer consults this before folding it into a model input, which
+        # would otherwise silently move quantization onto the input port (measured: changes
+        # ~half the transformer's outputs, because one rounding replaces two).
+        canonical.attributes['_merged_fanout_quantizer'] = True
+
+        # Consumers are already rewired, so remove_node finds nothing left to reconnect and
+        # simply drops the node and its output variable.
+        model.remove_node(node)
+        return True
+
+
 def register_hgq_proxy_model():
     register_layer('FixedPointQuantizer', FixedPointQuantizer)
     register_layer('HGQ>FixedPointQuantizer', FixedPointQuantizer)
@@ -204,3 +301,4 @@ def register_hgq_proxy_model():
     register_layer('HGQ>UnaryLUT', UnaryLUT)
     register_pass('enforce_proxy_model_embedded_config', EnforceProxyModelEmbeddedConfig)
     register_pass('fuse_fixed_point_quantizer', FuseFixedPointQuantizer)
+    register_pass('merge_identical_fixed_point_quantizers', MergeIdenticalFixedPointQuantizers)

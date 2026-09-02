@@ -81,6 +81,7 @@ register_flow(
         'replace_multidimensional_dense_with_conv',
         'enforce_proxy_model_embedded_config',
         'bit_exact',
+        'merge_identical_fixed_point_quantizers',
         'fuse_fixed_point_quantizer',
         'fix_input_precision',
         'propagate_snn_readout_window_size',
