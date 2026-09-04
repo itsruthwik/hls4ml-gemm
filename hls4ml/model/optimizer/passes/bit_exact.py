@@ -28,6 +28,7 @@ from hls4ml.model.layers import (
     GlobalPooling2D,
     Input,
     Layer,
+    LayerNormalization,
     Merge,
     ParametrizedActivation,
     Pooling1D,
@@ -1276,3 +1277,83 @@ def _(layer):
     return ((k[sl], i[sl], f[sl]),)
 
 
+@_produce_kif.register
+def _(layer: LayerNormalization):
+    # LayerNorm's exact output range is data-dependent (mean/var/rsqrt) and its generic
+    # hls4ml kernel is not bit-exact anyway, so treat it as a boundary: produce a
+    # GENEROUS-but-bounded KIF that a downstream HGQ2 input quantizer still clamps to the
+    # real trained precision via request_kif. It must be bounded, not the old i=f=126
+    # stopgap: on a LN -> pool/reshape -> ... path (no direct quantizer) the 126-wide type
+    # otherwise leaks into an uninstantiable ap_fixed<253> and cascades into the pool accum.
+    # The normalized-then-affine output is strictly narrower than the LN accumulator (which
+    # holds the sum of `dim` squared mean-diffs), so bound produce_kif by that accum range:
+    # provably non-clipping and instantiable.
+    shape = get_output_shape(layer)
+    _k, _i, _f = get_input_kifs(layer)[0]
+    i_in, f_in = int(np.max(_i)), int(np.max(_f))
+    dim = int(get_input_shapes(layer)[0][-1])
+    scale = ceil(log2(max(dim, 1)))
+    k = np.ones(shape, dtype=np.int16)
+    i = np.full(shape, 2 * (i_in + 1) + scale, dtype=np.int16)
+    f = np.full(shape, 2 * f_in, dtype=np.int16)
+    return k, i, f
+
+
+@register_precision.register
+def _(node: LayerNormalization):
+    # The generic LN produce_kif is an unbounded stopgap (i=f=126), so the default
+    # accum_t derived from it is ap_fixed<253,...> and cannot be instantiated. Size
+    # accum_t instead from the *input* precision plus the reduction headroom the LN
+    # kernel actually needs. The widest intermediate is the running sum of `dim`
+    # squared mean-diffs (sum_cache2): diff ~ (i_in+1, f_in) -> diff^2 ~
+    # (2*(i_in+1), 2*f_in) -> summing `dim` of them adds ceil(log2(dim)) integer
+    # bits. This also covers sum_cache (Sigma of `dim` inputs) and mean/var.
+    default_register_precision(node)
+    _k, _i, _f = get_input_kifs(node)[0]
+    i_in, f_in = int(np.max(_i)), int(np.max(_f))
+    dim = int(get_input_shapes(node)[0][-1])
+    scale = ceil(log2(max(dim, 1)))  # ceil(log2 dim): reduction headroom for the 1/dim divide
+
+    # Precisions of the two quantizer boundaries the accumulator must feed exactly (the
+    # softmax lesson: anchor the accumulator to the quantizer that consumes each reduction):
+    #   - the mean is rounded to mean_t (HGQ2's mean_q),
+    #   - the variance is rounded to the rsqrt table address (rsqrt_addr_f == rsqrt_iq frac).
+    mean_t = node.get_attr('mean_t')
+    mean_prec = getattr(mean_t, 'precision', mean_t)  # NamedType -> its precision
+    f_mean = mean_prec.fractional if mean_prec is not None else f_in
+    rsqrt_addr_f = int(node.get_attr('rsqrt_addr_f', f_in))
+
+    # Integer: widest intermediate is sum_cache2 = sum of `dim` squared mean-diffs:
+    # diff ~ (i_in+1, f_in) -> diff^2 ~ (2*(i_in+1), 2*f_in) -> summing `dim` adds `scale`.
+    acc_i = 2 * (i_in + 1) + scale
+    # Fractional: the two reductions each multiply a running sum by the fixed-point constant
+    # k_inv = 1/dim; a low-precision k_inv loses the product's low bits, so for the product to be
+    # accurate to F fractional bits, k_inv needs F + (integer bits of the sum) fractional bits:
+    #   - mean = (Sum x) * k_inv, Sum x has (i_in + scale) integer bits, rounded to mean_t (f_mean)
+    #     -> i_in + scale + f_mean,
+    #   - var  = (Sum diff^2) * k_inv, Sum diff^2 has acc_i integer bits, rounded to the rsqrt table
+    #     address (rsqrt_addr_f) -> acc_i + rsqrt_addr_f (the dominant term),
+    #   - plus 2*f_in to hold the exact squared diffs.
+    # The mean is bit-exact (mean_q); the variance is bit-exact for power-of-2 dims and sub-LSB for
+    # others (HGQ2's float 1/dim vs this fixed 1/dim can differ by <1 rsqrt index on rare tokens).
+    # The kernel divides the reduction sums by dim (a compile-time-constant fixed-point divide,
+    # which HLS lowers to a multiply + shift; the quotient is rounded to accum_t). accum_t needs
+    # enough fractional bits that this quotient tracks HGQ2's float Sum/dim to below the mean_t /
+    # rsqrt-address LSB -- the acc_i + rsqrt_addr_f and i_in + scale + f_mean terms already provide
+    # that headroom.
+    acc_f = max(i_in + scale + f_mean, acc_i + rsqrt_addr_f, 2 * f_in) + 2
+    accum_t = to_hls4ml_fixed(1, acc_i, acc_f, f'{node.name}_accum_t')
+    node.attributes['accum_t'] = accum_t
+
+    # norm_t: the exact type of the centered value (x - mean_q). The kernel multiplies this in
+    # the squared-diff (data_diff*data_diff) and in the result (data_diff*inv_std*scale); the
+    # rest of hls4ml multiplies at minimal OPERAND precision and reserves accum_t for the SUM
+    # only (see product<> in nnet_mult.h, and dense/batchnorm). Sizing data_diff at its true
+    # width instead of accum_t keeps those multipliers minimal (e.g. ~13x13 instead of ~30x30)
+    # while staying lossless -> bit-exact. x is (i_in, f_in); mean_q is mean_t; their signed
+    # difference needs f = max(f_in, f_mean) fractional and one extra integer bit.
+    k_mean = 1 if getattr(mean_prec, 'signed', True) else 0
+    i_mean = int(mean_prec.integer) - k_mean if mean_prec is not None else i_in
+    norm_i = max(i_in, i_mean) + 1
+    norm_f = max(f_in, f_mean)
+    node.attributes['norm_t'] = to_hls4ml_fixed(1, norm_i, norm_f, f'{node.name}_norm_t')

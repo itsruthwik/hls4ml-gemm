@@ -16,13 +16,13 @@ struct layernorm_config {
     typedef float scale_t;
     typedef float accum_t;
     typedef float table_t;
+    typedef float mean_t;
+    typedef float norm_t;
 
     // Layer Sizes
     static const unsigned n_in = 20;
     static const unsigned seq_len = 4;
     static const unsigned axis = 2;
-    static const unsigned epsilon_power_of_10 = 3;
-    static const unsigned table_range_power2 = 0;
     static const unsigned table_size = 1024;
 
     // Resource reuse info
@@ -32,69 +32,63 @@ struct layernorm_config {
     template <class x_T, class y_T> using product = nnet::product::mult<x_T, y_T>;
 };
 
-template <typename CONFIG_T, int N_TABLE> void init_invert_sqr_table(typename CONFIG_T::table_t table_out[N_TABLE]) {
-    // Inversion function:
-    //   result = 1/sqrt(x)
-    float min_val = pow(10.0f, -(int)CONFIG_T::epsilon_power_of_10);
-    float max_val = pow(2.0f, -(int)CONFIG_T::table_range_power2);
-    float step = max_val / (float)(N_TABLE);
-    for (int ii = 0; ii < N_TABLE; ii++) {
-        float in_val = min_val + step * ii;
-        table_out[ii] = (typename CONFIG_T::table_t)(1.0 / sqrt(in_val));
-    }
-}
-
+// Bit-exact to HGQ2's QLayerNormalization: the reciprocal-std is NOT recomputed in float
+// here. HGQ2 routes the per-token variance through a quantized LUT (rsqrt_table), whose
+// values already fold in epsilon and the output quantizer, and which the converter transfers
+// verbatim. This kernel reproduces that exactly: it addresses the SAME table by the SAME
+// quantized-variance index (round(var * 2^rsqrt_addr_f), saturated). Because the table is
+// data-driven, the kernel needs nothing about epsilon (any value works).
 template <class data_T, class res_T, typename CONFIG_T>
 void layernorm_1d(data_T data[CONFIG_T::n_in / CONFIG_T::seq_len], res_T res[CONFIG_T::n_in / CONFIG_T::seq_len],
                   typename CONFIG_T::scale_t scale[CONFIG_T::n_in / CONFIG_T::seq_len],
-                  typename CONFIG_T::bias_t bias[CONFIG_T::n_in / CONFIG_T::seq_len]) {
+                  typename CONFIG_T::bias_t bias[CONFIG_T::n_in / CONFIG_T::seq_len],
+                  typename CONFIG_T::table_t rsqrt_table[CONFIG_T::table_size]) {
     #pragma HLS PIPELINE II=CONFIG_T::reuse_factor
     #pragma HLS ARRAY_PARTITION variable=data complete
     #pragma HLS ARRAY_PARTITION variable=res complete
-    int inv_range_inv = (int)1 << CONFIG_T::table_range_power2;
     typename CONFIG_T::table_t deno_inver = 0;
-#ifdef __HLS_SYN__
-    bool initialized = false;
-    typename CONFIG_T::table_t invert_sqr_table[CONFIG_T::table_size];
-#else
-    static bool initialized = false;
-    static typename CONFIG_T::table_t invert_sqr_table[CONFIG_T::table_size];
-#endif
-    if (!initialized) {
-        init_invert_sqr_table<CONFIG_T, CONFIG_T::table_size>(invert_sqr_table);
-        initialized = true;
-    }
 
     static const unsigned dim = CONFIG_T::n_in / CONFIG_T::seq_len;
     typename CONFIG_T::accum_t sum_cache = 0;
     typename CONFIG_T::accum_t sum_cache2 = 0;
     typename CONFIG_T::accum_t var, mean, diff;
-    typename CONFIG_T::accum_t data_diff[dim];
+    // data_diff (x - mean) is sized at its exact minimal precision (norm_t), not accum_t, so the
+    // squared-diff and result multiplies run at operand width -- the standard hls4ml convention
+    // (multiply at operand precision, accumulate the SUM in accum_t; see product<> in nnet_mult.h).
+    // Lossless (norm_t holds x - mean_q exactly), so it stays bit-exact.
+    typename CONFIG_T::norm_t data_diff[dim];
 
     #pragma HLS ARRAY_PARTITION variable=data_diff complete
-
-    const typename CONFIG_T::accum_t k_inv = 1.0 / dim;
 
 LAYERNORM_1D_SUM:
     for (int i = 0; i < dim; ++i) {
         sum_cache += static_cast<typename CONFIG_T::accum_t>(data[i]);
     }
-    mean = CONFIG_T::template product<typename CONFIG_T::accum_t, typename CONFIG_T::accum_t>::product(sum_cache, k_inv);
+    // Divide by dim: dim is a compile-time constant, so HLS lowers this fixed-point divide to a
+    // multiply-by-reciprocal + shift (no divider, no float). Dividing rounds the QUOTIENT to
+    // accum_t (error ~2^-accum_f, unscaled), which tracks HGQ2's float Sum/dim; a fixed 1/dim
+    // reciprocal-multiply instead rounds the reciprocal (error ~Sum*2^-accum_f) and was what made
+    // the rare per-token rsqrt index flip. Same idiom as average pooling's `y /= length`.
+    mean = sum_cache / (int)dim;
+    // Quantize the mean to HGQ2's mean_q precision so (x - mean) is bit-exact to HGQ2.
+    typename CONFIG_T::mean_t mean_q = mean;
 
 LAYERNORM_1D_VAR:
     for (int i = 0; i < dim; ++i) {
-        data_diff[i] = static_cast<typename CONFIG_T::accum_t>(data[i]) - mean;
+        data_diff[i] = static_cast<typename CONFIG_T::norm_t>(static_cast<typename CONFIG_T::accum_t>(data[i]) - mean_q);
         diff = data_diff[i] * data_diff[i];
         sum_cache2 += diff;
     }
-    var = CONFIG_T::template product<typename CONFIG_T::accum_t, typename CONFIG_T::accum_t>::product(sum_cache2, k_inv);
+    var = sum_cache2 / (int)dim;
 
-    int index = (var) * (CONFIG_T::table_size)*inv_range_inv;
+    // HGQ2 address: quantize the variance to rsqrt_addr_f fractional bits (round),
+    // then saturate into the unsigned table range [0, table_size).
+    int index = (int)(var * (typename CONFIG_T::accum_t)(1 << CONFIG_T::rsqrt_addr_f) + (typename CONFIG_T::accum_t)0.5);
     if (index < 0)
         index = 0;
-    if (index > CONFIG_T::table_size - 1)
+    if (index > (int)CONFIG_T::table_size - 1)
         index = CONFIG_T::table_size - 1;
-    deno_inver = invert_sqr_table[index];
+    deno_inver = rsqrt_table[index];
 
 LAYERNORM_1D_RESULT:
     for (int i = 0; i < dim; ++i) {
@@ -105,7 +99,8 @@ LAYERNORM_1D_RESULT:
 template <class data_T, class res_T, typename CONFIG_T>
 void layernormalize(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_in],
                     typename CONFIG_T::scale_t scale[CONFIG_T::n_in / CONFIG_T::seq_len],
-                    typename CONFIG_T::bias_t bias[CONFIG_T::n_in / CONFIG_T::seq_len]) {
+                    typename CONFIG_T::bias_t bias[CONFIG_T::n_in / CONFIG_T::seq_len],
+                    typename CONFIG_T::table_t rsqrt_table[CONFIG_T::table_size]) {
     static const unsigned dim = CONFIG_T::n_in / CONFIG_T::seq_len;
     data_T in_val[dim];
     res_T outval[dim];
@@ -123,7 +118,7 @@ LAYERNORM_SEQ_LOOP:
             #pragma HLS UNROLL
             in_val[i] = data[j * dim + i];
         }
-        layernorm_1d<data_T, res_T, CONFIG_T>(in_val, outval, scale, bias);
+        layernorm_1d<data_T, res_T, CONFIG_T>(in_val, outval, scale, bias, rsqrt_table);
     LAYERNORM_STORE:
         for (int i = 0; i < dim; ++i) {
             #pragma HLS UNROLL
