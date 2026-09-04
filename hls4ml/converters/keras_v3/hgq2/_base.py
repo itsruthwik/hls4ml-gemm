@@ -9,11 +9,43 @@ from hls4ml.converters.keras_v3.conv import ConvHandler
 from hls4ml.converters.keras_v3.core import ActivationHandler, DenseHandler
 from hls4ml.converters.keras_v3.einsum_dense import EinsumDenseHandler
 from hls4ml.converters.keras_v3.merge import MergeHandler
+from hls4ml.model.types import FixedPrecisionType, RoundingMode, SaturationMode
 
 if TYPE_CHECKING:
     import hgq
+    from hgq.quantizer.internal import FixedPointQuantizerBase
     from keras import KerasTensor
     from keras.src.layers.layer import Layer as Layer
+
+
+def fixed_quantizer_to_hls4ml_t(q: 'FixedPointQuantizerBase', take_max=False):
+    """Convert an HGQ2 fixed-point quantizer's (k, i, f) + round/overflow modes to an hls4ml
+    FixedPrecisionType. Shared by the norm/softmax handlers. `take_max` collapses a heterogeneous
+    quantizer to its widest element; otherwise the quantizer must be homogeneous."""
+    from keras import ops
+
+    k, i, f = q.kif
+    k = ops.convert_to_numpy(k)
+    i = ops.convert_to_numpy(i)
+    f = ops.convert_to_numpy(f)
+    if not take_max:
+        assert k.size == 1 and i.size == 1 and f.size == 1, 'Only homogeneous quantizer is supported'
+        k = bool(k.ravel().item())
+        i = int(i.ravel().item())
+        f = int(f.ravel().item())
+    else:
+        k = bool(k.max())
+        i = int(i.max())
+        f = int(f.max())
+
+    k, b, I = k, k + i + f, k + i  # noqa: E741
+    b = max(1, b)
+    round_mode = q.round_mode
+    if round_mode.startswith('S_'):
+        round_mode = round_mode[2:]  # stochastic rounding
+    round_mode = getattr(RoundingMode, round_mode)
+    sat_mode = getattr(SaturationMode, q.overflow_mode)
+    return FixedPrecisionType(b, I, k, rounding_mode=round_mode, saturation_mode=sat_mode)
 
 
 def extract_fixed_quantizer_config(q, tensor: 'KerasTensor', is_input: bool) -> dict[str, Any]:

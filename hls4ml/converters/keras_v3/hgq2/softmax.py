@@ -2,41 +2,11 @@ import typing
 from collections.abc import Sequence
 from math import prod
 
-from hls4ml.model.types import FixedPrecisionType, RoundingMode, SaturationMode
-
-from ._base import QLayerHandler
+from ._base import QLayerHandler, fixed_quantizer_to_hls4ml_t
 
 if typing.TYPE_CHECKING:
     import hgq
-    from hgq.quantizer.internal import FixedPointQuantizerBase
     from keras import KerasTensor
-
-
-def fixed_quantizer_to_hls4ml_t(q: 'FixedPointQuantizerBase', take_max=False):
-    from keras import ops
-
-    k, i, f = q.kif
-    k = ops.convert_to_numpy(k)
-    i = ops.convert_to_numpy(i)
-    f = ops.convert_to_numpy(f)
-    if not take_max:
-        assert k.size == 1 and i.size == 1 and f.size == 1, 'Only homogeneous quantizer is supported'
-        k = bool(k.ravel().item())
-        i = int(i.ravel().item())
-        f = int(f.ravel().item())
-    else:
-        k = bool(k.max())
-        i = int(i.max())
-        f = int(f.max())
-
-    k, b, I = k, k + i + f, k + i  # noqa: E741
-    b = max(1, b)
-    round_mode = q.round_mode
-    if round_mode.startswith('S_'):
-        round_mode = round_mode[2:]  # stochastic rounding
-    round_mode = getattr(RoundingMode, round_mode)
-    sat_mode = getattr(SaturationMode, q.overflow_mode)
-    return FixedPrecisionType(b, I, k, rounding_mode=round_mode, saturation_mode=sat_mode)
 
 
 class QSoftmaxHandler(QLayerHandler):

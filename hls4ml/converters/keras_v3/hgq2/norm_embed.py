@@ -14,7 +14,7 @@ import numpy as np
 
 from hls4ml.model.types import FixedPrecisionType
 
-from ._base import QLayerHandler
+from ._base import QLayerHandler, fixed_quantizer_to_hls4ml_t
 
 if TYPE_CHECKING:
     from keras import KerasTensor
@@ -68,18 +68,6 @@ def _extract_rsqrt_lut(rsqrt_table):
     return np.asarray(ops.convert_to_numpy(table)).ravel(), table_t, addr_f, N
 
 
-def _extract_quantizer_precision(q):
-    """Fixed-point precision of a (homogeneous) HGQ2 Quantizer, as an hls4ml FixedPrecisionType."""
-    from keras import ops
-
-    inner = q.quantizer
-    k, i, f = (int(ops.max(ops.convert_to_numpy(x))) for x in inner.kif)
-    rnd = getattr(inner, 'round_mode', 'TRN')
-    sat = getattr(inner, 'overflow_mode', 'WRAP')
-    rnd = rnd[2:] if isinstance(rnd, str) and rnd.startswith('S_') else rnd
-    return FixedPrecisionType(k + i + f, k + i, bool(k), str(rnd), str(sat))
-
-
 class QLayerNormalizationHandler(QLayerHandler):
     handles = ('hgq.layers.layer_normalization.QLayerNormalization',)
 
@@ -115,7 +103,7 @@ class QLayerNormalizationHandler(QLayerHandler):
         # (a homogeneous datalane quantizer). Emit its precision as mean_t so the kernel rounds
         # the computed mean to the SAME fixed-point value HGQ2 does -> (x - mean) is exact and the
         # whole LayerNorm reproduces HGQ2 bit-exactly.
-        mean_t = _extract_quantizer_precision(layer.mean_q)
+        mean_t = fixed_quantizer_to_hls4ml_t(layer.mean_q.quantizer, take_max=True)
 
         return {
             'n_in': prod(in_shape),
