@@ -644,6 +644,29 @@ template <class data_T, class res_T, typename CONFIG_T> void tanh(data_T data[CO
 #endif
 
 // *************************************************
+//       UnaryLUT Activation
+// *************************************************
+template <int table_size, class data_T> inline unsigned get_index_unary_lut(data_T x) {
+    // Slice the whole input word (raw bits) to get an index into the table.
+    // CATAPULT_PORT
+    // Vivado: return (unsigned)(x(x.width - 1, 0));  // all bits, reinterpreted unsigned
+    // ac_fixed::slc<W> keeps the source signedness, so route through an explicit
+    // unsigned ac_int (as the softmax idx helper does) -- a bare (unsigned) cast would
+    // sign-extend negative inputs to a huge out-of-range index.
+    ac_int<data_T::width, false> raw = x.template slc<data_T::width>(0);
+    return (unsigned)raw;
+}
+
+template <class data_T, class res_T, typename CONFIG_T>
+void unary_lut(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_in],
+               typename CONFIG_T::table_t table[CONFIG_T::table_size]) {
+    for (int ii = 0; ii < CONFIG_T::n_in; ii++) {
+        unsigned index = get_index_unary_lut<CONFIG_T::table_size>(data[ii]);
+        res[ii] = (res_T)table[index];
+    }
+}
+
+// *************************************************
 //       Hard sigmoid Activation
 // *************************************************
 template <class data_T, class res_T, typename CONFIG_T>
