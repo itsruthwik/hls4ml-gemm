@@ -4,6 +4,18 @@ import re
 import yaml
 
 
+class _TolerantSafeLoader(yaml.SafeLoader):
+    """SafeLoader that ignores hls4ml's custom YAML tags (e.g. ``!keras_model``).
+
+    ``hls4ml_config.yml`` serializes the source model under a custom tag; the report parsers
+    only need scalar project settings (ProjectDir/ProjectName), so tolerate any unknown tag
+    rather than crashing ``build()`` after a successful run.
+    """
+
+
+_TolerantSafeLoader.add_multi_constructor('', lambda loader, tag_suffix, node: None)
+
+
 def read_catapult_report(hls_dir, full_report=False):
     if not os.path.exists(hls_dir):
         print(f'Path {hls_dir} does not exist. Exiting.')
@@ -135,9 +147,10 @@ def parse_catapult_report(output_dir):
 
     # Read the YAML config file to determine the project settings
     with open(output_dir + '/hls4ml_config.yml') as yfile:
-        ydata = yaml.safe_load(yfile)
+        ydata = yaml.load(yfile, Loader=_TolerantSafeLoader)
 
-    if ydata['ProjectDir'] is not None:
+    # hls4ml_config.yml carries ProjectName/OutputDir, not ProjectDir; fall back by convention.
+    if ydata.get('ProjectDir') is not None:
         ProjectDir = ydata['ProjectDir']
     else:
         ProjectDir = ydata['ProjectName'] + '_prj'
@@ -210,18 +223,20 @@ def parse_catapult_report(output_dir):
     else:
         print('Timing report not found.')
 
-    latest_prj_dir = get_latest_project_prj_directory(output_dir, ProjectDir)
-    latest_ver_dir = get_latest_project_version_directory(latest_prj_dir, ProjectName)
-    file_path = os.path.join(latest_ver_dir, 'nnet_layer_results.txt')
-    print('Results in nnet_layer_results.txt from:', file_path)
-
-    # Initialize the array
+    # Per-layer QOFR is only emitted by a synthesis flow; guard it so a csim-only build
+    # (no project version dir / no nnet_layer_results.txt) still returns the report cleanly.
     report['PerLayerQOFR'] = []
-    # Open the file and read its contents
-    with open(file_path) as file:
-        # Read each line and append it to the list
-        for line in file:
-            report['PerLayerQOFR'].append(line.strip())  # strip() removes leading/trailing
+    try:
+        latest_prj_dir = get_latest_project_prj_directory(output_dir, ProjectDir)
+        latest_ver_dir = get_latest_project_version_directory(latest_prj_dir, ProjectName)
+        file_path = os.path.join(latest_ver_dir, 'nnet_layer_results.txt')
+    except FileNotFoundError:
+        file_path = None
+    if file_path is not None and os.path.isfile(file_path):
+        print('Results in nnet_layer_results.txt from:', file_path)
+        with open(file_path) as file:
+            for line in file:
+                report['PerLayerQOFR'].append(line.strip())
 
     return report
 
