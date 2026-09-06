@@ -21,10 +21,9 @@ from hgq.layers import QLayerNormalization
 test_path = Path(__file__).parent
 
 seq_len = 4
-dim = 16
 
 
-def _make_model():
+def _make_model(dim):
     with QuantizerConfigScope(f0=4, i0=4):
         inp = keras.layers.Input((seq_len, dim))
         out = QLayerNormalization(name='ln')(inp)
@@ -32,10 +31,15 @@ def _make_model():
     return model
 
 
+# dim is deliberately mixed power-of-2 (16) and non-power-of-2 (12, 24, 40): the LN kernel's
+# mean/var divide-by-dim is a compile-time-constant fixed-point divide, not a reciprocal
+# multiply, specifically so non-power-of-2 dims stay bit-exact against HGQ2's float Sum/dim
+# (see jojo-track/archive/hls4ml-gemm-layernorm-consistency, "SIMPLIFIED" 2026-09-04 entry).
+@pytest.mark.parametrize('dim', [12, 16, 24, 40])
 @pytest.mark.parametrize('io_type', ['io_parallel', 'io_stream'])
-def test_catapult_hgq2_layernorm_bit_exact(test_case_id, io_type):
+def test_catapult_hgq2_layernorm_bit_exact(test_case_id, io_type, dim):
     np.random.seed(0)
-    model = _make_model()
+    model = _make_model(dim)
     data = np.random.normal(0, 1, size=(50, seq_len, dim)).astype(np.float32)
 
     # Warm up the quantizers' calibrated ranges (EMA-based) before extracting the rsqrt LUT --
