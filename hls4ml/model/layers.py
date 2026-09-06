@@ -24,6 +24,8 @@ from hls4ml.model.types import (
     IntegerPrecisionType,
     NamedType,
     PrecisionType,
+    RoundingMode,
+    SaturationMode,
     Serializable,
     TensorVariable,
     UnspecifiedPrecisionType,
@@ -1271,6 +1273,18 @@ class LayerNormalization(Layer):
         WeightAttribute('bias'),
         TypeAttribute('scale'),
         TypeAttribute('bias'),
+        # Quantized-mean / centered-value types. For HGQ2-traced models these are overwritten
+        # with bit-exact types by the bit_exact optimizer pass (register_precision); this
+        # default only takes effect for a plain (non-HGQ2) Keras LayerNormalization, whose
+        # rsqrt table is built below rather than traced from a quantizer.
+        TypeAttribute(
+            'mean', default=FixedPrecisionType(18, 8, signed=True,
+                                              rounding_mode=RoundingMode.RND_CONV, saturation_mode=SaturationMode.SAT)
+        ),
+        TypeAttribute(
+            'norm', default=FixedPrecisionType(18, 8, signed=True,
+                                              rounding_mode=RoundingMode.RND_CONV, saturation_mode=SaturationMode.SAT)
+        ),
     ]
 
     def initialize(self):
@@ -1288,12 +1302,29 @@ class LayerNormalization(Layer):
         # quantized per-token variance. Registered as a table weight so it is
         # emitted and loaded like the other coefficient tables.
         rsqrt_table = self.get_attr('rsqrt_table_data')
-        if rsqrt_table is not None:
-            self.set_attr('table_size', int(len(rsqrt_table)))
-            self.add_weights_variable(
-                name='rsqrt_table', var_name='rsqrt{index}', data=rsqrt_table,
-                type_name='rsqrt_table_t', precision=self.get_attr('rsqrt_table_t'),
-            )
+        rsqrt_table_t = self.get_attr('rsqrt_table_t')
+        if rsqrt_table is None:
+            # Plain (non-HGQ2) Keras LayerNormalization: no quantized LUT was traced from the
+            # model, so build a float table here from the configured table_size /
+            # table_range_power2 / epsilon, the same LUT-generation idiom as the other
+            # nnet_utils tables (e.g. softmax's exp table). Address `index` maps to variance
+            # `index / 2**rsqrt_addr_f`, so rsqrt_addr_f is derived to make the table span
+            # [0, 2**table_range_power2) -- this is the same expression the config template
+            # feeds to the kernel as CONFIG_T::rsqrt_addr_f, so csim addressing matches exactly.
+            table_size = int(self.get_attr('table_size'))
+            table_range_power2 = int(self.get_attr('table_range_power2', 0))
+            rsqrt_addr_f = int(np.ceil(np.log2(table_size))) - table_range_power2
+            self.set_attr('rsqrt_addr_f', rsqrt_addr_f)
+            epsilon = 10.0 ** (-int(self.get_attr('epsilon_power_of_10', 3)))
+            var = np.arange(table_size, dtype=np.float64) / (2.0**rsqrt_addr_f)
+            rsqrt_table = 1.0 / np.sqrt(var + epsilon)
+            _table_t = self.get_attr('table_t')
+            rsqrt_table_t = getattr(_table_t, 'precision', _table_t)
+        self.set_attr('table_size', int(len(rsqrt_table)))
+        self.add_weights_variable(
+            name='rsqrt_table', var_name='rsqrt{index}', data=rsqrt_table,
+            type_name='rsqrt_table_t', precision=rsqrt_table_t,
+        )
 
 
 class Merge(Layer):

@@ -2,7 +2,16 @@ from math import ceil, log2
 
 from hls4ml.backends.backend import get_backend
 from hls4ml.backends.template import FunctionCallTemplate, LayerConfigTemplate
-from hls4ml.model.layers import Activation, BatchNormalization, Dense, HardActivation, ParametrizedActivation, PReLU, Softmax
+from hls4ml.model.layers import (
+    Activation,
+    BatchNormalization,
+    Dense,
+    HardActivation,
+    LayerNormalization,
+    ParametrizedActivation,
+    PReLU,
+    Softmax,
+)
 from hls4ml.model.optimizer.passes.hgq_proxy_model import UnaryLUT
 
 # Dense templates
@@ -118,6 +127,69 @@ class BatchNormalizationFunctionTemplate(FunctionCallTemplate):
         params = self._default_function_params(node)
         params['scale'] = node.get_weights('scale').name
         params['bias'] = node.get_weights('bias').name
+
+        return self.template.format(**params)
+
+
+# LayerNormalization templates
+
+layernorm_config_template = """struct config{index} : nnet::layernorm_config {{
+    static const unsigned n_in = {n_in};
+    static const unsigned seq_len = {seq_len};
+    static const unsigned axis = {axis};
+    static const unsigned rsqrt_addr_f = {rsqrt_addr_f};
+    static const unsigned table_size = {table_size};
+    typedef {accum_t.name} accum_t;
+    typedef {bias_t.name} bias_t;
+    typedef {scale_t.name} scale_t;
+    typedef {rsqrt_table_t.name} table_t;
+    typedef {mean_t} mean_t;
+    typedef {norm_t} norm_t;
+    static const unsigned io_type = nnet::{iotype};
+    static const unsigned reuse_factor = {reuse};
+    template<class x_T, class y_T>
+    using product = nnet::product::{product_type}<x_T, y_T>;
+}};\n"""
+
+layernorm_function_template = (
+    'nnet::layernormalize<{input_t}, {output_t}, {config}>({input}, {output}, {scale}, {bias}, {rsqrt_table});'
+)
+
+layernorm_include_list = ['nnet_utils/nnet_layernorm.h', 'nnet_utils/nnet_layernorm_stream.h']
+
+
+class LayerNormalizationConfigTemplate(LayerConfigTemplate):
+    def __init__(self):
+        super().__init__(LayerNormalization)
+        self.template = layernorm_config_template
+
+    def format(self, node):
+        params = self._default_config_params(node)
+        params['n_in'] = node.get_input_variable().size_cpp()
+        params['product_type'] = get_backend('catapult').product_type(
+            node.get_input_variable().type.precision, node.get_weights('scale').type.precision
+        )
+        params['rsqrt_table_t'] = node.get_weights('rsqrt_table').type
+        params['table_size'] = node.get_attr('table_size')
+        params['rsqrt_addr_f'] = node.get_attr('rsqrt_addr_f')
+        _mean_t = node.get_attr('mean_t')
+        params['mean_t'] = getattr(_mean_t, 'precision', _mean_t).definition_cpp()
+        _norm_t = node.get_attr('norm_t')
+        params['norm_t'] = getattr(_norm_t, 'precision', _norm_t).definition_cpp()
+
+        return self.template.format(**params)
+
+
+class LayerNormalizationFunctionTemplate(FunctionCallTemplate):
+    def __init__(self):
+        super().__init__(LayerNormalization, include_header=layernorm_include_list)
+        self.template = layernorm_function_template
+
+    def format(self, node):
+        params = self._default_function_params(node)
+        params['scale'] = node.get_weights('scale').name
+        params['bias'] = node.get_weights('bias').name
+        params['rsqrt_table'] = node.get_weights('rsqrt_table').name
 
         return self.template.format(**params)
 

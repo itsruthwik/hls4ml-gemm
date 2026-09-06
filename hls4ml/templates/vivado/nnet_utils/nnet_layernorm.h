@@ -83,7 +83,13 @@ LAYERNORM_1D_VAR:
 
     // HGQ2 address: quantize the variance to rsqrt_addr_f fractional bits (round),
     // then saturate into the unsigned table range [0, table_size).
-    int index = (int)(var * (typename CONFIG_T::accum_t)(1 << CONFIG_T::rsqrt_addr_f) + (typename CONFIG_T::accum_t)0.5);
+    // The scale-by-2^rsqrt_addr_f must NOT be done in accum_t: accum_t's integer width is sized
+    // for the LN reduction (sum/variance), which is independent of table_size, so for a large
+    // table (e.g. table_size=4096 -> 2^12) a narrow accum_t (e.g. ap_fixed<14,4>) saturates the
+    // constant 2^rsqrt_addr_f to its max representable value and silently corrupts every index.
+    // Route the address arithmetic through a dedicated wide type instead.
+    ap_fixed<64, 32> index_val = (ap_fixed<64, 32>)var * (ap_fixed<64, 32>)(1 << CONFIG_T::rsqrt_addr_f) + (ap_fixed<64, 32>)0.5;
+    int index = (int)index_val;
     if (index < 0)
         index = 0;
     if (index > (int)CONFIG_T::table_size - 1)
