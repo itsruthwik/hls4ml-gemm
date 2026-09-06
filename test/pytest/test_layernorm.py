@@ -77,11 +77,7 @@ def test_layernorm_accuracy(test_case_id, model, data, backend):
     # Predict
     y_keras = model.predict(data).flatten()
     y_hls = hls_model.predict(data).flatten()
-    # atol is loosened vs the ap_fixed default table_size (4096): a plain (non-HGQ2) LN builds
-    # its rsqrt LUT uniformly in variance-space, which is imprecise for the rare near-zero-
-    # variance token (steep 1/sqrt curve there) -- an inherent LUT-granularity effect, not a
-    # kernel bug (see the bit-exact HGQ2 test for the exact-LUT case).
-    np.testing.assert_allclose(y_keras, y_hls, rtol=0, atol=2e-1, verbose=True)
+    np.testing.assert_allclose(y_keras, y_hls, rtol=0, atol=5e-2, verbose=True)
 
 
 @pytest.mark.parametrize('backend', ['Vivado', 'Vitis', 'Catapult'])
@@ -100,4 +96,32 @@ def test_layernorm_no_center_scale(test_case_id, data, backend):
 
     y_keras = model.predict(data)
     y_hls = hls_model.predict(data).reshape(y_keras.shape)
-    np.testing.assert_allclose(y_keras, y_hls, rtol=0, atol=2e-1, verbose=True)
+    np.testing.assert_allclose(y_keras, y_hls, rtol=0, atol=5e-2, verbose=True)
+
+
+@pytest.mark.parametrize('backend', ['Vivado', 'Vitis', 'Catapult'])
+def test_layernorm_table_range_power2_direction(test_case_id, custom_epsilon_model, backend):
+    """table_range_power2 must widen the addressed variance range in the upstream direction:
+    rsqrt_addr_f = ceil(log2(table_size)) + table_range_power2 (matching the pre-HGQ2 kernel's
+    own table builder, init_invert_sqr_table: max_val = 2**-table_range_power2). A flipped sign
+    would shrink the range instead of growing it."""
+    config = hls4ml.utils.config_from_keras_model(custom_epsilon_model, granularity='name', backend=backend)
+    output_dir = str(test_root_path / test_case_id)
+    hls_model = hls4ml.converters.convert_from_keras_model(
+        custom_epsilon_model, backend=backend, hls_config=config, io_type='io_parallel', output_dir=output_dir
+    )
+    hls_model.write()
+    hls_layer = list(hls_model.get_layers())[1]
+    table_size = hls_layer.attributes['table_size']
+    base_addr_f = hls_layer.attributes['rsqrt_addr_f']
+    assert base_addr_f == int(np.ceil(np.log2(table_size)))
+
+    config2 = hls4ml.utils.config_from_keras_model(custom_epsilon_model, granularity='name', backend=backend)
+    config2['LayerName']['layer_normalization']['TableRangePower2'] = 2
+    output_dir2 = str(test_root_path / (test_case_id + '_wide'))
+    hls_model2 = hls4ml.converters.convert_from_keras_model(
+        custom_epsilon_model, backend=backend, hls_config=config2, io_type='io_parallel', output_dir=output_dir2
+    )
+    hls_model2.write()
+    hls_layer2 = list(hls_model2.get_layers())[1]
+    assert hls_layer2.attributes['rsqrt_addr_f'] == base_addr_f + 2

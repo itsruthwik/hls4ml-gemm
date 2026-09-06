@@ -61,16 +61,24 @@ void layernorm_1d(data_T data[CONFIG_T::n_in / CONFIG_T::seq_len], res_T res[CON
 
     //#pragma HLS ARRAY_PARTITION variable=data_diff complete
 
+    // A compile-time-constant reciprocal multiply, not a `/(int)dim` divide: ap_fixed's (and
+    // ac_fixed's) division operator was measured (empirically, not by inspection) to truncate
+    // its internal quotient BEFORE applying the destination type's rounding mode, so a narrow
+    // accum_t (e.g. the plain-LayerNorm default) silently loses up to 1 LSB versus true
+    // round-to-nearest -- fatal when the variance itself is only a few LSBs (small-variance
+    // tokens), since the rsqrt curve is steep there. Multiplying by the exact reciprocal
+    // instead computes the full product before the single rounding step, matching the
+    // original (pre-bit-exact) kernel's `product(sum_cache, k_inv)` idiom and the Vivado
+    // kernel bit-for-bit. (k_inv is exact for power-of-2 dim; for other dims it is the same
+    // one-ULP-of-the-reciprocal error the original kernel always had, which
+    // register_precision's accum_t headroom already covers for the HGQ2 path.)
+    const typename CONFIG_T::accum_t k_inv = (typename CONFIG_T::accum_t)(1.0 / dim);
+
 LAYERNORM_1D_SUM:
     for (int i = 0; i < dim; ++i) {
         sum_cache += static_cast<typename CONFIG_T::accum_t>(data[i]);
     }
-    // Divide by dim: dim is a compile-time constant, so HLS lowers this fixed-point divide to a
-    // multiply-by-reciprocal + shift (no divider, no float). Dividing rounds the QUOTIENT to
-    // accum_t (error ~2^-accum_f, unscaled), which tracks HGQ2's float Sum/dim; a fixed 1/dim
-    // reciprocal-multiply instead rounds the reciprocal (error ~Sum*2^-accum_f) and was what made
-    // the rare per-token rsqrt index flip. Same idiom as average pooling's `y /= length`.
-    mean = sum_cache / (int)dim;
+    mean = sum_cache * k_inv;
     // Quantize the mean to HGQ2's mean_q precision so (x - mean) is bit-exact to HGQ2.
     typename CONFIG_T::mean_t mean_q = mean;
 
@@ -80,7 +88,7 @@ LAYERNORM_1D_VAR:
         diff = data_diff[i] * data_diff[i];
         sum_cache2 += diff;
     }
-    var = sum_cache2 / (int)dim;
+    var = sum_cache2 * k_inv;
 
     // HGQ2 address: quantize the variance to rsqrt_addr_f fractional bits (round),
     // then saturate into the unsigned table range [0, table_size).
