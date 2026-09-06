@@ -40,14 +40,17 @@ def test_gemm_ip_header_contract_emits_flags(tmp_path):
     
     tcl_content = build_tcl_path.read_text()
     
-    # We should have the marker macro
+    # We should have the marker macro (emitted inside the build-time package-presence guard
+    # so a package-free csim omits it and falls back to the behavioral model).
     assert '-DGEMM_IP_HEADER' in tcl_content
     # We should NOT have a value assignment like -DGEMM_IP_HEADER="..."
     assert '-DGEMM_IP_HEADER=' not in tcl_content
     assert '-DGEMM_IP_HEADER\\=' not in tcl_content
-    
-    # We should have the include path
-    assert f"-I{dummy_pkg.resolve()}" in tcl_content
+
+    # The package dir is resolved into a tcl var (via [file normalize {<path>}]) and the
+    # include is -I$_gemm_pkg_dir; assert the path is present and the var-based include is used.
+    assert str(dummy_pkg.resolve()) in tcl_content
+    assert '-I$_gemm_pkg_dir' in tcl_content
 
 def test_gemm_ip_header_not_emitted_for_native(tmp_path):
     """

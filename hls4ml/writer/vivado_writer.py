@@ -1183,50 +1183,60 @@ class VivadoWriter(Writer):
                 pass
 
         uses_gemm_ip = self._uses_gemm_ip(model)
-        extra_cflags = ''
-        # The one tcl line hls4ml sources to bring the GEMM IP into the project. hls4ml
-        # stays target-blind: it only provides the include path + the source hook, and
-        # gemm-ip-gen's per-target gemm_ip_sources.tcl decides HOW the IP enters the
-        # build — `add_files -blackbox <wrapper.json>` for an RTL-blackbox target, or a
-        # header-only no-op for a behavioral-HLS (plain Vitis) target. Either way the
-        # firmware includes gemm_ip_combined.h from the include path below.
-        sources_tcl_line = ''
 
-        if uses_gemm_ip:
-            extra_cflags += ' -DBLACKBOX_FLOW -DGEMM_IP_HEADER'
-            if gemm_ip_pkg:
-                # Explicit package: absolute include path, and source the package's
-                # sources tcl directly from its (absolute) location.
-                gemm_ip_pkg_path = Path(gemm_ip_pkg).resolve()
-                extra_cflags += f' -I{gemm_ip_pkg_path}'
-                sources_tcl_line = 'source {' + str(gemm_ip_pkg_path / 'gemm_ip_sources.tcl') + '}'
-            else:
-                # No GemmIpPackage configured: fall back to the fixed-location convention
-                # (mirrors Catapult). gemm-ip-gen writes its package to <project>/gemm_pkg
-                # after hls4ml generates the project, so bake in an include path pointing
-                # there. It is referenced relocatably through the tcl's $tcldir (the build
-                # script's directory == the project dir) and normalized to an absolute path,
-                # so the include still resolves from the nested csim/cosim solution dir the
-                # HLS tool compiles from. This lets tool-driven csim find gemm_ip_combined.h
-                # without a per-config GemmIpPackage.
-                extra_cflags += ' -I[file normalize $tcldir/gemm_pkg]'
-                # Source the target's sources tcl from the same fixed location, relocatably
-                # through $tcldir so it resolves from the nested csim/cosim solution dir.
-                sources_tcl_line = 'source [file normalize $tcldir/gemm_pkg/gemm_ip_sources.tcl]'
+        # GEMM IP: whether the gemm-ip-gen package is used is decided AT BUILD TIME from the
+        # package dir's existence, not baked at write time. This honors the header contract in
+        # nnet_gemm_ip.h: with a package -> -DGEMM_IP_HEADER pulls in the packaged cores (synth
+        # + cosim + csim); WITHOUT one, GEMM_IP_HEADER is left undefined so a package-free
+        # csim compiles the behavioral model (the `#else` branch). Only synth/cosim genuinely
+        # need the package, so only those error when it is absent.
+        #
+        # hls4ml stays target-blind: it just provides the include path + the source hook, and
+        # gemm-ip-gen's per-target gemm_ip_sources.tcl decides HOW the IP enters the build
+        # (RTL-blackbox `add_files -blackbox`, or a header-only no-op for a behavioral-HLS
+        # target). $tcldir is the build script's dir (== project dir); normalize to absolute so
+        # the include resolves from the nested csim/cosim solution dir the HLS tool builds from.
+        if gemm_ip_pkg:
+            pkg_dir_expr = '[file normalize {' + str(Path(gemm_ip_pkg).resolve()) + '}]'
+        else:
+            pkg_dir_expr = '[file normalize $tcldir/gemm_pkg]'
+
+        preamble = (
+            f'set _gemm_pkg_dir {pkg_dir_expr}\n'
+            'if { [file isdirectory $_gemm_pkg_dir] } {\n'
+            '    set _gemm_cflags " -DBLACKBOX_FLOW -DGEMM_IP_HEADER -I$_gemm_pkg_dir"\n'
+            '    set _gemm_has_pkg 1\n'
+            '} else {\n'
+            '    set _gemm_cflags ""\n'
+            '    set _gemm_has_pkg 0\n'
+            '}\n'
+        )
+        blackbox_block = (
+            'if { !$_gemm_has_pkg && ($opt(synth) || $opt(cosim)) } {\n'
+            '    puts "ERROR: GEMM IP is used but $_gemm_pkg_dir was not found. '
+            'Run gemm-ip-gen before synth/cosim."\n'
+            '    exit 1\n'
+            '}\n'
+            'if { $_gemm_has_pkg } {\n'
+            '    source $_gemm_pkg_dir/gemm_ip_sources.tcl\n'
+            '    puts "\\[hls4ml\\] GEMM IP package resolved at $_gemm_pkg_dir"\n'
+            '} else {\n'
+            '    puts "\\[hls4ml\\] No GEMM IP package found; csim uses the behavioral model '
+            '(synth/cosim require the package)."\n'
+            '}\n'
+        )
 
         with open(srcpath) as src, open(dstpath, 'w') as dst:
             for line in src:
                 if 'add_files firmware/${project_name}.cpp -cflags "-std=c++0x' in line:
-                    if extra_cflags:
-                        line = line.replace(
-                            '-cflags "-std=c++0x',
-                            f'-cflags "-std=c++0x{extra_cflags}'
-                        )
+                    if uses_gemm_ip:
+                        dst.write(preamble)
+                        line = line.replace('-I firmware"', '-I firmware$_gemm_cflags"')
                     dst.write(line)
                 elif '#hls-fpga-machine-learning insert blackboxes' in line:
                     dst.write(line)
-                    if sources_tcl_line:
-                        dst.write(sources_tcl_line + '\n')
+                    if uses_gemm_ip:
+                        dst.write(blackbox_block)
                 else:
                     dst.write(line)
 
