@@ -14,7 +14,7 @@ class Gemm(Layer):
     (batched GEMMs, e.g. one per attention head). Together with IOType they select
     among the four gemm_* signatures.
     """
-    # weight/bias are NOT required: the weightless path (Dense/Conv/EinsumDense) passes
+    # weight/bias are NOT required: the const_weights path (Dense/Conv/EinsumDense) passes
     # them as data and initialize() materializes the variables; the two-operand path
     # (attention QK^T / A.V) has no constant weight at all. Only accum is always needed.
     _expected_attributes = [
@@ -439,7 +439,7 @@ class LowerEinsumToGemm(OptimizerPass):
         return self._lower_einsum(model, node)
 
     def _lower_einsum_dense(self, model, node):
-        """EinsumDense (constant kernel) -> weightless Gemm.
+        """EinsumDense (constant kernel) -> const_weights Gemm.
 
         Mirrors ReplaceDenseGemm. The kernel is already [n_inplace, K, N] from
         init_einsum_dense; the writer packs it as [K, N] keyed on _original_type
@@ -463,7 +463,7 @@ class LowerEinsumToGemm(OptimizerPass):
             )
 
         # Bias shape decides the lowering. init_einsum_dense broadcasts the bias to
-        # the full output (I, L0, L1); the weightless GEMM IP bias PORT is one value
+        # the full output (I, L0, L1); the const_weights GEMM IP bias PORT is one value
         # per column (L1), broadcast across the L0 rows. If the bias is constant along
         # the L0 (data/row) axis it collapses to that per-column port with no cost. If
         # it varies along L0 (EinsumDense bias_axes touches the data free axis), the
@@ -634,7 +634,7 @@ class ValidateGemm(OptimizerPass):
             )
 
     def _check_stream_beat_carries_full_k(self, node, io_type):
-        # io_stream weightless Dense: the generated core consumes A one beat per
+        # io_stream const_weights Dense: the generated core consumes A one beat per
         # read and requires each beat to carry the whole K-row (a_beat_T::size ==
         # gemm_k). A producer whose beat is narrower than gemm_k (e.g. a Conv/Pool
         # output streamed over several beats, then Flatten -> Dense) violates this.
@@ -652,7 +652,7 @@ class ValidateGemm(OptimizerPass):
                 f"Gemm '{node.name}': io_stream GEMM-IP requires one beat to carry the full "
                 f"K-row (beat width == gemm_k), but the input beat width is {beat} while "
                 f"gemm_k is {gemm_k}. This happens when a multi-beat activation (e.g. a "
-                f"Conv/Pool output flattened into this Dense) feeds the weightless GEMM-IP. "
+                f"Conv/Pool output flattened into this Dense) feeds the const_weights GEMM-IP. "
                 f"Set a non-GEMM Strategy (e.g. Latency/Resource) on layer '{node.name}' so it "
                 f"uses the stock io_stream Dense, which gathers the beats itself."
             )

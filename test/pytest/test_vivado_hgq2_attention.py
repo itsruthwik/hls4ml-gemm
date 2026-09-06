@@ -85,7 +85,7 @@ def test_vivado_hgq2_attention_second_operand_row_major(backend, tmp_path):
 
     hls_model.compile()
 
-    # The two-operand (QK^T / A.V) configs must declare row-major B; the weightless projection
+    # The two-operand (QK^T / A.V) configs must declare row-major B; the const_weights projection
     # configs have no b_row_major field. 2 QK^T + 2 A.V = 4 two-operand configs (2 heads).
     params = (tmp_path / f'mha_rm_{backend}' / 'firmware' / 'parameters.h').read_text()
     assert params.count('b_row_major = true') >= 4, 'expected >=4 row-major two-operand configs'

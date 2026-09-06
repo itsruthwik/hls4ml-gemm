@@ -163,9 +163,9 @@ np.testing.assert_allclose(hls_prediction, keras_prediction, atol=0.35, rtol=0.0
     parameters = (output_dir / 'firmware/parameters.h').read_text()
     top = (output_dir / 'firmware/myproject.cpp').read_text()
     # Full attention GEMM: LowerEinsumToGemm turns the Q/K/V/O projections into
-    # weightless Gemm and the QK^T / A.V einsums into two-operand Gemm, inserting
+    # const_weights Gemm and the QK^T / A.V einsums into two-operand Gemm, inserting
     # Transpose nodes for the non-identity operand/output permutations.
-    assert 'nnet::gemm_array_weightless<' in top  # projections
+    assert 'nnet::gemm_array_const_weights<' in top  # projections
     assert 'nnet::gemm_array<' in top             # two-operand QK^T / A.V
     assert 'nnet::transpose_' in top              # inserted operand/output transposes
     assert 'nnet::einsum_gemm_ip<' not in top
@@ -175,22 +175,22 @@ np.testing.assert_allclose(hls_prediction, keras_prediction, atol=0.35, rtol=0.0
     gemm_entries = [entry for entry in gemm_config.values() if entry['type'] == 'Gemm']
     assert len(gemm_entries) == 6  # 4 projections + QK^T + A.V
     assert {entry['interface'] for entry in gemm_entries} == {'array'}
-    # 4 weightless projections + 2 two-operand matmuls.
-    weightless = [e for e in gemm_entries if e['weights_in_core']]
+    # 4 const_weights projections + 2 two-operand matmuls.
+    const_weights = [e for e in gemm_entries if e['weights_in_core']]
     two_operand = [e for e in gemm_entries if not e['weights_in_core']]
-    assert len(weightless) == 4
+    assert len(const_weights) == 4
     assert len(two_operand) == 2
     # bias_in_core contract (consumed by gemm-ip-gen): the IP owns the bias adder
     # only for the per-column weight-stationary projections; two-operand matmuls
     # carry no bias, so the port is off.
-    assert all(e['bias_in_core'] is True for e in weightless)
+    assert all(e['bias_in_core'] is True for e in const_weights)
     assert all(e['bias_in_core'] is False for e in two_operand)
 
 
 def test_catapult_hgq2_attention_io_stream_gemm_ip_codegen_and_csim(tmp_path):
     # The headline capability: io_stream MHA on the GEMM path. LowerEinsumToGemm
-    # turns the projections into weightless Gemm and QK^T / A.V into two-operand
-    # Gemm; under io_stream the projections become gemm_stream_weightless, the
+    # turns the projections into const_weights Gemm and QK^T / A.V into two-operand
+    # Gemm; under io_stream the projections become gemm_stream_const_weights, the
     # matmuls gemm_stream, and the inserted operand/output Transposes stream via
     # nnet::transpose_stream (full reorder buffer, reusing the io_parallel index_map).
     output_dir = tmp_path / 'catapult_hgq2_mha_io_stream_gemm_ip_prj'
@@ -237,7 +237,7 @@ assert np.std(hls_prediction) > 1e-3
 
     top = (output_dir / 'firmware/myproject.cpp').read_text()
     # Streaming GEMM cells + the streaming transpose, and NO array-interface leak.
-    assert 'nnet::gemm_stream_weightless<' in top  # projections
+    assert 'nnet::gemm_stream_const_weights<' in top  # projections
     assert 'nnet::gemm_stream<' in top             # two-operand QK^T / A.V
     assert 'nnet::transpose_stream<' in top        # inserted operand/output transposes
     assert 'nnet::gemm_array' not in top
@@ -300,15 +300,15 @@ np.testing.assert_allclose(hls_prediction, keras_prediction, atol=0.35, rtol=0.0
 
     parameters = (output_dir / 'firmware/parameters.h').read_text()
     top = (output_dir / 'firmware/myproject.cpp').read_text()
-    # Projections are lowered by LowerEinsumToGemm to weightless Gemm nodes; io_parallel
+    # Projections are lowered by LowerEinsumToGemm to const_weights Gemm nodes; io_parallel
     # takes the array entry.
-    assert 'nnet::gemm_array_weightless<' in top
+    assert 'nnet::gemm_array_const_weights<' in top
     assert 'nnet::einsum_dense_gemm_ip<' not in top
     assert '_gemm_cols.h' in parameters
 
     with open(output_dir / 'gemm_config.json') as f:
         gemm_config = json.load(f)
-    # The four Q/K/V/O projections are now unified Gemm nodes (weightless, array interface).
+    # The four Q/K/V/O projections are now unified Gemm nodes (const_weights, array interface).
     projection_entries = [entry for entry in gemm_config.values() if entry['type'] == 'Gemm']
     assert len(projection_entries) == 4
     assert {entry['gemm_m'] for entry in projection_entries} == {4}
@@ -385,13 +385,13 @@ assert np.std(hls_prediction) > 1e-3
         # every head-move transpose is gone.
         assert top.count('nnet::transpose_stream<') == 2
         assert 'nnet::gemm_stream<' in top          # per-head QK^T / A.V
-        assert 'nnet::gemm_stream_weightless<' in top  # projections
+        assert 'nnet::gemm_stream_const_weights<' in top  # projections
 
     with open(output_dir / 'gemm_config.json') as f:
         gemm_config = json.load(f)
     gemm_entries = [entry for entry in gemm_config.values() if entry['type'] == 'Gemm']
     assert len(gemm_entries) == 8  # 4 projections + 2 QK^T + 2 A.V
-    weightless = [e for e in gemm_entries if e['weights_in_core']]
+    const_weights = [e for e in gemm_entries if e['weights_in_core']]
     two_operand = [e for e in gemm_entries if not e['weights_in_core']]
-    assert len(weightless) == 4   # Q/K/V/O projections
+    assert len(const_weights) == 4   # Q/K/V/O projections
     assert len(two_operand) == 4  # 2 heads x (QK^T + A.V)

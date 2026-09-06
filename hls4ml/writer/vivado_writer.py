@@ -50,7 +50,7 @@ class VivadoWriter(Writer):
             'has_bias': bool(node.get_attr('has_bias', True)),
             # Two-operand only: the actual B beat layout the emitted call uses. row_major =
             # N-wide beats (one contraction row/beat, mvau IP); col_major = K-wide beats
-            # (one output column/beat, default). Weightless nodes are always False here.
+            # (one output column/beat, default). Const_weights nodes are always False here.
             'second_operand_row_major': bool(node.get_attr('second_operand_row_major', False)),
             'second_operand_beat_order': (
                 'row_major' if node.get_attr('second_operand_row_major', False) else 'col_major'
@@ -154,7 +154,7 @@ class VivadoWriter(Writer):
                     'transpose_weights': use_gemm_ip
                     or node.model.config.get_layer_config_value(node, 'TransposeWeights', False),
                     # Weight-stationary: the external GEMM IP holds the packed
-                    # weights internally and hls4ml calls the weightless signature.
+                    # weights internally and hls4ml calls the const_weights signature.
                     'weights_in_core': bool(node.get_attr('weights_in_core', False)),
                     # Whether the IP itself should include the bias adder. True only
                     # for the per-column weight-stationary case, where hls4ml feeds
@@ -707,7 +707,7 @@ class VivadoWriter(Writer):
                     self.print_gemm_ip_weight_beats_to_cpp(weights, layer, model.config.get_output_dir())
                     if bool(layer.get_attr('weights_in_core', False)):
                         # Weight-stationary also emits raw-bits .dat for the external
-                        # generator to bake into the synth weightless core.
+                        # generator to bake into the synth const_weights core.
                         from hls4ml.writer.gemm_ip_weights import write_gemm_ip_weight_dat
 
                         write_gemm_ip_weight_dat(weights, layer, model.config.get_output_dir())

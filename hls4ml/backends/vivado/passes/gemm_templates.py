@@ -77,7 +77,7 @@ class Im2ColFunctionTemplate(FunctionCallTemplate):
 # GemmStream templates (Dense GEMM IP — row/column streaming)
 # ---------------------------------------------------------------------------
 
-gemm_weightless_config_template = """struct config{index} : nnet::gemm_config {{
+gemm_const_weights_config_template = """struct config{index} : nnet::gemm_config {{
     static const unsigned n_in = {n_in};
     static const unsigned n_out = {n_out};
     static const unsigned n_patches = {n_patches};
@@ -98,7 +98,7 @@ gemm_weightless_config_template = """struct config{index} : nnet::gemm_config {{
 }};\n"""
 
 gemm_stream_packed_function_template = (
-    'nnet::gemm_stream_weightless<{input_t}, {output_t}, {config}>'
+    'nnet::gemm_stream_const_weights<{input_t}, {output_t}, {config}>'
     '({input}, {output}, {b});'
 )
 
@@ -121,7 +121,7 @@ gemm_array_function_template = """
             }}
         }}
 
-        nnet::gemm_array_weightless<a_row_t, {bias_t}, res_row_t, config{index}>(
+        nnet::gemm_array_const_weights<a_row_t, {bias_t}, res_row_t, config{index}>(
             a_rows, result_rows, {b}
         );
 
@@ -163,7 +163,7 @@ gemm_array_row_bias_function_template = """
             }}
         }}
 
-        nnet::gemm_array_weightless<a_row_t, {bias_t}, res_row_t, config{index}>(
+        nnet::gemm_array_const_weights<a_row_t, {bias_t}, res_row_t, config{index}>(
             a_rows, result_rows, {output}_zero_bias
         );
 
@@ -302,7 +302,7 @@ def _format_two_operand(node):
 
 def _inject_weight_rom_accessor(cfg, node):
     """Embed the const-weight ROM accessor into a GEMM config struct so the
-    weightless cores can source the constant operand from the config (matching
+    const_weights cores can source the constant operand from the config (matching
     Catapult), keeping the weight off the call signature. The ROM header is
     #include'd above the config in parameters.h, so unqualified lookup resolves here.
     """
@@ -319,13 +319,13 @@ def _inject_weight_rom_accessor(cfg, node):
 class GemmConfigTemplate(GemmIPConfigTemplateBase):
     """One config for the unified Gemm node (Vivado). Uses the gemm_config
     base for both interfaces (the array path tolerates the inherited defaults).
-    Embeds the weight-ROM accessor so the weightless cores source constant weights
+    Embeds the weight-ROM accessor so the const_weights cores source constant weights
     from the config instead of the call site."""
     backend_name = 'vivado'
 
     def __init__(self):
         super().__init__(Gemm)
-        self.template = gemm_weightless_config_template
+        self.template = gemm_const_weights_config_template
 
     def format(self, node):
         if not node.get_attr('weights_in_core', True):
@@ -339,7 +339,7 @@ class GemmFunctionTemplate(FunctionCallTemplate):
     """One function template for the unified Gemm node (Vivado).
 
     Dispatches the 2x2 (IOType x weights_in_core) among the four gemm_* cores:
-    gemm_array_weightless / gemm_stream_weightless (const weight held by the IP) and
+    gemm_array_const_weights / gemm_stream_const_weights (const weight held by the IP) and
     gemm_array / gemm_stream (two activation operands, attention QK^T / A.V).
     """
 
@@ -450,7 +450,7 @@ struct config{index}_gemm : nnet::gemm_config {{
 }};\n"""
 
 # Row/column streaming fused conv: im2col emits one K-wide A row per output pixel,
-# then the weightless io_stream GEMM core (gemm_stream_weightless) contracts it against
+# then the const_weights io_stream GEMM core (gemm_stream_const_weights) contracts it against
 # the constant kernel columns sourced from the config ROM. One behavioral / synth / cosim
 # definition per the four-name contract in nnet_gemm_ip.h.
 im2col_gemm_stream_function_template = """
@@ -460,11 +460,11 @@ im2col_gemm_stream_function_template = """
         static hls::stream<a_row_t> activation_rows("activation_rows_{index}");
         #pragma HLS STREAM variable=activation_rows depth=2
 
-        // im2col emits one K-wide A row per output pixel; the weightless GEMM core
+        // im2col emits one K-wide A row per output pixel; the const_weights GEMM core
         // sources the constant kernel columns from the config ROM (no weight arg),
-        // matching the Dense/EinsumDense weightless path and Catapult's fused conv.
+        // matching the Dense/EinsumDense const_weights path and Catapult's fused conv.
         nnet::im2col_{n_dim}d_gemm_rows<{input_t}, a_row_t, config{index}_im2col>({input}, activation_rows);
-        nnet::gemm_stream_weightless<a_row_t, {result_t}, config{index}_gemm>(
+        nnet::gemm_stream_const_weights<a_row_t, {result_t}, config{index}_gemm>(
             activation_rows, {output}, {b}
         );
     }}
@@ -473,7 +473,7 @@ im2col_gemm_stream_function_template = """
 
 # io_parallel counterpart of the streaming fused template: the input is a flat
 # array, so an array-interface im2col materialises a_rows[gemm_m] (no hls::stream),
-# then the weightless array core is called.
+# then the const_weights array core is called.
 im2col_gemm_array_function_template = """
     {{
         typedef nnet::array<{input_t}, config{index}_gemm::gemm_k> a_row_t;
@@ -484,7 +484,7 @@ im2col_gemm_array_function_template = """
 
         nnet::im2col_{n_dim}d_gemm_rows_array<{input_t}, a_row_t, config{index}_im2col>({input}, a_rows);
 
-        nnet::gemm_array_weightless<a_row_t, {bias_t}, res_row_t, config{index}_gemm>(
+        nnet::gemm_array_const_weights<a_row_t, {bias_t}, res_row_t, config{index}_gemm>(
             a_rows, result_rows, {b}
         );
 
@@ -501,7 +501,7 @@ im2col_gemm_array_function_template = """
 
 class Im2ColGemmConfigTemplate(GemmIPConfigTemplateBase):
     # One config for the fused Im2ColGemm node (Vivado). Embeds the weight-ROM
-    # accessor into config{index}_gemm so the weightless core sources the constant
+    # accessor into config{index}_gemm so the const_weights core sources the constant
     # kernel from the config (the conv kernel is always in-core).
     backend_name = 'vivado'
 

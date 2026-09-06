@@ -719,7 +719,7 @@ class TestEinsumDenseGemmIpIOType:
     """EinsumDense GEMM-IP works on BOTH io_parallel and io_stream.
 
     The io_parallel-only restriction was lifted: io_stream EinsumDense GEMM-IP lowers
-    to a weightless Gemm and materializes through gemm_stream_weightless, at parity with
+    to a const_weights Gemm and materializes through gemm_stream_const_weights, at parity with
     Catapult. Only the row-varying-bias io_stream corner still fails loudly (the
     per-element bias-add is io_parallel-only), matching Catapult.
     """
@@ -771,15 +771,15 @@ class TestEinsumDenseGemmIpIOType:
 
 
 # ---------------------------------------------------------------------------
-# EinsumDense -> weightless Gemm lowering (Stage 2a)
+# EinsumDense -> const_weights Gemm lowering (Stage 2a)
 # ---------------------------------------------------------------------------
 
 class TestEinsumDenseLowering:
     """EinsumDense GEMM-IP lowers to a Gemm node in the IR (LowerEinsumToGemm).
 
     GEMM must live in the IR, not be emitted from the einsum template. The node is
-    rewritten to a weightless Gemm and materialized by the shared Gemm codegen, so
-    the generated top calls gemm_array_weightless and never einsum_dense_gemm_ip.
+    rewritten to a const_weights Gemm and materialized by the shared Gemm codegen, so
+    the generated top calls gemm_array_const_weights and never einsum_dense_gemm_ip.
     """
 
     @pytest.fixture(autouse=True)
@@ -818,11 +818,11 @@ class TestEinsumDenseLowering:
         assert not any('EinsumDense' in c for c in classes), 'EinsumDense should be lowered away'
         assert any(isinstance(n, Gemm) for n in hls_model.graph.values()), 'expected a Gemm node'
 
-    def test_einsum_dense_gemm_ip_emits_weightless_array_core(self):
+    def test_einsum_dense_gemm_ip_emits_const_weights_array_core(self):
         hls_model, out_dir = self._write_einsum_dense('ed_lower_core', bias_axes='d')
         hls_model.write()
         top = (self.tmp_path / 'ed_lower_core' / 'firmware' / 'myproject.cpp').read_text()
-        assert 'nnet::gemm_array_weightless<' in top
+        assert 'nnet::gemm_array_const_weights<' in top
         assert 'nnet::einsum_dense_gemm_ip<' not in top
 
     def test_per_column_bias_uses_plain_array_template(self):
@@ -845,7 +845,7 @@ class TestEinsumDenseLowering:
 @pytest.mark.parametrize('dim', [1, 2])
 def test_conv_gemm_ip_io_parallel_csim(backend, dim, tmp_path):
     """General Conv1D/2D GEMM-IP fuses to Im2ColGemm and csim-matches keras on io_parallel
-    (array im2col + gemm_array_weightless), at parity with the io_stream fused-conv path."""
+    (array im2col + gemm_array_const_weights), at parity with the io_stream fused-conv path."""
     import keras
 
     rng = np.random.default_rng(1)

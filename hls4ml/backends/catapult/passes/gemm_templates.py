@@ -61,7 +61,7 @@ class Im2ColFunctionTemplate(FunctionCallTemplate):
 # GemmStream templates (Dense GEMM IP — row/column streaming)
 # ---------------------------------------------------------------------------
 
-gemm_weightless_config_template = """struct config{index} : nnet::gemm_config {{
+gemm_const_weights_config_template = """struct config{index} : nnet::gemm_config {{
     static const unsigned n_in = {n_in};
     static const unsigned n_out = {n_out};
     static const unsigned n_patches = {n_patches};
@@ -77,12 +77,12 @@ gemm_weightless_config_template = """struct config{index} : nnet::gemm_config {{
 }};\n"""
 
 # The io_stream const-weight GEMM has exactly ONE signature: weight-stationary /
-# weightless. A SINGLE call for BOTH csim and synth — the overload (nnet_gemm_stream.h)
+# const_weights. A SINGLE call for BOTH csim and synth — the overload (nnet_gemm_stream.h)
 # branches internally: synth + GEMM_IP_HEADER → external weight-stationary IP; csim /
 # no package → native behavioral model sourcing weights from CONFIG_T::gemm_weight_cols()
 # (the ROM accessor injected into the config struct). No weights on the call site.
-gemm_stream_weightless_function_template = (
-    'nnet::gemm_stream_weightless<{input_t}, {output_t}, {config}>({input}, {output}, {b});'
+gemm_stream_const_weights_function_template = (
+    'nnet::gemm_stream_const_weights<{input_t}, {output_t}, {config}>({input}, {output}, {b});'
 )
 
 
@@ -201,14 +201,14 @@ class GemmConfigTemplate(GemmIPConfigTemplateBase):
 
     Uses the ``nnet::gemm_config`` base for both io_stream and io_parallel
     (the array path already inherited it via the shared im2col config). Embeds the
-    weight-ROM accessor so the WEIGHTLESS behavioral model (csim, no gemm-ip-gen)
+    weight-ROM accessor so the CONST_WEIGHTS behavioral model (csim, no gemm-ip-gen)
     can source constant weights without them appearing on the call signature.
     """
     backend_name = 'catapult'
 
     def __init__(self):
         super().__init__(Gemm)
-        self.template = gemm_weightless_config_template
+        self.template = gemm_const_weights_config_template
 
     def format(self, node):
         if not node.get_attr('weights_in_core', True):
@@ -294,7 +294,7 @@ class GemmFunctionTemplate(FunctionCallTemplate):
 
         if io_type == 'io_parallel':
             return gemm_array_function_template.format(**params)
-        return gemm_stream_weightless_function_template.format(**params)
+        return gemm_stream_const_weights_function_template.format(**params)
 
 
 gemm_array_function_template = """
@@ -313,7 +313,7 @@ gemm_array_function_template = """
             }}
         }}
 
-        nnet::gemm_array_weightless<a_row_t, {bias_t}, res_row_t, config{index}>(
+        nnet::gemm_array_const_weights<a_row_t, {bias_t}, res_row_t, config{index}>(
             a_rows, result_rows, {b}
         );
 
@@ -328,7 +328,7 @@ gemm_array_function_template = """
 """
 
 
-# io_parallel weightless GEMM with ROW-VARYING bias (EinsumDense whose bias_axes
+# io_parallel const_weights GEMM with ROW-VARYING bias (EinsumDense whose bias_axes
 # touches the data free axis). The IP bias PORT is one value per column, so feed it
 # ZERO and add the full per-element bias ({b} sized gemm_m*gemm_n) in the unpack.
 # The add is in the result (res_T) domain rather than accum_t — that keeps the four
@@ -354,7 +354,7 @@ gemm_array_row_bias_function_template = """
             }}
         }}
 
-        nnet::gemm_array_weightless<a_row_t, {bias_t}, res_row_t, config{index}>(
+        nnet::gemm_array_const_weights<a_row_t, {bias_t}, res_row_t, config{index}>(
             a_rows, result_rows, {output}_zero_bias
         );
 
@@ -416,7 +416,7 @@ im2col_gemm_stream_function_template = """
         #pragma hls_fifo_depth 2
         static ac_channel<a_row_t> activation_rows;
         nnet::im2col_{n_dim}d_gemm_rows<{input_t}, a_row_t, config{index}_im2col>({input}, activation_rows);
-        nnet::gemm_stream_weightless<a_row_t, {result_t}, config{index}_gemm>(
+        nnet::gemm_stream_const_weights<a_row_t, {result_t}, config{index}_gemm>(
             activation_rows, {output}, {b}
         );
     }}
@@ -426,7 +426,7 @@ im2col_gemm_stream_function_template = """
 class Im2ColGemmConfigTemplate(GemmIPConfigTemplateBase):
     # One config for the fused node, interface-agnostic (config{index}_im2col +
     # config{index}_gemm, the latter inheriting nnet::gemm_config). Embeds the
-    # weight-ROM accessor so the weightless csim model can source the constant kernel.
+    # weight-ROM accessor so the const_weights csim model can source the constant kernel.
     backend_name = 'catapult'
 
     def __init__(self):
@@ -440,7 +440,7 @@ class Im2ColGemmConfigTemplate(GemmIPConfigTemplateBase):
 # ---------------------------------------------------------------------------
 # io_parallel counterpart of the streaming fused template: the input is a flat
 # array, so an array-interface im2col materialises a_rows[gemm_m] (no ac_channel),
-# then the weightless ARRAY entry is called.
+# then the const_weights ARRAY entry is called.
 im2col_gemm_array_function_template = """
     {{
         typedef nnet::array<{input_t}, config{index}_gemm::gemm_k> a_row_t;
@@ -451,7 +451,7 @@ im2col_gemm_array_function_template = """
 
         nnet::im2col_{n_dim}d_gemm_rows_array<{input_t}, a_row_t, config{index}_im2col>({input}, a_rows);
 
-        nnet::gemm_array_weightless<a_row_t, {bias_t}, res_row_t, config{index}_gemm>(
+        nnet::gemm_array_const_weights<a_row_t, {bias_t}, res_row_t, config{index}_gemm>(
             a_rows, result_rows, {b}
         );
 
@@ -469,7 +469,7 @@ im2col_gemm_array_function_template = """
 class Im2ColGemmFunctionTemplate(FunctionCallTemplate):
     """One function template for the fused node — dispatches on IOType.
 
-    Conv's kernel is always constant (weights_in_core=True), so only the weightless
+    Conv's kernel is always constant (weights_in_core=True), so only the const_weights
     column is reached; IOType picks the streaming (ac_channel im2col rows) vs the
     array (materialised a_rows) fused path.
     """

@@ -30,14 +30,14 @@ struct gemm_config {
 #if !defined(__SYNTHESIS__)
 
 // ---------------------------------------------------------------------------
-// gemm_stream_weightless — io_stream, constant operand held by the IP
+// gemm_stream_const_weights — io_stream, constant operand held by the IP
 // (Dense / Conv / EinsumDense projections). No weight argument on the signature:
 // the columns come from the config ROM via CONFIG_T::gemm_weight_cols(). A streams in
 // one K-wide row per beat (gemm_k may span several narrower beats). No tiling:
 // gemm_m == n_patches.
 // ---------------------------------------------------------------------------
 template <class data_T, class res_T, typename CONFIG_T>
-void gemm_stream_weightless(hls::stream<data_T> &data_stream, hls::stream<res_T> &res_stream,
+void gemm_stream_const_weights(hls::stream<data_T> &data_stream, hls::stream<res_T> &res_stream,
                             typename CONFIG_T::bias_t biases[CONFIG_T::n_out]) {
     typedef nnet::array<typename data_T::value_type, CONFIG_T::gemm_k> a_row_T;
     typedef typename CONFIG_T::weight_col_t b_col_T;
@@ -139,7 +139,7 @@ void gemm_stream(hls::stream<data0_T> &a_stream, hls::stream<data1_T> &b_stream,
 #else // __SYNTHESIS__ without a package: declaration only -> loud link failure.
 
 template <class data_T, class res_T, typename CONFIG_T>
-void gemm_stream_weightless(hls::stream<data_T> &data_stream, hls::stream<res_T> &res_stream,
+void gemm_stream_const_weights(hls::stream<data_T> &data_stream, hls::stream<res_T> &res_stream,
                             typename CONFIG_T::bias_t biases[CONFIG_T::n_out]);
 
 template <class data0_T, class data1_T, class res_T, typename CONFIG_T>

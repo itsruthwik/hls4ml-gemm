@@ -225,7 +225,7 @@ class TestConvGemmValidation:
     """Test Conv GEMM IP validation and error handling."""
 
     def test_conv1d_io_parallel_routes_to_array_gemm(self, test_case_id):
-        """Conv1D GEMM IP under io_parallel takes the weightless ARRAY path (no ac_channel)."""
+        """Conv1D GEMM IP under io_parallel takes the const_weights ARRAY path (no ac_channel)."""
         model = _make_general_conv1d_model((10, 3), kernel_size=3, n_filters=8, padding='valid', name='conv1d')
 
         config = hls4ml.utils.config_from_keras_model(model, granularity='name')
@@ -242,14 +242,14 @@ class TestConvGemmValidation:
         hls_model.write()
 
         myproject_text = (output_dir / 'firmware/myproject.cpp').read_text()
-        assert 'nnet::gemm_array_weightless<' in myproject_text
+        assert 'nnet::gemm_array_const_weights<' in myproject_text
         assert 'nnet::im2col_1d_gemm_rows_array<' in myproject_text
         # io_parallel must not take the streaming entry
-        assert 'nnet::gemm_stream_weightless<' not in myproject_text
+        assert 'nnet::gemm_stream_const_weights<' not in myproject_text
         assert 'ac_channel' not in myproject_text
 
     def test_conv2d_io_parallel_routes_to_array_gemm(self, test_case_id):
-        """Conv2D GEMM IP under io_parallel takes the weightless ARRAY path (no ac_channel)."""
+        """Conv2D GEMM IP under io_parallel takes the const_weights ARRAY path (no ac_channel)."""
         model = _make_general_conv2d_model((8, 8, 3), kernel_size=(3, 3), n_filters=16, padding='valid', name='conv2d')
 
         config = hls4ml.utils.config_from_keras_model(model, granularity='name')
@@ -266,9 +266,9 @@ class TestConvGemmValidation:
         hls_model.write()
 
         myproject_text = (output_dir / 'firmware/myproject.cpp').read_text()
-        assert 'nnet::gemm_array_weightless<' in myproject_text
+        assert 'nnet::gemm_array_const_weights<' in myproject_text
         assert 'nnet::im2col_2d_gemm_rows_array<' in myproject_text
-        assert 'nnet::gemm_stream_weightless<' not in myproject_text
+        assert 'nnet::gemm_stream_const_weights<' not in myproject_text
 
 
 class TestConvGemmPacketStructure:
@@ -520,7 +520,7 @@ class TestPointwiseConvGemmIP:
 
         # Pointwise conv routes directly through the Gemm stage.
         myproject_text = (output_dir / 'firmware' / 'myproject.cpp').read_text()
-        assert 'nnet::gemm_stream_weightless<' in myproject_text
+        assert 'nnet::gemm_stream_const_weights<' in myproject_text
 
     def test_pointwise_conv1d_same_padding_stride1_codegen(self, test_case_id):
         """Pointwise Conv1D with same padding, stride=1 should preserve width in GEMM metadata."""

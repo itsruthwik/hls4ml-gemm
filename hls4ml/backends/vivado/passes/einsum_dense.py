@@ -183,7 +183,7 @@ class EinsumDenseFunctionTemplate(FunctionCallTemplate):
         params['weight_t'] = node.get_weights('weight').type
         params['gemm_k'] = node.get_attr('gemm_k', node.attributes['n_contract'])
         if node.get_attr('strategy') == 'gemm':
-            # A gemm_ip EinsumDense must be rewritten to a weightless Gemm node by
+            # A gemm_ip EinsumDense must be rewritten to a const_weights Gemm node by
             # LowerEinsumToGemm before templates run — the einsum template no longer
             # emits GEMM (GEMM lives in the IR now). Reaching here means the lowering
             # pass did not run; fail loudly rather than silently emit the old path.

@@ -100,9 +100,9 @@ def test_catapult_dense_gemm_ip_config_codegen(test_case_id, io_type, gemm_ip, e
 
         myproject_text = (output_dir / 'firmware' / 'myproject.cpp').read_text()
         if gemm_ip:
-            assert 'nnet::gemm_stream_weightless<' in myproject_text
+            assert 'nnet::gemm_stream_const_weights<' in myproject_text
         else:
-            assert 'nnet::gemm_stream_weightless<' not in myproject_text
+            assert 'nnet::gemm_stream_const_weights<' not in myproject_text
 
 
 def test_catapult_dense_gemm_ip_io_parallel_routes_to_gemm_array(test_case_id):
@@ -126,11 +126,11 @@ def test_catapult_dense_gemm_ip_io_parallel_routes_to_gemm_array(test_case_id):
     assert has_gemm_array, 'Expected io_parallel Dense + GemmIP to produce a Gemm node'
 
     # A Dense kernel is constant regardless of IOType, so Gemm is weight-stationary
-    # and must take the weightless ARRAY entry. Compile it: gemm_array_weightless is a
+    # and must take the const_weights ARRAY entry. Compile it: gemm_array_const_weights is a
     # template, so without an instantiation it is never type-checked and can rot silently.
     hls_model.write()
     myproject_text = (output_dir / 'firmware' / 'myproject.cpp').read_text()
-    assert 'nnet::gemm_array_weightless<' in myproject_text
+    assert 'nnet::gemm_array_const_weights<' in myproject_text
     assert 'gemm_weight_cols()' in (output_dir / 'firmware' / 'parameters.h').read_text()
 
     import numpy as np
@@ -167,7 +167,7 @@ def test_catapult_dense_gemm_metadata_rank1(test_case_id):
     # Four-name GEMM layer: nnet_gemm_ip.h defines the two array entries; the old
     # wrapper/indirection names are gone.
     assert 'void gemm_array' in gemm_ip_text
-    assert 'void gemm_array_weightless' in gemm_ip_text
+    assert 'void gemm_array_const_weights' in gemm_ip_text
     assert 'stream_gemm_ip' not in gemm_ip_text
 
 
@@ -371,7 +371,7 @@ def test_catapult_pointwise_conv1d_gemm_ip_codegen(test_case_id):
     assert 'static const unsigned gemm_k = 2;' in parameters_text
     assert 'static const unsigned gemm_n = 3;' in parameters_text
     assert 'gemm_pointwise_stage(' in myproject_text
-    assert 'nnet::gemm_stream_weightless<' in myproject_text
+    assert 'nnet::gemm_stream_const_weights<' in myproject_text
 
 
 def test_catapult_pointwise_conv2d_gemm_ip_codegen(test_case_id):
@@ -397,7 +397,7 @@ def test_catapult_pointwise_conv2d_gemm_ip_codegen(test_case_id):
     assert 'static const unsigned gemm_k = 2;' in parameters_text
     assert 'static const unsigned gemm_n = 4;' in parameters_text
     assert 'gemm_pointwise2d_stage(' in myproject_text
-    assert 'nnet::gemm_stream_weightless<' in myproject_text
+    assert 'nnet::gemm_stream_const_weights<' in myproject_text
 
 
 def test_catapult_general_conv1d_gemm_ip_codegen(test_case_id):
@@ -427,7 +427,7 @@ def test_catapult_general_conv1d_gemm_ip_codegen(test_case_id):
     assert any(isinstance(layer, Im2ColGemm) for layer in hls_model.get_layers()), \
         'General conv should produce a fused Im2ColGemm node'
     assert 'nnet::im2col_1d_gemm_rows<' in myproject_text
-    assert 'nnet::gemm_stream_weightless<' in myproject_text
+    assert 'nnet::gemm_stream_const_weights<' in myproject_text
     # Four-name GEMM layer: the old weight-column feed / wrapper helpers are gone.
     assert 'void gemm_array' in gemm_ip_text
     assert 'stream_gemm_packed_weight_cols' not in gemm_ip_text
@@ -520,6 +520,6 @@ def test_catapult_gemm_strategy_emits_contract_and_behavioral_ip(test_case_id):
     # Four-name GEMM layer: entry point == synth core == csim behavioral share one
     # name each; the behavioral now lives inline in the four entries.
     assert 'void gemm_array' in gemm_ip_text
-    assert 'void gemm_array_weightless' in gemm_ip_text
+    assert 'void gemm_array_const_weights' in gemm_ip_text
     assert 'stream_gemm_ip' not in gemm_ip_text
     assert 'stream_gemm_ip_const_weights' not in gemm_ip_text

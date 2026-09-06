@@ -4,9 +4,9 @@
 // Vivado/Vitis GEMM IP — exactly FOUR entry points, ONE name each across codegen,
 // synthesis, and csim (parity with the Catapult four-name contract):
 //   gemm_stream             io_stream,   two activation operands    (nnet_gemm_stream.h)
-//   gemm_stream_weightless  io_stream,   constant operand in the IP (nnet_gemm_stream.h)
+//   gemm_stream_const_weights  io_stream,   constant operand in the IP (nnet_gemm_stream.h)
 //   gemm_array              io_parallel, two activation operands    (this file)
-//   gemm_array_weightless   io_parallel, constant operand in the IP (this file)
+//   gemm_array_const_weights   io_parallel, constant operand in the IP (this file)
 //
 // Each name has ONE definition, selected by build mode:
 //   GEMM_IP_HEADER (package)  -> gemm-ip-gen provides it (synth + cosim)
@@ -16,7 +16,7 @@
 // There is no gemm_ip_stream/gemm_ip_array dispatcher: the four public names ARE the
 // frontend/backend seam, exactly as on Catapult. Row/column contract: A rows of width
 // gemm_k, B columns of height gemm_k, C rows of width gemm_n. M = n_patches, K = n_in,
-// N = n_out. For the weightless entries the constant operand is the IP's own; csim
+// N = n_out. For the const_weights entries the constant operand is the IP's own; csim
 // sources it from CONFIG_T::gemm_weight_cols() (a ROM accessor the writer injects into
 // the config). Argument order is uniform: activation operand(s), then the result, then
 // biases LAST.
@@ -42,12 +42,12 @@ namespace nnet {
 #if !defined(__SYNTHESIS__)
 
 // ---------------------------------------------------------------------------
-// gemm_array_weightless — io_parallel, constant operand held by the IP
+// gemm_array_const_weights — io_parallel, constant operand held by the IP
 // (Dense / Conv / EinsumDense projections). No weight argument: the columns come
 // from the config ROM via CONFIG_T::gemm_weight_cols(). csim computes directly.
 // ---------------------------------------------------------------------------
 template <class a_row_T, class bias_T, class res_row_T, typename CONFIG_T>
-void gemm_array_weightless(a_row_T a_rows[CONFIG_T::gemm_m],
+void gemm_array_const_weights(a_row_T a_rows[CONFIG_T::gemm_m],
                            res_row_T results[CONFIG_T::gemm_m],
                            bias_T biases[CONFIG_T::gemm_n]) {
     static_assert(a_row_T::size == CONFIG_T::gemm_k, "A row width must equal gemm_k.");
@@ -89,7 +89,7 @@ void gemm_array(a_row_T a_rows[CONFIG_T::gemm_m],
 #else // __SYNTHESIS__ without a package: declaration only -> loud link failure.
 
 template <class a_row_T, class bias_T, class res_row_T, typename CONFIG_T>
-void gemm_array_weightless(a_row_T a_rows[CONFIG_T::gemm_m], res_row_T results[CONFIG_T::gemm_m],
+void gemm_array_const_weights(a_row_T a_rows[CONFIG_T::gemm_m], res_row_T results[CONFIG_T::gemm_m],
                            bias_T biases[CONFIG_T::gemm_n]);
 
 template <class a_row_T, class b_col_T, class bias_T, class res_row_T, typename CONFIG_T>

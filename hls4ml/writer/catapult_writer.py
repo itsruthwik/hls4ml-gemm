@@ -570,7 +570,7 @@ class CatapultWriter(Writer):
                             newline += f'#include "weights/{w.name}.h"\n'
                             # ROM header included for both paths: the legacy streamed-weight
                             # call and the weight-stationary csim behavioral model both use it.
-                            # (In synth-with-package the weight-stationary call is weightless and
+                            # (In synth-with-package the weight-stationary call is const_weights and
                             # this static array is unused → dead-code-eliminated.)
                             if self._is_gemm_ip_weight(layer, w):
                                 newline += f'#include "weights/{w.name}_gemm_cols.h"\n'
@@ -603,7 +603,7 @@ class CatapultWriter(Writer):
                     self.print_gemm_ip_weight_beats_to_cpp(weights, layer, model.config.get_output_dir())
                     if bool(layer.get_attr('weights_in_core', False)):
                         # Weight-stationary also emits raw-bits .dat for the external
-                        # generator to bake into the synth weightless core.
+                        # generator to bake into the synth const_weights core.
                         from hls4ml.writer.gemm_ip_weights import write_gemm_ip_weight_dat
                         write_gemm_ip_weight_dat(weights, layer, model.config.get_output_dir())
 
@@ -1373,7 +1373,7 @@ class CatapultWriter(Writer):
                         'transpose_weights': bool(node.get_attr('strategy') == 'gemm')
                         or node.model.config.get_layer_config_value(node, 'TransposeWeights', False),
                         # Weight-stationary: the external GEMM IP holds the packed
-                        # weights internally and hls4ml calls the weightless signature.
+                        # weights internally and hls4ml calls the const_weights signature.
                         'weights_in_core': bool(node.get_attr('weights_in_core', False)),
                         # Whether the IP itself should include the bias adder. True only
                         # for the per-column weight-stationary case, where hls4ml feeds

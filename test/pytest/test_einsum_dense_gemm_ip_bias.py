@@ -78,9 +78,9 @@ np.testing.assert_allclose(hls_prediction, keras_prediction, atol=0.1, rtol=0.0)
 
     top = (output_dir / 'firmware/myproject.cpp').read_text()
     if backend == 'Catapult':
-        # Catapult lowers EinsumDense to a weightless Gemm (LowerEinsumToGemm); the
-        # row-varying bias is added per-element in the wrapper around gemm_array_weightless.
-        assert 'nnet::gemm_array_weightless<' in top, 'expected the lowered GEMM-IP path'
+        # Catapult lowers EinsumDense to a const_weights Gemm (LowerEinsumToGemm); the
+        # row-varying bias is added per-element in the wrapper around gemm_array_const_weights.
+        assert 'nnet::gemm_array_const_weights<' in top, 'expected the lowered GEMM-IP path'
         assert 'nnet::einsum_dense_gemm_ip<' not in top
         # bias_in_core contract (consumed by gemm-ip-gen): a row-varying bias is added
         # per-element in the wrapper, NOT on the IP's per-column bias port, so the IP
@@ -92,13 +92,13 @@ np.testing.assert_allclose(hls_prediction, keras_prediction, atol=0.1, rtol=0.0)
         assert all(e['weights_in_core'] for e in gemm_entries)
         assert all(e['bias_in_core'] is False for e in gemm_entries)
     else:
-        # Vivado now unifies with Catapult: EinsumDense lowers to a weightless Gemm
+        # Vivado now unifies with Catapult: EinsumDense lowers to a const_weights Gemm
         # (LowerEinsumToGemm) and is materialized by the shared Gemm codegen. The einsum
         # template no longer emits GEMM. After the ROM-accessor migration the Vivado
-        # weightless array core is gemm_array_weightless (config-sourced weights, no weight
+        # const_weights array core is gemm_array_const_weights (config-sourced weights, no weight
         # argument) — the same name/shape as Catapult.
         assert 'nnet::einsum_dense_gemm_ip<' not in top, 'einsum template must no longer emit GEMM'
-        assert 'nnet::gemm_array_weightless<' in top, 'expected the lowered weightless GEMM-IP array path'
+        assert 'nnet::gemm_array_const_weights<' in top, 'expected the lowered const_weights GEMM-IP array path'
         # Row-varying bias: zero per-column bias into the core, full per-element bias
         # added in the unpack loop (see gemm_array_row_bias_function_template).
         assert '_zero_bias' in top, 'expected the row-varying per-element bias-add path'

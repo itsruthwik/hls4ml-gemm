@@ -28,7 +28,7 @@ struct gemm_config {
 #if !defined(__SYNTHESIS__)
 
 // ---------------------------------------------------------------------------
-// gemm_stream_weightless — io_stream, constant operand held by the IP
+// gemm_stream_const_weights — io_stream, constant operand held by the IP
 // (Dense / Conv / EinsumDense projections). A streams in one K-wide row per beat;
 // the constant columns come from the config ROM. csim sources them from
 // CONFIG_T::gemm_weight_cols(); synth binds the IP's own weights.
@@ -40,7 +40,7 @@ struct gemm_config {
 // K-wide row before the contraction; gemm_k must be a whole number of beats.
 // ---------------------------------------------------------------------------
 template <class data_T, class res_T, typename CONFIG_T>
-void gemm_stream_weightless(ac_channel<data_T> &data_stream, ac_channel<res_T> &res_stream,
+void gemm_stream_const_weights(ac_channel<data_T> &data_stream, ac_channel<res_T> &res_stream,
                             typename CONFIG_T::bias_t biases[CONFIG_T::n_out]) {
     static_assert(CONFIG_T::gemm_k % data_T::size == 0, "gemm_k must be a whole number of input beats.");
     static_assert(res_T::size == CONFIG_T::gemm_n, "C row width must equal gemm_n.");
@@ -110,7 +110,7 @@ void gemm_stream(ac_channel<data0_T> &a_stream, ac_channel<data1_T> &b_stream,
 #else // __SYNTHESIS__ without a package: declaration only -> loud link failure.
 
 template <class data_T, class res_T, typename CONFIG_T>
-void gemm_stream_weightless(ac_channel<data_T> &data_stream, ac_channel<res_T> &res_stream,
+void gemm_stream_const_weights(ac_channel<data_T> &data_stream, ac_channel<res_T> &res_stream,
                             typename CONFIG_T::bias_t biases[CONFIG_T::n_out]);
 
 template <class data0_T, class data1_T, class res_T, typename CONFIG_T>
