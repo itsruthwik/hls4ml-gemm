@@ -1,3 +1,4 @@
+import glob
 import json
 import os
 import subprocess
@@ -16,6 +17,20 @@ pytest.importorskip('hgq.layers')
 
 from hgq.config import QuantizerConfigScope
 from hgq.layers import QMultiHeadAttention
+
+
+def _catapult_csim_env():
+    """Environment for loading the hls4ml csim library: Catapult's bundled gcc links it
+    against a newer libstdc++ than the system one, so its runtime must lead
+    LD_LIBRARY_PATH. Derived from MGC_HOME rather than a machine-specific path; the
+    test skips when the toolchain is not configured."""
+    mgc_home = os.environ.get('MGC_HOME')
+    libs = sorted(glob.glob(os.path.join(mgc_home, 'pkgs', 'dcs_gcc', 'gcc-*', 'lib64'))) if mgc_home else []
+    if not libs:
+        pytest.skip('Catapult toolchain (MGC_HOME with its bundled gcc) not configured')
+    env = os.environ.copy()
+    env['LD_LIBRARY_PATH'] = f'{libs[-1]}:{env.get("LD_LIBRARY_PATH", "")}'
+    return env
 
 
 def _make_hgq_mha_model():
@@ -62,9 +77,7 @@ def test_catapult_hgq2_attention_codegen_and_compile(tmp_path):
 
 def test_catapult_hgq2_attention_numeric_csim(tmp_path):
     output_dir = tmp_path / 'catapult_hgq2_mha_numeric_prj'
-    catapult_lib = '/home/tools/siemens/catapult/Mgc_home/pkgs/dcs_gcc/gcc-13.4.0/lib64'
-    env = os.environ.copy()
-    env['LD_LIBRARY_PATH'] = f'{catapult_lib}:{env.get("LD_LIBRARY_PATH", "")}'
+    env = _catapult_csim_env()
 
     script = f'''
 import numpy as np
@@ -107,9 +120,7 @@ assert np.std(hls_prediction) > 1e-3
 
 def test_catapult_hgq2_attention_einsum_gemm_ip_codegen_and_csim(tmp_path):
     output_dir = tmp_path / 'catapult_hgq2_mha_einsum_gemm_ip_prj'
-    catapult_lib = '/home/tools/siemens/catapult/Mgc_home/pkgs/dcs_gcc/gcc-13.4.0/lib64'
-    env = os.environ.copy()
-    env['LD_LIBRARY_PATH'] = f'{catapult_lib}:{env.get("LD_LIBRARY_PATH", "")}'
+    env = _catapult_csim_env()
 
     script = f'''
 import numpy as np
@@ -183,9 +194,7 @@ def test_catapult_hgq2_attention_io_stream_gemm_ip_codegen_and_csim(tmp_path):
     # matmuls gemm_stream, and the inserted operand/output Transposes stream via
     # nnet::transpose_stream (full reorder buffer, reusing the io_parallel index_map).
     output_dir = tmp_path / 'catapult_hgq2_mha_io_stream_gemm_ip_prj'
-    catapult_lib = '/home/tools/siemens/catapult/Mgc_home/pkgs/dcs_gcc/gcc-13.4.0/lib64'
-    env = os.environ.copy()
-    env['LD_LIBRARY_PATH'] = f'{catapult_lib}:{env.get("LD_LIBRARY_PATH", "")}'
+    env = _catapult_csim_env()
 
     script = f'''
 import numpy as np
@@ -248,9 +257,7 @@ assert np.std(hls_prediction) > 1e-3
 
 def test_catapult_hgq2_attention_projection_gemm_ip_codegen_and_csim(tmp_path):
     output_dir = tmp_path / 'catapult_hgq2_mha_projection_gemm_ip_prj'
-    catapult_lib = '/home/tools/siemens/catapult/Mgc_home/pkgs/dcs_gcc/gcc-13.4.0/lib64'
-    env = os.environ.copy()
-    env['LD_LIBRARY_PATH'] = f'{catapult_lib}:{env.get("LD_LIBRARY_PATH", "")}'
+    env = _catapult_csim_env()
 
     script = f'''
 import numpy as np
@@ -326,9 +333,7 @@ def test_catapult_hgq2_attention_multihead_gemm_ip(io_type, tmp_path):
     # reorder is the per-head A.V V-transpose. With 2 heads there are 4 projections +
     # 2 QK^T + 2 A.V = 8 Gemm nodes, and exactly 2 (io_stream) V-transposes.
     output_dir = tmp_path / f'catapult_hgq2_mha_multihead_{io_type}_prj'
-    catapult_lib = '/home/tools/siemens/catapult/Mgc_home/pkgs/dcs_gcc/gcc-13.4.0/lib64'
-    env = os.environ.copy()
-    env['LD_LIBRARY_PATH'] = f'{catapult_lib}:{env.get("LD_LIBRARY_PATH", "")}'
+    env = _catapult_csim_env()
 
     script = f'''
 import numpy as np
