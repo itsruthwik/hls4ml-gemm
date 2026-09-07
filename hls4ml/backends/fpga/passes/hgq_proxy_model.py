@@ -95,9 +95,8 @@ def _mask_lanes(
 def _beat_lane_body(beat_exprs: list[str | None], indent: str) -> str:
     """Straight-line per-lane conversion for one beat: res[p] = <cast>(beat[p]).
 
-    Deliberately NOT a loop carrying #pragma hls_unroll: hls4ml_pipeline_stage_loops in the
-    generated TCL skips any loop that has an UNROLL attribute, so an unrolled inner loop
-    here risks disturbing the enclosing beat loop's pipelining directive."""
+    Straight-line rather than an unrolled inner loop so the enclosing beat loop is the only
+    loop the in-source pipeline pragma has to schedule."""
     return '\n'.join(
         f'{indent}res[{p}] = ' + ('0;' if expr is None else expr.format(f'beat[{p}]') + ';')
         for p, expr in enumerate(beat_exprs)
@@ -186,6 +185,12 @@ def generate_mask_fn_stream(
     body, n = _mask_body(shape, k, b, i, RND, SAT, backend)
     stream = _stream_type(backend)
     pipeline_pragma, unroll_pragma = _stream_pragmas(backend)
+    # Vivado/Vitis bind a loop pragma placed inside the loop body; Catapult binds a pragma
+    # to the NEXT loop statement, so its pipeline pragma must precede the beat loop.
+    if backend.lower() in ('vivado', 'vitis'):
+        outer_pipeline, inner_pipeline = '', f'{pipeline_pragma}\n        '
+    else:
+        outer_pipeline, inner_pipeline = f'    {pipeline_pragma}\n', ''
     mask_fn = f"""
 template<typename input_t, typename output_t>
 void {name}({stream}<input_t> &inp_s, {stream}<output_t> &out_s) {{
@@ -195,10 +200,9 @@ void {name}({stream}<input_t> &inp_s, {stream}<output_t> &out_s) {{
     typename input_t::value_type inp[N];
     typename output_t::value_type out[N];
 
-ReadInp_{name}:
+{outer_pipeline}ReadInp_{name}:
     for (unsigned i = 0; i < N / input_t::size; i++) {{
-        {pipeline_pragma}
-        input_t beat = inp_s.read();
+        {inner_pipeline}input_t beat = inp_s.read();
         {unroll_pragma}
         for (unsigned p = 0; p < input_t::size; p++) {{
             inp[i * input_t::size + p] = beat[p];
@@ -207,10 +211,9 @@ ReadInp_{name}:
 
 {body}
 
-WriteOut_{name}:
+{outer_pipeline}WriteOut_{name}:
     for (unsigned i = 0; i < N / output_t::size; i++) {{
-        {pipeline_pragma}
-        output_t beat;
+        {inner_pipeline}output_t beat;
         {unroll_pragma}
         for (unsigned p = 0; p < output_t::size; p++) {{
             beat[p] = out[i * output_t::size + p];

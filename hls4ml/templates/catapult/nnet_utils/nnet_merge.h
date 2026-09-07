@@ -36,6 +36,7 @@ struct concat_config {
 
 template <class input1_T, class input2_T, class res_T, typename CONFIG_T>
 void add(input1_T data1[CONFIG_T::n_elem], input2_T data2[CONFIG_T::n_elem], res_T res[CONFIG_T::n_elem]) {
+    #pragma hls_pipeline_init_interval 1
     for (int ii = 0; ii < CONFIG_T::n_elem; ii++) {
         res[ii] = data1[ii] + data2[ii];
     }
@@ -43,6 +44,7 @@ void add(input1_T data1[CONFIG_T::n_elem], input2_T data2[CONFIG_T::n_elem], res
 
 template <class input1_T, class input2_T, class res_T, typename CONFIG_T>
 void subtract(input1_T data1[CONFIG_T::n_elem], input2_T data2[CONFIG_T::n_elem], res_T res[CONFIG_T::n_elem]) {
+    #pragma hls_pipeline_init_interval 1
     for (int ii = 0; ii < CONFIG_T::n_elem; ii++) {
         res[ii] = data1[ii] - data2[ii];
     }
@@ -50,6 +52,7 @@ void subtract(input1_T data1[CONFIG_T::n_elem], input2_T data2[CONFIG_T::n_elem]
 
 template <class input1_T, class input2_T, class res_T, typename CONFIG_T>
 void multiply(input1_T data1[CONFIG_T::n_elem], input2_T data2[CONFIG_T::n_elem], res_T res[CONFIG_T::n_elem]) {
+    #pragma hls_pipeline_init_interval 1
     for (int ii = 0; ii < CONFIG_T::n_elem; ii++) {
         res[ii] = data1[ii] * data2[ii];
     }
@@ -57,6 +60,7 @@ void multiply(input1_T data1[CONFIG_T::n_elem], input2_T data2[CONFIG_T::n_elem]
 
 template <class input1_T, class input2_T, class res_T, typename CONFIG_T>
 void average(input1_T data1[CONFIG_T::n_elem], input2_T data2[CONFIG_T::n_elem], res_T res[CONFIG_T::n_elem]) {
+    #pragma hls_pipeline_init_interval 1
     for (int ii = 0; ii < CONFIG_T::n_elem; ii++) {
         res[ii] = (data1[ii] + data2[ii]) * ac_fixed<1, -1, false>(0.5);
     }
@@ -64,6 +68,7 @@ void average(input1_T data1[CONFIG_T::n_elem], input2_T data2[CONFIG_T::n_elem],
 
 template <class input1_T, class input2_T, class res_T, typename CONFIG_T>
 void maximum(input1_T data1[CONFIG_T::n_elem], input2_T data2[CONFIG_T::n_elem], res_T res[CONFIG_T::n_elem]) {
+    #pragma hls_pipeline_init_interval 1
     for (int ii = 0; ii < CONFIG_T::n_elem; ii++) {
         res[ii] = (data1[ii] > data2[ii]) ? static_cast<res_T>(data1[ii]) : static_cast<res_T>(data2[ii]);
     }
@@ -71,6 +76,7 @@ void maximum(input1_T data1[CONFIG_T::n_elem], input2_T data2[CONFIG_T::n_elem],
 
 template <class input1_T, class input2_T, class res_T, typename CONFIG_T>
 void minimum(input1_T data1[CONFIG_T::n_elem], input2_T data2[CONFIG_T::n_elem], res_T res[CONFIG_T::n_elem]) {
+    #pragma hls_pipeline_init_interval 1
     for (int ii = 0; ii < CONFIG_T::n_elem; ii++) {
         res[ii] = (data1[ii] < data2[ii]) ? static_cast<res_T>(data1[ii]) : static_cast<res_T>(data2[ii]);
     }
@@ -78,7 +84,6 @@ void minimum(input1_T data1[CONFIG_T::n_elem], input2_T data2[CONFIG_T::n_elem],
 
 template <class input1_T, class input2_T, class res_T, typename CONFIG_T>
 void dot1d(input1_T data1[CONFIG_T::n_in], input2_T data2[CONFIG_T::n_in], res_T res[CONFIG_T::n_out]) {
-    //#pragma HLS PIPELINE II=CONFIG_T::reuse_factor
     constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
     (void)ce_reuse_factor;
 
@@ -86,18 +91,17 @@ void dot1d(input1_T data1[CONFIG_T::n_in], input2_T data2[CONFIG_T::n_in], res_T
     CONFIG_T::template product<input1_T, input2_T>::limit(multiplier_limit);
 
     typename CONFIG_T::accum_t mult[CONFIG_T::n_in];
-    //#pragma HLS ARRAY_PARTITION variable=mult complete
     typename CONFIG_T::accum_t acc = 0;
 
+#pragma hls_unroll
 Product:
     for (int i_mult = 0; i_mult < CONFIG_T::n_in; i_mult++) {
-        // #pragma HLS UNROLL
         mult[i_mult] = CONFIG_T::template product<input1_T, input2_T>::product(data1[i_mult], data2[i_mult]);
     }
 
+#pragma hls_unroll
 Accum:
     for (int i_acc = 0; i_acc < CONFIG_T::n_in; i_acc++) {
-        // #pragma HLS UNROLL
         acc += mult[i_acc];
     }
 

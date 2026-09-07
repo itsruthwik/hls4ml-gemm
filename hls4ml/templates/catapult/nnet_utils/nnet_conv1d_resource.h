@@ -37,10 +37,6 @@ void conv_1d_full(data_T data[CONFIG_T::in_width * CONFIG_T::n_chan], res_T res[
     data_T data_col[CONFIG_T::filt_width * CONFIG_T::n_chan];
     res_T res_col[CONFIG_T::n_filt];
 
-    ////#pragma HLS ARRAY_PARTITION variable=data_conv complete
-    //#pragma HLS ARRAY_PARTITION variable=data_col complete
-    //#pragma HLS ARRAY_PARTITION variable=res_col complete
-
     im2col_1d<data_T, CONFIG_T>(data, data_conv);
 
     for (int i = 0; i < CONFIG_T::out_width; i++) {
@@ -106,21 +102,12 @@ void conv_1d_resource_cf(data_T data[CONFIG_T::n_chan * CONFIG_T::in_width],
     const int rufactor = CONFIG_T::reuse_factor;
     const int block_factor = DIV_ROUNDUP(nin * nout, rufactor);
 
-    ////#pragma HLS function_instantiate variable=weights,biases
-    ////#pragma HLS RESOURCE         variable=weights core=RAM_2P_BRAM Commenting out the deisgnation HLS seems to choose
-    /// correctly
-    ////#pragma HLS ARRAY_RESHAPE   variable=weights block factor=block_factor
-    ////#pragma HLS ARRAY_PARTITION variable=biases complete
-
     data_T data_col[CONFIG_T::filt_width * CONFIG_T::n_chan];
     res_T res_col[CONFIG_T::n_filt];
 
-    //#pragma HLS ARRAY_PARTITION variable=data_col complete
-    //#pragma HLS ARRAY_PARTITION variable=res_col complete
-
+#pragma hls_pipeline_init_interval 1
 ColLoop:
     for (int i = 0; i < CONFIG_T::out_width; i++) {
-        //#pragma HLS PIPELINE
         im2col_1d_cf<data_T, CONFIG_T>(data, data_col, i);
         dense_resource<data_T, res_T, typename CONFIG_T::mult_config>(data_col, res_col, weights, biases);
         for (int j = 0; j < CONFIG_T::n_filt; j++) {
@@ -179,21 +166,12 @@ void conv_1d_resource_cl(data_T data[CONFIG_T::in_width * CONFIG_T::n_chan],
     const int rufactor = CONFIG_T::reuse_factor;
     const int block_factor = DIV_ROUNDUP(nin * nout, rufactor);
 
-    ////#pragma HLS function_instantiate variable=weights,biases
-    ////#pragma HLS RESOURCE         variable=weights core=RAM_2P_BRAM Commenting out the deisgnation HLS seems to choose
-    /// correctly
-    ////#pragma HLS ARRAY_RESHAPE   variable=weights block factor=block_factor
-    ////#pragma HLS ARRAY_PARTITION variable=biases complete
-
     data_T data_col[CONFIG_T::filt_width * CONFIG_T::n_chan];
     res_T res_col[CONFIG_T::n_filt];
 
-    //#pragma HLS ARRAY_PARTITION variable=data_col complete
-    //#pragma HLS ARRAY_PARTITION variable=res_col complete
-
+#pragma hls_pipeline_init_interval 1
 ColLoop:
     for (int i = 0; i < CONFIG_T::out_width; i++) {
-        //#pragma HLS PIPELINE
         im2col_1d_cl<data_T, CONFIG_T>(data, data_col, i);
         dense_resource<data_T, res_T, typename CONFIG_T::mult_config>(data_col, res_col, weights, biases);
         for (int j = 0; j < CONFIG_T::n_filt; j++) {
@@ -214,21 +192,12 @@ void pointwise_conv_1d_resource_cl(data_T data[CONFIG_T::in_width * CONFIG_T::n_
     const int rufactor = CONFIG_T::reuse_factor;
     const int block_factor = DIV_ROUNDUP(nin * nout, rufactor);
 
-    ////#pragma HLS function_instantiate variable=weights,biases
-    ////#pragma HLS RESOURCE         variable=weights core=RAM_2P_BRAM Commenting out the deisgnation HLS seems to choose
-    /// correctly
-    ////#pragma HLS ARRAY_RESHAPE   variable=weights block factor=block_factor
-    ////#pragma HLS ARRAY_PARTITION variable=biases complete
-
     data_T data_col[CONFIG_T::n_chan];
     res_T res_col[CONFIG_T::n_filt];
 
-    //#pragma HLS ARRAY_PARTITION variable=data_col complete
-    //#pragma HLS ARRAY_PARTITION variable=res_col complete
-
+#pragma hls_pipeline_init_interval 1
 ColLoop:
     for (int i = 0; i < CONFIG_T::out_width; i++) {
-        //#pragma HLS PIPELINE
         im2col_1d_pointwise_cl<data_T, CONFIG_T>(data, data_col, i);
         dense_resource<data_T, res_T, typename CONFIG_T::mult_config>(data_col, res_col, weights, biases);
         for (int j = 0; j < CONFIG_T::n_filt; j++) {

@@ -20,26 +20,25 @@ void depthwise_conv_2d_cl(
     const int out_height = CONFIG_T::out_height;
     const int out_width = CONFIG_T::out_width;
 
-    //    constexpr int ce_reuse_factor = CONFIG_T::reuse_factor; (void)ce_reuse_factor;
+    constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
+    (void)ce_reuse_factor;
 
-    //    do {
-
-    //#pragma HLS ARRAY_PARTITION variable=res complete dim=0
-    //#pragma HLS ARRAY_PARTITION variable=depthwise_biases complete dim=0
-    //#pragma HLS ARRAY_PARTITION variable=depthwise_weights complete dim=0
+    // Vivado: #pragma HLS ARRAY_PARTITION variable=res complete dim=0 (no Catapult in-source equivalent)
+    // Vivado: #pragma HLS ARRAY_PARTITION variable=depthwise_biases complete dim=0 (no Catapult in-source equivalent)
+    // Vivado: #pragma HLS ARRAY_PARTITION variable=depthwise_weights complete dim=0 (no Catapult in-source equivalent)
+    #pragma hls_pipeline_init_interval ce_reuse_factor
     for (int h = 0; h < in_height - filt_height + 1; h++) {
-        //#pragma HLS PIPELINE II=CONFIG_T::reuse_factor rewind
+        #pragma hls_unroll
         for (int w = 0; w < in_width - filt_width + 1; w++) {
-            //#pragma HLS UNROLL
+            #pragma hls_unroll
             for (int c = 0; c < n_chan; c++) {
-                //#pragma HLS UNROLL
                 res_T sum = depthwise_biases[c];
 
                 // Apply the filter
+                #pragma hls_unroll
                 for (int i = 0; i < filt_height; i++) {
-                    //#pragma HLS UNROLL
+                    #pragma hls_unroll
                     for (int j = 0; j < filt_width; j++) {
-                        //#pragma HLS UNROLL
                         int data_idx = (h + i) * in_width * n_chan + (w + j) * n_chan + c;
                         int weight_idx = i * filt_width * n_chan + j * n_chan + c;
                         sum += data[data_idx] * depthwise_weights[weight_idx];
@@ -51,7 +50,6 @@ void depthwise_conv_2d_cl(
             }
         }
     }
-    //    } while (false);
 }
 
 template <class data_T, class dw_res_T, class res_T, typename CONFIG_T>
@@ -66,8 +64,6 @@ void separable_conv_2d_cl(data_T data[CONFIG_T::depthwise_config::in_height * CO
                               pointwise_weights[CONFIG_T::pointwise_config::n_chan * CONFIG_T::pointwise_config::n_filt],
                           typename CONFIG_T::depthwise_config::bias_t depthwise_biases[CONFIG_T::depthwise_config::n_chan],
                           typename CONFIG_T::pointwise_config::bias_t pointwise_biases[CONFIG_T::pointwise_config::n_filt]) {
-
-    //#pragma HLS INLINE region
 
     dw_res_T depthwise_results[CONFIG_T::depthwise_config::out_height * CONFIG_T::depthwise_config::out_width *
                                CONFIG_T::depthwise_config::n_chan];

@@ -58,27 +58,18 @@ void conv_2d_latency_cf(
                                     CONFIG_T::filt_height * CONFIG_T::filt_width];
     typename CONFIG_T::accum_t acc[CONFIG_T::out_height * CONFIG_T::out_width * CONFIG_T::n_filt];
 
-    //#pragma HLS ARRAY_PARTITION variable=mult complete dim=0
-    //#pragma HLS ARRAY_PARTITION variable=acc complete dim=0
-
-    // Use a function_instantiate in case it helps to explicitly optimize unchanging weights/biases
-    //#pragma HLS function_instantiate variable=weights,biases
-
-    // Parallel mode
-    //#pragma HLS PIPELINE
-    //#pragma HLS ARRAY_PARTITION variable=biases complete dim=0
-
     // Limit multipliers to control parallelization
     const int multiplier_limit = compute_multiplier_limit_conv2d<CONFIG_T>(weights);
-//#pragma HLS ALLOCATION instances=mul limit=multiplier_limit operation
 
-// Convolve, saving all multiplication results to accumulate later
+    // Convolve, saving all multiplication results to accumulate later
+    #pragma hls_pipeline_init_interval 1
 ConvOutHeight:
     for (int oh = 0; oh < CONFIG_T::out_height; oh++) {
     ConvOutWidth:
         for (int ow = 0; ow < CONFIG_T::out_width; ow++) {
         ConvFilt:
             for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
+            #pragma hls_unroll
             ConvChan:
                 for (int cc = 0; cc < CONFIG_T::n_chan; cc++) {
                 ConvFiltHeight:
@@ -119,6 +110,7 @@ ConvOutHeight:
     // Initialize accumulator with input biases
     for (int oh = 0; oh < CONFIG_T::out_height; oh++) {
         for (int ow = 0; ow < CONFIG_T::out_width; ow++) {
+            #pragma hls_unroll
             for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
                 acc[oh * CONFIG_T::out_width * CONFIG_T::n_filt + ow * CONFIG_T::n_filt + ff] = biases[ff];
             }
@@ -158,6 +150,7 @@ AccumOutHeight:
     }                     // end output height loop
 
     // Cast to "res_t" type
+    #pragma hls_unroll
     for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
         for (int oh = 0; oh < CONFIG_T::out_height; oh++) {
             for (int ow = 0; ow < CONFIG_T::out_width; ow++) {
@@ -181,27 +174,18 @@ void conv_2d_latency_cl(
                                     CONFIG_T::filt_height * CONFIG_T::filt_width];
     typename CONFIG_T::accum_t acc[CONFIG_T::out_height * CONFIG_T::out_width * CONFIG_T::n_filt];
 
-    //#pragma HLS ARRAY_PARTITION variable=mult complete dim=0
-    //#pragma HLS ARRAY_PARTITION variable=acc complete dim=0
-
-    // Use a function_instantiate in case it helps to explicitly optimize unchanging weights/biases
-    //#pragma HLS function_instantiate variable=weights,biases
-
-    // Parallel mode
-    //#pragma HLS PIPELINE
-    //#pragma HLS ARRAY_PARTITION variable=biases complete dim=0
-
     // Limit multipliers to control parallelization
     const int multiplier_limit = compute_multiplier_limit_conv2d<CONFIG_T>(weights);
-//#pragma HLS ALLOCATION instances=mul limit=multiplier_limit operation
 
-// Convolve, saving all multiplication results to accumulate later
+    // Convolve, saving all multiplication results to accumulate later
+    #pragma hls_pipeline_init_interval 1
 ConvOutHeight:
     for (int oh = 0; oh < CONFIG_T::out_height; oh++) {
     ConvOutWidth:
         for (int ow = 0; ow < CONFIG_T::out_width; ow++) {
         ConvFilt:
             for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
+            #pragma hls_unroll
             ConvChan:
                 for (int cc = 0; cc < CONFIG_T::n_chan; cc++) {
                 ConvFiltHeight:
@@ -242,6 +226,7 @@ ConvOutHeight:
     // Initialize accumulator with input biases
     for (int oh = 0; oh < CONFIG_T::out_height; oh++) {
         for (int ow = 0; ow < CONFIG_T::out_width; ow++) {
+            #pragma hls_unroll
             for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
                 acc[oh * CONFIG_T::out_width * CONFIG_T::n_filt + ow * CONFIG_T::n_filt + ff] = biases[ff];
             }
@@ -283,6 +268,7 @@ AccumOutHeight:
     // Cast to "res_t" type
     for (int oh = 0; oh < CONFIG_T::out_height; oh++) {
         for (int ow = 0; ow < CONFIG_T::out_width; ow++) {
+            #pragma hls_unroll
             for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
                 int index = oh * CONFIG_T::out_width * CONFIG_T::n_filt + ow * CONFIG_T::n_filt + ff;
                 res[index] = (res_T)(acc[index]);
@@ -301,27 +287,18 @@ void pointwise_conv_2d_latency_cl(data_T data[CONFIG_T::in_height * CONFIG_T::in
     typename CONFIG_T::accum_t mult[CONFIG_T::out_height * CONFIG_T::out_width * CONFIG_T::n_filt * CONFIG_T::n_chan];
     typename CONFIG_T::accum_t acc[CONFIG_T::out_height * CONFIG_T::out_width * CONFIG_T::n_filt];
 
-    //#pragma HLS ARRAY_PARTITION variable=mult complete dim=0
-    //#pragma HLS ARRAY_PARTITION variable=acc complete dim=0
-
-    // Use a function_instantiate in case it helps to explicitly optimize unchanging weights/biases
-    //#pragma HLS function_instantiate variable=weights,biases
-
-    // Parallel mode
-    //#pragma HLS PIPELINE
-    //#pragma HLS ARRAY_PARTITION variable=biases complete dim=0
-
     // Limit multipliers to control parallelization
     const int multiplier_limit = compute_multiplier_limit_conv2d<CONFIG_T>(weights);
-//#pragma HLS ALLOCATION instances=mul limit=multiplier_limit operation
 
-// Convolve, saving all multiplication results to accumulate later
+    // Convolve, saving all multiplication results to accumulate later
+    #pragma hls_pipeline_init_interval 1
 ConvOutHeight:
     for (int oh = 0; oh < CONFIG_T::out_height; oh++) {
     ConvOutWidth:
         for (int ow = 0; ow < CONFIG_T::out_width; ow++) {
         ConvFilt:
             for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
+            #pragma hls_unroll
             ConvChan:
                 for (int cc = 0; cc < CONFIG_T::n_chan; cc++) {
 
@@ -349,6 +326,7 @@ ConvOutHeight:
     // Initialize accumulator with input biases
     for (int oh = 0; oh < CONFIG_T::out_height; oh++) {
         for (int ow = 0; ow < CONFIG_T::out_width; ow++) {
+            #pragma hls_unroll
             for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
                 acc[oh * CONFIG_T::out_width * CONFIG_T::n_filt + ow * CONFIG_T::n_filt + ff] = biases[ff];
             }
@@ -379,6 +357,7 @@ AccumOutHeight:
     // Cast to "res_t" type
     for (int oh = 0; oh < CONFIG_T::out_height; oh++) {
         for (int ow = 0; ow < CONFIG_T::out_width; ow++) {
+            #pragma hls_unroll
             for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
                 int index = oh * CONFIG_T::out_width * CONFIG_T::n_filt + ow * CONFIG_T::n_filt + ff;
                 res[index] = (res_T)(acc[index]);

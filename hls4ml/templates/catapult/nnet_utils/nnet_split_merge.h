@@ -29,6 +29,7 @@ template <class data_T, class res_T, typename CONFIG_T, class... Outs>
 void split_lanes(ac_channel<data_T> &data, Outs &... outs) {
     const unsigned H = sizeof...(outs);
     ac_channel<res_T> *out_ch[] = {&outs...};
+    #pragma hls_pipeline_init_interval 1
     for (unsigned b = 0; b < CONFIG_T::n_beats; b++) {
         data_T in = data.read();
         #pragma hls_unroll
@@ -49,6 +50,7 @@ template <class data_T, class res_T, typename CONFIG_T, class... Ins>
 void merge_lanes(ac_channel<res_T> &res, Ins &... ins) {
     const unsigned H = sizeof...(ins);
     ac_channel<data_T> *in_ch[] = {&ins...};
+    #pragma hls_pipeline_init_interval 1
     for (unsigned b = 0; b < CONFIG_T::n_beats; b++) {
         res_T out;
         #pragma hls_unroll
@@ -71,6 +73,7 @@ template <class data_T, class res_T, typename CONFIG_T, class... Outs>
 void split_lanes_array(const data_T *data, Outs *... outs) {
     const unsigned H = sizeof...(outs);
     res_T *out_a[] = {outs...};
+    #pragma hls_pipeline_init_interval 1
     for (unsigned s = 0; s < CONFIG_T::seq; s++) {
         #pragma hls_unroll
         for (unsigned h = 0; h < H; h++) {
@@ -87,6 +90,7 @@ template <class data_T, class res_T, typename CONFIG_T, class... Ins>
 void merge_lanes_array(res_T *res, Ins *... ins) {
     const unsigned H = sizeof...(ins);
     const data_T *in_a[] = {ins...};
+    #pragma hls_pipeline_init_interval 1
     for (unsigned s = 0; s < CONFIG_T::seq; s++) {
         #pragma hls_unroll
         for (unsigned h = 0; h < H; h++) {

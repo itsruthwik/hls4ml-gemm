@@ -185,68 +185,6 @@ set hls_clock_period 5
 
 go analyze
 
-# Pipeline the streaming loops of one io_stream+latency layer stage at the given II. The in-source
-# #pragma hls_pipeline_init_interval is ignored by Catapult; only this directive is honored. Each
-# hls4ml layer L is emitted as block L_stage, so its loops live under /<top>/L_stage[:inst]/core/...
-# We enumerate the loops actually present and pipeline those NOT marked for unroll (the dense MAC
-# loops carry #pragma hls_unroll and must stay unrolled; the per-pixel/per-element STREAMING driver
-# loop has no unroll attr -> that is the one Vitis pipelines via #pragma HLS PIPELINE). A bare
-# cross-"/" glob errors with "Unknown path", so we ENUMERATE via `directive get` then set. No-op
-# safe for io_parallel / non-matching layers.
-proc hls4ml_pipeline_stage_loops { top stage ii } {
-  foreach base [list "/$top/${stage}_stage" "/$top/${stage}_stage:inst"] {
-    # shallow depths only: streaming drivers sit at core/<loop> or core/main/<loop>;
-    # the unrolled MAC loops are deeper inside the inlined dense and must not be matched.
-    foreach pat [list "$base/core/*/PIPELINE_INIT_INTERVAL" \
-                      "$base/core/*/*/PIPELINE_INIT_INTERVAL"] {
-      foreach p [directive get -match glob -checkpath 0 -ret p $pat] {
-        set loop [string range $p 0 end-[expr {[string length "/PIPELINE_INIT_INTERVAL"]}]]
-        # Pooling reduction loops are rolled-but-serial at reuse_factor>1 and must NOT be pipelined:
-        # Catapult cannot nest a pipeline inside the already-pipelined per-pixel driver, which carries
-        # II=reuse_factor instead. (FiltInner/PoolLoop also carry hls_unroll, so the UNROLL check below
-        # skips them; the rolled outer FiltLoop has no UNROLL attr, so it must be skipped by name here.)
-        # The dense ReuseLoop is intentionally NOT skipped -- it is the loop we want pipelined at II=rf.
-        set loop_name [lindex [split $loop "/"] end]
-        if { $loop_name eq "FiltLoop" || $loop_name eq "FiltReuse" || $loop_name eq "FiltInner" || $loop_name eq "PoolLoop" || $loop_name eq "PoolReuse" } {
-          continue
-        }
-        set unroll ""
-        catch { set unroll [directive get -checkpath 0 -ret v "$loop/UNROLL"] }
-        if { $unroll eq "" || [string tolower $unroll] eq "no" || $unroll == 0 } {
-          logfile message "hls4ml: directive set $p $ii\n" info
-          directive set $p $ii
-        }
-      }
-    }
-  }
-}
-
-# Pipeline the GEMM-IP wrapper feed/drain loops at II=1. Like the dense MAC above, Catapult ignores
-# the in-source #pragma hls_pipeline_init_interval the generated wrapper carries; only this directive
-# is honored. The wrapper is inlined from the GemmIpPackage header at a variable, often deep nesting
-# level (layer core -> einsum/dense compute -> gemm_ip wrapper -> RUN), so the fixed shallow globs
-# used by hls4ml_pipeline_stage_loops do not reach it. We instead match the wrapper loops by their
-# unique leaf names at any depth. A bare cross-"/" glob errors with "Unknown path", so we sweep a
-# range of fixed depths and filter by leaf name. No-op safe when no GEMM IP is present.
-proc hls4ml_pipeline_gemm_loops { top } {
-  # Full-K-spatial wrapper loops only (chunked-mode loops intentionally out of scope for now).
-  set gemm_loops [list RUN RUN_ARRAY DRAIN_PADDED_ROWS DRAIN_ARRAY_PADDED_ROWS READ_B_COLS]
-  foreach base [list "/$top" "/$top:inst"] {
-    set stars ""
-    for {set depth 1} {$depth <= 8} {incr depth} {
-      set stars "$stars/*"
-      foreach p [directive get -match glob -checkpath 0 -ret p "$base$stars/PIPELINE_INIT_INTERVAL"] {
-        set loop [string range $p 0 end-[expr {[string length "/PIPELINE_INIT_INTERVAL"]}]]
-        set loop_name [lindex [split $loop "/"] end]
-        if { [lsearch -exact $gemm_loops $loop_name] >= 0 } {
-          logfile message "hls4ml: directive set $p 1 (gemm)\n" info
-          directive set $p 1
-        }
-      }
-    }
-  }
-}
-
 # NORMAL TOP DOWN FLOW
 if { ! $opt(bup) } {
 
@@ -270,11 +208,11 @@ directive set -CLOCKS [list clk [list -CLOCK_PERIOD $hls_clock_period -CLOCK_EDG
 # keeps the spatial unroll the per-loop hls_unroll pragmas intend.
 directive set -DESIGN_GOAL latency
 
-# Pipeline io_stream + latency streaming loops at II=reuse_factor (writer-emitted, one
-# hls4ml_pipeline_stage_loops call per qualifying layer; see proc above). We deliberately DO NOT
-# use a global `-UNROLL yes`: it silently disconnects an output lane (stuck constant, fails cosim)
-# and breaks timing. The MAC loops already carry per-loop `#pragma hls_unroll`.
-#hls-fpga-machine-learning insert pipeline-directives
+# Loop parallelism (unroll, pipeline II=reuse_factor) is expressed in-source in nnet_utils with
+# Catapult's own pragmas (#pragma hls_unroll / #pragma hls_pipeline_init_interval), the same
+# way the Vivado/Vitis templates carry #pragma HLS UNROLL / PIPELINE. Catapult honors them, so no
+# per-loop directives are set here. We deliberately do NOT use a global `-UNROLL yes`: it silently
+# disconnects an output lane (stuck constant, fails cosim) and breaks timing.
 
 if {$opt(synth)} {
   puts "***** C/RTL SYNTHESIS *****"

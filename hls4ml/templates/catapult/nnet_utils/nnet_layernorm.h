@@ -44,9 +44,6 @@ void layernorm_1d(data_T data[CONFIG_T::n_in / CONFIG_T::seq_len], res_T res[CON
                   typename CONFIG_T::scale_t scale[CONFIG_T::n_in / CONFIG_T::seq_len],
                   typename CONFIG_T::bias_t bias[CONFIG_T::n_in / CONFIG_T::seq_len],
                   typename CONFIG_T::table_t rsqrt_table[CONFIG_T::table_size]) {
-    //#pragma HLS PIPELINE II=CONFIG_T::reuse_factor
-    //#pragma HLS ARRAY_PARTITION variable=data complete
-    //#pragma HLS ARRAY_PARTITION variable=res complete
     typename CONFIG_T::table_t deno_inver = 0;
 
     static const unsigned dim = CONFIG_T::n_in / CONFIG_T::seq_len;
@@ -59,8 +56,11 @@ void layernorm_1d(data_T data[CONFIG_T::n_in / CONFIG_T::seq_len], res_T res[CON
     // Lossless (norm_t holds x - mean_q exactly), so it stays bit-exact.
     typename CONFIG_T::norm_t data_diff[dim];
 
-    //#pragma HLS ARRAY_PARTITION variable=data_diff complete
-
+    // Vivado: #pragma HLS PIPELINE II=CONFIG_T::reuse_factor (applied at function top; there is
+    // no single enclosing loop, so it lands on the first of the sibling reduction loops below)
+    constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
+    (void)ce_reuse_factor;
+    #pragma hls_pipeline_init_interval ce_reuse_factor
 LAYERNORM_1D_SUM:
     for (int i = 0; i < dim; ++i) {
         sum_cache += static_cast<typename CONFIG_T::accum_t>(data[i]);
@@ -125,23 +125,18 @@ void layernormalize(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_in],
     data_T in_val[dim];
     res_T outval[dim];
 
-    //#pragma HLS ARRAY_PARTITION variable=scale complete
-    //#pragma HLS ARRAY_PARTITION variable=bias complete
-    //#pragma HLS ARRAY_PARTITION variable=in_val complete
-    //#pragma HLS ARRAY_PARTITION variable=outval complete
-
+    #pragma hls_pipeline_init_interval 1
 LAYERNORM_SEQ_LOOP:
     for (int j = 0; j < CONFIG_T::seq_len; ++j) {
-        //#pragma HLS PIPELINE
+    #pragma hls_unroll
     LAYERNORM_LOAD:
         for (int i = 0; i < dim; ++i) {
-            //#pragma HLS UNROLL
             in_val[i] = data[j * dim + i];
         }
         layernorm_1d<data_T, res_T, CONFIG_T>(in_val, outval, scale, bias, rsqrt_table);
+    #pragma hls_unroll
     LAYERNORM_STORE:
         for (int i = 0; i < dim; ++i) {
-            //#pragma HLS UNROLL
             res[j * dim + i] = outval[i];
         }
     }

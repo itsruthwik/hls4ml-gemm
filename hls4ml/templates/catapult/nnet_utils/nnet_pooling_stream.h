@@ -15,7 +15,6 @@ namespace nnet {
 // *************************************************
 
 template <class T, int N, class CONFIG_T> T reduce_pool(T x[N]) {
-    //#pragma HLS INLINE
     if (CONFIG_T::pool_op == Max) {
         Op_max<T> op_max;
         return reduce<T, N, Op_max<T>>(x, op_max);
@@ -66,21 +65,18 @@ void compute_pool_encoded_2d(
         initialized = true;
     }
 
-    //#pragma HLS INLINE
-
     if (data_T::size / CONFIG_T::n_filt > 1) {
-        //#pragma HLS ARRAY_PARTITION variable=pool_table_height complete
-        //#pragma HLS ARRAY_PARTITION variable=pool_table_width complete
+        // Vivado: #pragma HLS ARRAY_PARTITION variable=pool_table_height complete (no Catapult in-source equivalent)
+        // Vivado: #pragma HLS ARRAY_PARTITION variable=pool_table_width complete (no Catapult in-source equivalent)
     }
 
     typename CONFIG_T::accum_t pool_window[CONFIG_T::pool_height * CONFIG_T::pool_width];
-    //#pragma HLS ARRAY_PARTITION variable=pool_window complete
 
     const unsigned sh_idx = pool_table_height[h_idx] * CONFIG_T::pool_width;
     const unsigned wp_idx = w_idx * (data_T::size / CONFIG_T::n_filt);
 PixelLoop:
+    #pragma hls_pipeline_init_interval 1
     for (unsigned p = 0; p < data_T::size / CONFIG_T::n_filt; p++) {
-        //#pragma HLS PIPELINE
 
         ac_int<CONFIG_T::pool_height * CONFIG_T::pool_width, false> filt_mask = 0;
         if ((h_idx < nH) && (wp_idx + p < nW)) {
@@ -132,7 +128,6 @@ void pooling2d_encoded_cl(ac_channel<data_T> &data, ac_channel<res_T> &res) {
     assert(CONFIG_T::pool_height == CONFIG_T::stride_height && CONFIG_T::pool_width == CONFIG_T::stride_width);
 
     res_T res_pack;
-    //#pragma HLS DATA_PACK variable=res_pack
     unsigned outputs_ready = 0;
 
     static ac_channel<typename data_T::value_type>
@@ -146,12 +141,10 @@ void pooling2d_encoded_cl(ac_channel<data_T> &data, ac_channel<res_T> &res) {
     (void)pack_factor;
 ReadInputHeight:
     for (unsigned i_ih = 0; i_ih < CONFIG_T::in_height; i_ih++) {
+    #pragma hls_pipeline_init_interval pack_factor
     ReadInputWidth:
         for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width / (pack_factor); i_iw++) {
-            //#pragma HLS LOOP_FLATTEN
-            if (res_T::size / CONFIG_T::n_filt == 1) {
-                //#pragma HLS PIPELINE II=pack_factor
-            }
+            // Vivado: #pragma HLS LOOP_FLATTEN (no Catapult in-source equivalent)
             compute_pool_encoded_2d<data_T, res_T, CONFIG_T>(i_ih, i_iw, data.read(), data_window, res, res_pack,
                                                              outputs_ready);
         }
@@ -166,7 +159,6 @@ void compute_pool_buffer_2d(const data_T &in_elem,
                             ap_shift_reg<typename data_T::value_type, CONFIG_T::in_width>
                                 line_buffer[MAX(CONFIG_T::pool_height - 1, 1)][CONFIG_T::n_filt],
                             ac_channel<res_T> &res) {
-    //#pragma HLS INLINE
     const static int lShiftX = CONFIG_T::pool_width - 1;
     const static int lShiftY = CONFIG_T::pool_height - 1;
     static int pX = 0; // pixel X
@@ -175,13 +167,10 @@ void compute_pool_buffer_2d(const data_T &in_elem,
     static int sY = 0; // stride Y
 
     typename data_T::value_type pool_window[CONFIG_T::pool_height * CONFIG_T::pool_width];
-    //#pragma HLS ARRAY_PARTITION variable=pool_window complete
 
     static typename data_T::value_type kernel_data[CONFIG_T::pool_height * CONFIG_T::pool_width * CONFIG_T::n_filt];
-    //#pragma HLS ARRAY_PARTITION variable = kernel_data complete dim = 0
 
     res_T res_pack;
-    //#pragma HLS DATA_PACK variable=res_pack
 
     // Add pixel into line buffer, return pooling kernels
     nnet::shift_line_buffer<data_T, CONFIG_T>(in_elem, line_buffer, kernel_data);
@@ -189,8 +178,8 @@ void compute_pool_buffer_2d(const data_T &in_elem,
     // Can compute pooling output
     if ((sX - lShiftX) == 0 && (sY - lShiftY) == 0 && pY > lShiftY - 1 && pX > lShiftX - 1) {
     FiltLoop:
+        #pragma hls_pipeline_init_interval 1
         for (unsigned i_ic = 0; i_ic < CONFIG_T::n_filt; i_ic++) {
-        //#pragma HLS PIPELINE
 
         // Retrieve data for current channel
         PoolLoop:
@@ -235,14 +224,13 @@ void pooling2d_buffer_cl(ac_channel<data_T> &data, ac_channel<res_T> &res) {
 
     static ap_shift_reg<typename data_T::value_type, CONFIG_T::in_width> line_buffer[MAX(CONFIG_T::pool_height - 1, 1)]
                                                                                     [CONFIG_T::n_filt];
-    //#pragma HLS ARRAY_PARTITION variable = line_buffer complete dim = 2
 
 ReadInputHeight:
     for (unsigned i_ih = 0; i_ih < CONFIG_T::in_height; i_ih++) {
+    #pragma hls_pipeline_init_interval 1
     ReadInputWidth:
         for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width; i_iw++) {
-            //#pragma HLS LOOP_FLATTEN
-            //#pragma HLS PIPELINE
+            // Vivado: #pragma HLS LOOP_FLATTEN (no Catapult in-source equivalent)
 
             compute_pool_buffer_2d<data_T, res_T, CONFIG_T>(data.read(), line_buffer, res);
         }
@@ -250,7 +238,6 @@ ReadInputHeight:
 }
 
 template <class data_T, class res_T, typename CONFIG_T> void pooling2d_cl(ac_channel<data_T> &data, ac_channel<res_T> &res) {
-    //#pragma HLS inline region
     switch (CONFIG_T::implementation) {
     case conv_implementation::linebuffer:
         pooling2d_buffer_cl<data_T, res_T, CONFIG_T>(data, res);
@@ -288,20 +275,17 @@ void compute_pool_encoded_1d(const unsigned w_idx, const data_T &in_elem,
         initialized = true;
     }
 
-    //#pragma HLS INLINE
-
     if (data_T::size / CONFIG_T::n_filt > 1) {
-        //#pragma HLS ARRAY_PARTITION variable=pool_table_width complete
+        // Vivado: #pragma HLS ARRAY_PARTITION variable=pool_table_width complete (no Catapult in-source equivalent)
     }
 
     typename CONFIG_T::accum_t pool_window[CONFIG_T::pool_width];
-    //#pragma HLS ARRAY_PARTITION variable=pool_window complete
 
     const unsigned wp_idx = w_idx * (data_T::size / CONFIG_T::n_filt);
 
 PixelLoop:
+    #pragma hls_pipeline_init_interval 1
     for (unsigned p = 0; p < data_T::size / CONFIG_T::n_filt; p++) {
-        //#pragma HLS PIPELINE
 
         ac_int<CONFIG_T::pool_width, false> filt_mask = 0;
         if (wp_idx + p < nW) {
@@ -350,7 +334,6 @@ void pooling1d_encoded_cl(ac_channel<data_T> &data, ac_channel<res_T> &res) {
     assert(CONFIG_T::pool_width == CONFIG_T::stride_width);
 
     res_T res_pack;
-    //#pragma HLS DATA_PACK variable=res_pack
     unsigned outputs_ready = 0;
 
     ac_channel<typename data_T::value_type> data_window[CONFIG_T::pool_width * CONFIG_T::n_filt];
@@ -361,12 +344,10 @@ void pooling1d_encoded_cl(ac_channel<data_T> &data, ac_channel<res_T> &res) {
 
     constexpr int pack_factor = data_T::size / CONFIG_T::n_filt;
 
+#pragma hls_pipeline_init_interval pack_factor
 ReadInputWidth:
     for (unsigned i_iw = 0; i_iw < CONFIG_T::n_in / (pack_factor); i_iw++) {
-        //#pragma HLS LOOP_FLATTEN
-        if (res_T::size / CONFIG_T::n_filt == 1) {
-            //#pragma HLS PIPELINE II=pack_factor
-        }
+        // Vivado: #pragma HLS LOOP_FLATTEN (no Catapult in-source equivalent)
         compute_pool_encoded_1d<data_T, res_T, CONFIG_T>(i_iw, data.read(), data_window, res, res_pack, outputs_ready);
     }
 }
@@ -376,20 +357,16 @@ ReadInputWidth:
 // *************************************************
 template <class data_T, class res_T, typename CONFIG_T>
 void compute_pool_buffer_1d(const data_T &in_elem, ac_channel<res_T> &res) {
-    //#pragma HLS INLINE
     const static int lShiftX = CONFIG_T::pool_width - 1;
     // Counters
     static int pX = 0;
     static int sX = 0;
 
     typename data_T::value_type pool_window[CONFIG_T::pool_width];
-    //#pragma HLS ARRAY_PARTITION variable=pool_window complete
 
     static typename data_T::value_type kernel_data[CONFIG_T::pool_width * CONFIG_T::n_filt];
-    //#pragma HLS ARRAY_PARTITION variable = kernel_data complete dim = 0
 
     res_T res_pack;
-    //#pragma HLS DATA_PACK variable=res_pack
 
     // Add pixel into line buffer, return pooling kernels
     // 1D case line buffer not necessary. Put directly into the kernel_data buffer
@@ -398,8 +375,8 @@ void compute_pool_buffer_1d(const data_T &in_elem, ac_channel<res_T> &res) {
     // Can compute pooling output
     if ((sX - lShiftX) == 0 && pX > lShiftX - 1) {
     FiltLoop:
+        #pragma hls_pipeline_init_interval 1
         for (unsigned i_ic = 0; i_ic < CONFIG_T::n_filt; i_ic++) {
-        //#pragma HLS PIPELINE
 
         // Retrieve data for current channel
         PoolLoop:
@@ -432,15 +409,14 @@ void pooling1d_buffer_cl(ac_channel<data_T> &data, ac_channel<res_T> &res) {
     assert(CONFIG_T::pad_left == 0 && CONFIG_T::pad_right == 0);
 
 ReadInputWidth:
+    // Vivado: #pragma HLS LOOP_FLATTEN (no Catapult in-source equivalent)
+    #pragma hls_pipeline_init_interval 1
     for (unsigned i_iw = 0; i_iw < CONFIG_T::n_in; i_iw++) {
-        //#pragma HLS LOOP_FLATTEN
-        //#pragma HLS PIPELINE
         compute_pool_buffer_1d<data_T, res_T, CONFIG_T>(data.read(), res);
     }
 }
 
 template <class data_T, class res_T, typename CONFIG_T> void pooling1d_cl(ac_channel<data_T> &data, ac_channel<res_T> &res) {
-    //#pragma HLS inline region
     switch (CONFIG_T::implementation) {
     case conv_implementation::linebuffer:
         pooling1d_buffer_cl<data_T, res_T, CONFIG_T>(data, res);
@@ -456,7 +432,6 @@ template <class data_T, class res_T, typename CONFIG_T> void pooling1d_cl(ac_cha
 // *************************************************
 
 template <class T, int N, class CONFIG_T> T reduce_global_pool(T x, T y[N]) {
-    //#pragma HLS INLINE
     if (CONFIG_T::pool_op == Max) {
         Op_max<T> op_max;
         T y_max = reduce<T, N, Op_max<T>>(y, op_max);
@@ -471,12 +446,13 @@ template <class T, int N, class CONFIG_T> T reduce_global_pool(T x, T y[N]) {
 template <class data_T, class res_T, typename CONFIG_T>
 void compute_global_pool(const data_T &in_elem, typename CONFIG_T::accum_t data_window[CONFIG_T::n_filt]) {
 PoolFilt:
+    #pragma hls_unroll
     for (unsigned c = 0; c < CONFIG_T::n_filt; c++) {
 
         typename CONFIG_T::accum_t data_pack[data_T::size / CONFIG_T::n_filt];
-        //#pragma HLS ARRAY_PARTITION variable=data_pack complete dim=0
 
     PixelLoop:
+        #pragma hls_unroll
         for (unsigned p = 0; p < data_T::size / CONFIG_T::n_filt; p++) {
             data_pack[p] = in_elem[p * CONFIG_T::n_filt + c];
         }
@@ -491,7 +467,6 @@ void global_pooling2d_cl(ac_channel<data_T> &data, ac_channel<res_T> &res) {
     assert(CONFIG_T::pool_height == CONFIG_T::stride_height && CONFIG_T::pool_width == CONFIG_T::stride_width);
 
     typename CONFIG_T::accum_t data_window[CONFIG_T::n_filt];
-    //#pragma HLS ARRAY_PARTITION variable=data_window complete
 
     typename CONFIG_T::accum_t init = 0;
     if (CONFIG_T::pool_op == Max) {
@@ -500,6 +475,7 @@ void global_pooling2d_cl(ac_channel<data_T> &data, ac_channel<res_T> &res) {
     }
 
 PoolInitLoop:
+    #pragma hls_unroll
     for (unsigned i_init = 0; i_init < CONFIG_T::n_filt; i_init++) {
         data_window[i_init] = init;
     }
@@ -508,19 +484,19 @@ ReadInputHeight:
     for (unsigned i_ih = 0; i_ih < CONFIG_T::in_height; i_ih++) {
     ReadInputWidth:
         for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width / (data_T::size / CONFIG_T::n_filt); i_iw++) {
-            //#pragma HLS LOOP_FLATTEN
+            // Vivado: #pragma HLS LOOP_FLATTEN (no Catapult in-source equivalent)
             compute_global_pool<data_T, res_T, CONFIG_T>(data.read(), data_window);
         }
     }
 
     if (CONFIG_T::pool_op == Max) {
     MaxPoolRes:
+        #pragma hls_pipeline_init_interval 1
         for (unsigned i_res = 0; i_res < CONFIG_T::n_filt / res_T::size; i_res++) {
-            //#pragma HLS PIPELINE
 
             res_T res_pack;
-        //#pragma HLS DATA_PACK variable=res_pack
         MaxPoolPack:
+            #pragma hls_unroll
             for (unsigned i_pack = 0; i_pack < res_T::size; i_pack++) {
                 res_pack[i_pack] = data_window[i_pack];
             }
@@ -528,12 +504,12 @@ ReadInputHeight:
         }
     } else {
     AvgPoolRes:
+        #pragma hls_pipeline_init_interval 1
         for (unsigned i_res = 0; i_res < CONFIG_T::n_filt / res_T::size; i_res++) {
-            //#pragma HLS PIPELINE
 
             res_T res_pack;
-        //#pragma HLS DATA_PACK variable=res_pack
         AvgPoolPack:
+            #pragma hls_unroll
             for (unsigned i_pack = 0; i_pack < res_T::size; i_pack++) {
                 res_pack[i_pack] = data_window[i_pack] / (CONFIG_T::in_height * CONFIG_T::in_width);
             }
@@ -548,7 +524,6 @@ void global_pooling1d_cl(ac_channel<data_T> &data, ac_channel<res_T> &res) {
     assert(CONFIG_T::pool_width == CONFIG_T::stride_width);
 
     typename CONFIG_T::accum_t data_window[CONFIG_T::n_filt];
-    //#pragma HLS ARRAY_PARTITION variable=data_window complete
 
     typename CONFIG_T::accum_t init = 0;
     if (CONFIG_T::pool_op == Max) {
@@ -557,24 +532,25 @@ void global_pooling1d_cl(ac_channel<data_T> &data, ac_channel<res_T> &res) {
     }
 
 PoolInitLoop:
+    #pragma hls_unroll
     for (unsigned i_init = 0; i_init < CONFIG_T::n_filt; i_init++) {
         data_window[i_init] = init;
     }
 
 ReadInput:
+    // Vivado: #pragma HLS LOOP_FLATTEN (no Catapult in-source equivalent)
     for (unsigned i_iw = 0; i_iw < CONFIG_T::n_in / (data_T::size / CONFIG_T::n_filt); i_iw++) {
-        //#pragma HLS LOOP_FLATTEN
         compute_global_pool<data_T, res_T, CONFIG_T>(data.read(), data_window);
     }
 
     if (CONFIG_T::pool_op == Max) {
     MaxPoolRes:
+        #pragma hls_pipeline_init_interval 1
         for (unsigned i_res = 0; i_res < CONFIG_T::n_filt / res_T::size; i_res++) {
-            //#pragma HLS PIPELINE
 
             res_T res_pack;
-        //#pragma HLS DATA_PACK variable=res_pack
         MaxPoolPack:
+            #pragma hls_unroll
             for (unsigned i_pack = 0; i_pack < res_T::size; i_pack++) {
                 res_pack[i_pack] = data_window[i_pack];
             }
@@ -582,12 +558,12 @@ ReadInput:
         }
     } else {
     AvgPoolRes:
+        #pragma hls_pipeline_init_interval 1
         for (unsigned i_res = 0; i_res < CONFIG_T::n_filt / res_T::size; i_res++) {
-            //#pragma HLS PIPELINE
 
             res_T res_pack;
-        //#pragma HLS DATA_PACK variable=res_pack
         AvgPoolPack:
+            #pragma hls_unroll
             for (unsigned i_pack = 0; i_pack < res_T::size; i_pack++) {
                 res_pack[i_pack] = data_window[i_pack] / CONFIG_T::n_in;
             }

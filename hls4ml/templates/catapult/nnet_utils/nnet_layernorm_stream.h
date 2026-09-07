@@ -26,34 +26,27 @@ void layernormalize(ac_channel<data_T> &data, ac_channel<res_T> &res,
                     typename CONFIG_T::table_t rsqrt_table[CONFIG_T::table_size]) {
     static const unsigned dim = CONFIG_T::n_in / CONFIG_T::seq_len;
 
-    //#pragma HLS ARRAY_PARTITION variable=scale complete
-    //#pragma HLS ARRAY_PARTITION variable=bias complete
-
+    #pragma hls_pipeline_init_interval 1
 LayerNormSeqLoop:
     for (int j = 0; j < CONFIG_T::seq_len; ++j) {
-        //#pragma HLS PIPELINE
-
         data_T in_pack = data.read();
         res_T out_pack;
-        //#pragma HLS DATA_PACK variable=out_pack
 
         typename data_T::value_type in_buf[dim];
         typename res_T::value_type out_buf[dim];
-        //#pragma HLS ARRAY_PARTITION variable=in_buf complete
-        //#pragma HLS ARRAY_PARTITION variable=out_buf complete
 
+        #pragma hls_unroll
     LayerNormLoad:
         for (int i = 0; i < dim; ++i) {
-            //#pragma HLS UNROLL
             in_buf[i] = in_pack[i];
         }
 
         layernorm_1d<typename data_T::value_type, typename res_T::value_type, CONFIG_T>(in_buf, out_buf, scale, bias,
                                                                                         rsqrt_table);
 
+        #pragma hls_unroll
     LayerNormStore:
         for (int i = 0; i < dim; ++i) {
-            //#pragma HLS UNROLL
             out_pack[i] = out_buf[i];
         }
 

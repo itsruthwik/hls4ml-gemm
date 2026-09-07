@@ -20,24 +20,17 @@ void depthwise_conv_1d_encoded_cl(ac_channel<data_T> &data, ac_channel<res_T> &r
     //      #pragma HLS STREAM variable=data_window[i_out] depth=win_depth
     //  }
 
-    //#pragma HLS ARRAY_PARTITION variable=CONFIG_T::pixels complete
-
     res_T res_pack;
-    //#pragma HLS DATA_PACK variable=res_pack
     unsigned outputs_ready = 0;
 
     ac_int<CONFIG_T::filt_width, false> pixel_idx[data_T::size / CONFIG_T::n_chan];
-    //#pragma HLS ARRAY_PARTITION variable=pixel_idx complete
 
-    constexpr int ce_reuse_factor =
-        CONFIG_T::reuse_factor * (CONFIG_T::strategy == nnet::latency && data_T::size / CONFIG_T::n_chan == 1);
+    constexpr int ce_reuse_factor = (CONFIG_T::strategy == nnet::latency && data_T::size / CONFIG_T::n_chan == 1) ? (int)CONFIG_T::reuse_factor : 1;
     (void)ce_reuse_factor;
+#pragma hls_pipeline_init_interval ce_reuse_factor
 ReadInputWidth:
     for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width / (data_T::size / CONFIG_T::n_chan); i_iw++) {
-        //#pragma HLS LOOP_FLATTEN
-        if (CONFIG_T::strategy == nnet::latency && data_T::size / CONFIG_T::n_chan == 1) {
-            //#pragma HLS PIPELINE II=CONFIG_T::reuse_factor
-        }
+        // Vivado: #pragma HLS LOOP_FLATTEN (no Catapult in-source equivalent)
         compute_scaled_indices_1d<data_T, CONFIG_T>(i_iw, pixel_idx);
         compute_depthwise_output_encoded<data_T, res_T, CONFIG_T>(data.read(), data_window, res, res_pack, outputs_ready,
                                                                   weights, biases, pixel_idx);
@@ -50,14 +43,12 @@ void depthwise_conv_1d_buffer_cl(ac_channel<data_T> &data, ac_channel<res_T> &re
                                  typename CONFIG_T::bias_t biases[CONFIG_T::n_chan]) {
     assert(CONFIG_T::pad_left == 0 && CONFIG_T::pad_right == 0);
 
-    constexpr int ce_reuse_factor = CONFIG_T::reuse_factor * (CONFIG_T::strategy == nnet::latency);
+    constexpr int ce_reuse_factor = (CONFIG_T::strategy == nnet::latency) ? (int)CONFIG_T::reuse_factor : 1;
     (void)ce_reuse_factor;
+#pragma hls_pipeline_init_interval ce_reuse_factor
 ReadInputWidth:
     for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width; i_iw++) {
-        //#pragma HLS LOOP_FLATTEN
-        if (CONFIG_T::strategy == nnet::latency) {
-            //#pragma HLS PIPELINE II=CONFIG_T::reuse_factor
-        }
+        // Vivado: #pragma HLS LOOP_FLATTEN (no Catapult in-source equivalent)
         compute_depthwise_output_buffer_1d<data_T, res_T, CONFIG_T>(data.read(), res, weights, biases);
     }
 }
@@ -84,17 +75,11 @@ void pointwise_conv_1d_cl(ac_channel<data_T> &data, ac_channel<res_T> &res,
     assert(CONFIG_T::pad_left == 0 && CONFIG_T::pad_right == 0);
     assert(CONFIG_T::filt_width == 1);
 
-    //#pragma HLS ARRAY_PARTITION variable=weights complete
-    //#pragma HLS ARRAY_PARTITION variable=biases complete
-
-    constexpr int ce_reuse_factor =
-        CONFIG_T::reuse_factor * (CONFIG_T::strategy == nnet::latency && data_T::size / CONFIG_T::n_chan == 1);
+    constexpr int ce_reuse_factor = (CONFIG_T::strategy == nnet::latency && data_T::size / CONFIG_T::n_chan == 1) ? (int)CONFIG_T::reuse_factor : 1;
     (void)ce_reuse_factor;
+#pragma hls_pipeline_init_interval ce_reuse_factor
 ReadInputWidth:
     for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width / (data_T::size / CONFIG_T::n_chan); i_iw++) {
-        if (CONFIG_T::strategy == nnet::latency && data_T::size / CONFIG_T::n_chan == 1) {
-            //#pragma HLS PIPELINE II=CONFIG_T::reuse_factor
-        }
         if (i_iw % CONFIG_T::stride_width == 0) {
             pointwise_mult_buffer<data_T, res_T, CONFIG_T>(data.read(), res, weights, biases);
         } else {
@@ -111,11 +96,8 @@ void separable_conv_1d_cl(ac_channel<data_T> &data, ac_channel<res_T> &res,
                               pointwise_weights[CONFIG_T::pointwise_config::n_chan * CONFIG_T::pointwise_config::n_filt],
                           typename CONFIG_T::depthwise_config::bias_t depthwise_biases[CONFIG_T::depthwise_config::n_chan],
                           typename CONFIG_T::pointwise_config::bias_t pointwise_biases[CONFIG_T::pointwise_config::n_filt]) {
-    //#pragma HLS DATAFLOW
-
     ac_channel<dw_res_T> depthwise_res;
     unsigned res_depth = CONFIG_T::depthwise_config::out_width;
-    //#pragma HLS STREAM variable=depthwise_res depth=res_depth
 
     depthwise_conv_1d_cl<data_T, dw_res_T, typename CONFIG_T::depthwise_config>(data, depthwise_res, depthwise_weights,
                                                                                 depthwise_biases);

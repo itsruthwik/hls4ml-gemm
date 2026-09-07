@@ -75,7 +75,15 @@ class CatapultWriter(Writer):
             if getattr(var, 'pragma', None):
                 pragmas.append('    ' + self._make_array_pragma(var, layer.model) + '\n')
 
+        # Each stage is a Catapult block; its implicit 'main' loop is the per-beat driver.
+        # Pipeline it at II=reuse_factor in-source (the analogue of Vitis' function-level
+        # PIPELINE on a dataflow stage) instead of via a tcl directive.
+        try:
+            ii = int(layer.model.config.get_reuse_factor(layer))
+        except Exception:
+            ii = 1
         wrapper = '#pragma hls_design block\n'
+        wrapper += f'#pragma hls_pipeline_init_interval {max(ii, 1)}\n'
         wrapper += f'void {layer.name}_stage(\n'
         wrapper += ',\n'.join(f'    {param}' for param in params)
         wrapper += '\n) {\n'
@@ -977,35 +985,6 @@ class CatapultWriter(Writer):
                         )
                     else:
                         line = ''
-                elif '#hls-fpga-machine-learning insert pipeline-directives' in line:
-                    # Emit one hls4ml_pipeline_stage_loops call per io_stream + latency layer so
-                    # Catapult pipelines each stage's streaming driver loop at II=reuse_factor
-                    # (Vitis parity; Catapult ignores the in-source pipeline pragma). Each layer is
-                    # a <name>_stage block; the proc enumerates and pipelines its non-unrolled loops.
-                    io_type = model.config.get_config_value('IOType')
-                    style = model.config.get_writer_config().get('StreamFunctionStyle', None)
-                    use_stage_wrappers = io_type == 'io_stream' and style != 'inline'
-                    emitted = ''
-                    top = model.config.get_project_name()
-                    if use_stage_wrappers:
-                        for layer in model.get_layers():
-                            # Same gate as _emit_catapult_stage_wrapper: exactly one function_cpp.
-                            if len(self._as_list(layer.get_attr('function_cpp', None))) != 1:
-                                continue
-                            strategy = model.config.get_strategy(layer)
-                            if strategy is None or strategy.lower() != 'latency':
-                                continue
-                            try:
-                                ii = int(model.config.get_reuse_factor(layer))
-                            except Exception:
-                                ii = 1
-                            emitted += indent + f'hls4ml_pipeline_stage_loops {top} {{{layer.name}}} {ii}\n'
-                    if self._uses_gemm_ip(model):
-                        # Catapult ignores the in-source pipeline pragma the generated GEMM-IP
-                        # wrapper carries; this proc sets PIPELINE_INIT_INTERVAL=1 on its feed/drain
-                        # loops (matched by leaf name at any nesting depth).
-                        emitted += indent + f'hls4ml_pipeline_gemm_loops {top}\n'
-                    line = emitted  # '' is a safe no-op (io_parallel / all-resource designs)
                 dst.write(line)
 
         # Optional bottom-up Tcl script
