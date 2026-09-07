@@ -35,18 +35,18 @@ void einsum_stream(ac_channel<data0_T> &data0_stream, ac_channel<data1_T> &data1
     b_T raw1[N1];
 
     // Drain both input streams fully into flat buffers (packing-agnostic).
+    #pragma hls_pipeline_init_interval 1
 ReadInp0:
     for (unsigned i = 0; i < N0 / data0_T::size; i++) {
-        #pragma hls_pipeline_init_interval 1
         data0_T beat = data0_stream.read();
         #pragma hls_unroll
         for (unsigned p = 0; p < data0_T::size; p++) {
             raw0[i * data0_T::size + p] = beat[p];
         }
     }
+    #pragma hls_pipeline_init_interval 1
 ReadInp1:
     for (unsigned i = 0; i < N1 / data1_T::size; i++) {
-        #pragma hls_pipeline_init_interval 1
         data1_T beat = data1_stream.read();
         #pragma hls_unroll
         for (unsigned p = 0; p < data1_T::size; p++) {
@@ -67,15 +67,15 @@ ReadInp1:
     // Contraction: identical structure/pragmas to nnet::einsum (bit-exact).
     c_T tpose_o[NO];
     typename CONFIG_T::accum_t accum_buf;
+    #pragma hls_unroll
     for (unsigned i = 0; i < I; i++) {
         #pragma hls_unroll
         for (unsigned l0 = 0; l0 < L0; l0++) {
             #pragma hls_unroll
             for (unsigned l1 = 0; l1 < L1; l1++) {
-                #pragma hls_unroll
                 accum_buf = 0;
+                #pragma hls_unroll
                 for (unsigned c = 0; c < C; c++) {
-                    #pragma hls_unroll
                     a_T a = tpose_i0[(i * L0 + l0) * C + c];
                     b_T b = tpose_i1[i * L1 * C + l1 * C + c];
                     accum_buf += CONFIG_T::template product<a_T, b_T>::product(a, b);
@@ -89,9 +89,9 @@ ReadInp1:
     nnet::transpose<c_T, c_T, typename CONFIG_T::tpose_out_conf>(tpose_o, out_flat);
 
     // Emit output beats in the same packing the writer expects.
+    #pragma hls_pipeline_init_interval 1
 WriteOut:
     for (unsigned i = 0; i < NO / res_T::size; i++) {
-        #pragma hls_pipeline_init_interval 1
         res_T beat;
         #pragma hls_unroll
         for (unsigned p = 0; p < res_T::size; p++) {

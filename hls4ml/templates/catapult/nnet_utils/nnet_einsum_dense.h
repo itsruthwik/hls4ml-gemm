@@ -28,14 +28,16 @@ void einsum_dense(
     constexpr unsigned C = CONFIG_T::n_contract;
     constexpr unsigned I = CONFIG_T::n_inplace;
 
+    constexpr int pf_unroll = CONFIG_T::parallelization_factor;
+    (void)pf_unroll;
+    #pragma hls_unroll pf_unroll
     for (unsigned l0 = 0; l0 < L0; l0++) {
         #pragma hls_unroll
         for (unsigned i = 0; i < I; i++) {
-            #pragma hls_unroll
             dense<data_T, res_T, typename CONFIG_T::dense_conf>(&inp_tpose[(i * L0 + l0) * C], out_buffer,
                                                                 &weights[(i * L1 * C)], &biases[((i * L0 + l0) * L1)]);
+            #pragma hls_unroll
             for (unsigned j = 0; j < L1; j++) {
-                #pragma hls_unroll
                 out_tpose[(i * L0 + l0) * L1 + j] = out_buffer[j];
             }
         }

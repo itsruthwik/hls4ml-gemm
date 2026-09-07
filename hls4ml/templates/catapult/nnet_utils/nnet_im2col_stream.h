@@ -33,9 +33,9 @@ void im2col_2d_cl(
 
 ReadInputHeight:
     for (unsigned i_ih = 0; i_ih < CONFIG_T::in_height; i_ih++) {
+        #pragma hls_pipeline_init_interval 1
     ReadInputWidth:
         for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width; i_iw++) {
-            #pragma hls_pipeline_init_interval 1
 
             // Add pixel to buffer
             nnet::shift_line_buffer<data_T, CONFIG_T>(data.read(), line_buffer, kernel_data);
@@ -45,9 +45,9 @@ ReadInputHeight:
                 res_T res_pack;
                 PRAGMA_DATA_PACK(res_pack)
 
+                #pragma hls_unroll
             PackLoop:
                 for (unsigned i_ic = 0; i_ic < CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan; i_ic++) {
-                    #pragma hls_unroll
                     res_pack[i_ic] = kernel_data[i_ic];
                 }
                 res.write(res_pack);
