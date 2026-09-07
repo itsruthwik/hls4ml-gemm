@@ -216,6 +216,33 @@ template <class data_T, class res_T, int N> void repack_stream(ac_channel<data_T
     }
 }
 
+// Arbitrary index-permutation transpose over a stream: reassembles the whole
+// CONFIG_T::N-element tensor into a flat buffer, then re-emits it permuted by
+// CONFIG_T::index_map[i] (the flattened output-index -> input-index map the
+// Catapult Transpose config template precomputes on the Python side -- see
+// hls4ml.backends.catapult.passes.reshaping_templates.catapult_transpose_config_gen).
+// Mirrors nnet::repack_stream's read-all/write-all shape, generalized to a
+// non-identity element order instead of just a different pack width.
+template <class data_T, class res_T, typename CONFIG_T>
+void transpose_stream(ac_channel<data_T> &data, ac_channel<res_T> &res) {
+    typename data_T::value_type data_array[CONFIG_T::N];
+
+    for (int i = 0; i < CONFIG_T::N / data_T::size; i++) {
+        data_T in_data = data.read();
+        for (int j = 0; j < data_T::size; j++) {
+            data_array[i * data_T::size + j] = in_data[j];
+        }
+    }
+
+    for (int i = 0; i < CONFIG_T::N / res_T::size; i++) {
+        res_T out_data;
+        for (int j = 0; j < res_T::size; j++) {
+            out_data[j] = data_array[CONFIG_T::index_map[i * res_T::size + j]];
+        }
+        res.write(out_data);
+    }
+}
+
 template <class data_T, class res_T, typename CONFIG_T>
 void broadcast_stream_1x1xC(ac_channel<data_T> &data, ac_channel<res_T> &res) {
     assert(CONFIG_T::in_height == 1 && CONFIG_T::in_width == 1 && CONFIG_T::in_chan == CONFIG_T::out_chan);

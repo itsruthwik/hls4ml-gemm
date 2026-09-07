@@ -351,7 +351,7 @@ class SoftmaxFunctionTemplate(FunctionCallTemplate):
 
 class ActivationFunctionTemplate(FunctionCallTemplate):
     def __init__(self):
-        super().__init__((Activation, HardActivation, Softmax), include_header=activ_include_list)
+        super().__init__((Activation, HardActivation), include_header=activ_include_list)
         self.template = activ_function_template
 
     def format(self, node):

@@ -551,18 +551,48 @@ void ac_softmax_pwl_wrapper(const ac_fixed<W1, I1, S1, Q1, O1> (&input)[K], ac_f
         output[x] = tmp[x];
 }
 
-template <class data_T, class res_T, typename CONFIG_T>
-void softmax(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_in]) {
-    data_T data_copy[CONFIG_T::n_in];
-    res_T res_copy[CONFIG_T::n_in];
+// Slice-sized ac_math softmax: takes the row length N as an explicit template
+// parameter instead of CONFIG_T::n_in, so it can run per-row on the n_slice-long
+// chunks of a multi-row (n_outer x n_inner rows of n_slice) softmax, as well as
+// on the whole n_in-long input for the ordinary single-row case below.
+template <unsigned N, class data_T, class res_T, typename CONFIG_T>
+void softmax_slice(data_T data[N], res_T res[N]) {
+    data_T data_copy[N];
+    res_T res_copy[N];
 // workaround for the array passing - alternative is to change the signature of all of the functions to reference-of-array
 COPY_IN_ARRAY:
-    for (unsigned i = 0; i < CONFIG_T::n_in; i++)
+    for (unsigned i = 0; i < N; i++)
         data_copy[i] = data[i];
     ac_softmax_pwl_wrapper(data_copy, res_copy);
 COPY_OUT_ARRAY:
-    for (unsigned i = 0; i < CONFIG_T::n_in; i++)
+    for (unsigned i = 0; i < N; i++)
         res[i] = res_copy[i];
+}
+
+template <class data_T, class res_T, typename CONFIG_T>
+void softmax(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_in]) {
+    softmax_slice<CONFIG_T::n_in, data_T, res_T, CONFIG_T>(data, res);
+}
+
+// Multi-row softmax: CONFIG_T::n_in is really n_outer * n_slice * n_inner elements
+// (n_outer x n_inner independent rows of n_slice each, e.g. one row per attention
+// head / query position); softmax must normalize each row independently rather
+// than across the flattened buffer. Mirrors Vivado's nnet::softmax_multidim.
+template <class data_T, class res_T, typename CONFIG_T>
+void softmax_multidim(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_in]) {
+    data_T buffer_in[CONFIG_T::n_slice];
+    res_T buffer_out[CONFIG_T::n_slice];
+    for (signed i = 0; i < CONFIG_T::n_outer; i++) {
+        for (signed k = 0; k < CONFIG_T::n_inner; k++) {
+            for (signed j = 0; j < CONFIG_T::n_slice; j++) {
+                buffer_in[j] = data[i * CONFIG_T::n_slice * CONFIG_T::n_inner + j * CONFIG_T::n_inner + k];
+            }
+            softmax_slice<CONFIG_T::n_slice, data_T, res_T, CONFIG_T>(buffer_in, buffer_out);
+            for (signed j = 0; j < CONFIG_T::n_slice; j++) {
+                res[i * CONFIG_T::n_slice * CONFIG_T::n_inner + j * CONFIG_T::n_inner + k] = buffer_out[j];
+            }
+        }
+    }
 }
 
 #endif
