@@ -148,8 +148,18 @@ class VivadoBackend(FPGABackend):
             attrs.append(
                 TypeAttribute(
                     'accum',
+                    # 24,8 (16 fractional bits, up from 10): the plain (non-HGQ2) LN path has no
+                    # register_precision sizing, so this default accum_t is what the kernel's
+                    # `/(int)dim` divide runs in. A narrow accum_t loses up to 1 LSB of the
+                    # quotient (the fixed-point divide truncates internally before the
+                    # destination's rounding mode applies), which is fatal for small-variance
+                    # tokens where the variance itself is only a few LSBs wide. Widening accum_t
+                    # instead of reworking the kernel's arithmetic keeps the divide -- required
+                    # for HGQ2 bit-exactness at non-power-of-2 dim -- and keeps it synthesizable
+                    # (a wide-intermediate divide was tried and failed Catapult C/RTL synthesis:
+                    # no library divider component for the resulting ~80-bit quotient).
                     default=FixedPrecisionType(
-                        14, 4, signed=True, rounding_mode=RoundingMode.RND_CONV, saturation_mode=SaturationMode.SAT
+                        24, 8, signed=True, rounding_mode=RoundingMode.RND_CONV, saturation_mode=SaturationMode.SAT
                     ),
                     description=descriptions.accum_type,
                 )

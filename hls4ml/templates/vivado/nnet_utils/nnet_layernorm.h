@@ -69,17 +69,16 @@ LAYERNORM_1D_SUM:
     // accum_t (error ~2^-accum_f, unscaled), which tracks HGQ2's float Sum/dim; a fixed 1/dim
     // reciprocal-multiply instead rounds the reciprocal (error ~Sum*2^-accum_f) and was what made
     // the rare per-token rsqrt index flip. Same idiom as average pooling's `y /= length`.
-    // NOTE: do the divide in a wide intermediate, not directly in accum_t. ap_fixed's (and
-    // ac_fixed's) division operator was measured to truncate its own internal quotient to a
-    // width tied to the OPERAND type before the result is ever narrowed to the destination --
-    // so dividing two narrow accum_t values loses precision the destination's rounding mode
-    // never gets a chance to recover. Promoting both operands to a wide fixed type first gives
-    // the division far more quotient bits than accum_t could ever need, so the single narrowing
-    // assignment back to accum_t is the only rounding that happens, and it uses accum_t's own
-    // mode correctly. This only matters for a narrow accum_t (e.g. the plain-LayerNorm default
-    // ap_fixed<14,4>); it is a no-op for the HGQ2 path, which sizes accum_t explicitly.
-    typedef ap_fixed<64, 32> ln_div_t;
-    mean = (ln_div_t)sum_cache / (ln_div_t)(int)dim;
+    // NOTE: keep this divide directly in accum_t -- do NOT promote the operands to a wide
+    // intermediate type. That was tried (a fixed-point divide of two narrow accum_t values does
+    // lose precision versus true round-to-nearest) but a wide ac_fixed/ap_fixed quotient
+    // synthesizes to a divider Catapult's default resource library has no component for
+    // (measured: 'div(80,1,37,0,37)' fails C/RTL synthesis -- CRAAS-6). accum_t is sized
+    // explicitly for the HGQ2 path (register_precision) and is bit-exact there regardless of
+    // width; the plain (non-HGQ2) path's precision is fixed by widening its DEFAULT accum_t
+    // (see vivado_backend/catapult_backend's LayerNorm attribute registration), not by
+    // reworking this arithmetic.
+    mean = sum_cache / (int)dim;
     // Quantize the mean to HGQ2's mean_q precision so (x - mean) is bit-exact to HGQ2.
     typename CONFIG_T::mean_t mean_q = mean;
 
@@ -89,7 +88,7 @@ LAYERNORM_1D_VAR:
         diff = data_diff[i] * data_diff[i];
         sum_cache2 += diff;
     }
-    var = (ln_div_t)sum_cache2 / (ln_div_t)(int)dim;
+    var = sum_cache2 / (int)dim;
 
     // HGQ2 address: quantize the variance to rsqrt_addr_f fractional bits (round),
     // then saturate into the unsigned table range [0, table_size).
