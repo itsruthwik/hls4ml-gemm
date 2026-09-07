@@ -169,6 +169,8 @@ void conv_2d_latency_cl(
     res_T res[CONFIG_T::out_height * CONFIG_T::out_width * CONFIG_T::n_filt],
     typename CONFIG_T::weight_t weights[CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan * CONFIG_T::n_filt],
     typename CONFIG_T::bias_t biases[CONFIG_T::n_filt]) {
+    constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
+    (void)ce_reuse_factor;
 
     typename CONFIG_T::accum_t mult[CONFIG_T::out_height * CONFIG_T::out_width * CONFIG_T::n_filt * CONFIG_T::n_chan *
                                     CONFIG_T::filt_height * CONFIG_T::filt_width];
@@ -178,18 +180,22 @@ void conv_2d_latency_cl(
     const int multiplier_limit = compute_multiplier_limit_conv2d<CONFIG_T>(weights);
 
     // Convolve, saving all multiplication results to accumulate later
-    #pragma hls_pipeline_init_interval 1
+    #pragma hls_pipeline_init_interval ce_reuse_factor
 ConvOutHeight:
     for (int oh = 0; oh < CONFIG_T::out_height; oh++) {
+        #pragma hls_unroll
     ConvOutWidth:
         for (int ow = 0; ow < CONFIG_T::out_width; ow++) {
+            #pragma hls_unroll
         ConvFilt:
             for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
-            #pragma hls_unroll
+                #pragma hls_unroll
             ConvChan:
                 for (int cc = 0; cc < CONFIG_T::n_chan; cc++) {
+                    #pragma hls_unroll
                 ConvFiltHeight:
                     for (int fh = 0; fh < CONFIG_T::filt_height; fh++) {
+                        #pragma hls_unroll
                     ConvFiltWidth:
                         for (int fw = 0; fw < CONFIG_T::filt_width; fw++) {
 
@@ -224,7 +230,9 @@ ConvOutHeight:
     }                     // end output height loop
 
     // Initialize accumulator with input biases
+    #pragma hls_pipeline_init_interval ce_reuse_factor
     for (int oh = 0; oh < CONFIG_T::out_height; oh++) {
+        #pragma hls_unroll
         for (int ow = 0; ow < CONFIG_T::out_width; ow++) {
             #pragma hls_unroll
             for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
@@ -234,17 +242,23 @@ ConvOutHeight:
     }
 
 // Accumulate multiplication result
+    #pragma hls_pipeline_init_interval ce_reuse_factor
 AccumOutHeight:
     for (int oh = 0; oh < CONFIG_T::out_height; oh++) {
+        #pragma hls_unroll
     AccumOutWidth:
         for (int ow = 0; ow < CONFIG_T::out_width; ow++) {
+            #pragma hls_unroll
         AccumFilt:
             for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
             // Do "dot product" sum within filter and sum over channels
+                #pragma hls_unroll
             AccumChan:
                 for (int cc = 0; cc < CONFIG_T::n_chan; cc++) {
+                    #pragma hls_unroll
                 AccumDotHeight:
                     for (int fh = 0; fh < CONFIG_T::filt_height; fh++) {
+                        #pragma hls_unroll
                     AccumDotWidth:
                         for (int fw = 0; fw < CONFIG_T::filt_width; fw++) {
 
@@ -266,7 +280,9 @@ AccumOutHeight:
     }                     // end output height loop
 
     // Cast to "res_t" type
+    #pragma hls_pipeline_init_interval ce_reuse_factor
     for (int oh = 0; oh < CONFIG_T::out_height; oh++) {
+        #pragma hls_unroll
         for (int ow = 0; ow < CONFIG_T::out_width; ow++) {
             #pragma hls_unroll
             for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
@@ -283,6 +299,8 @@ void pointwise_conv_2d_latency_cl(data_T data[CONFIG_T::in_height * CONFIG_T::in
                                   res_T res[CONFIG_T::out_height * CONFIG_T::out_width * CONFIG_T::n_filt],
                                   typename CONFIG_T::weight_t weights[CONFIG_T::n_chan * CONFIG_T::n_filt],
                                   typename CONFIG_T::bias_t biases[CONFIG_T::n_filt]) {
+    constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
+    (void)ce_reuse_factor;
 
     typename CONFIG_T::accum_t mult[CONFIG_T::out_height * CONFIG_T::out_width * CONFIG_T::n_filt * CONFIG_T::n_chan];
     typename CONFIG_T::accum_t acc[CONFIG_T::out_height * CONFIG_T::out_width * CONFIG_T::n_filt];
@@ -291,14 +309,16 @@ void pointwise_conv_2d_latency_cl(data_T data[CONFIG_T::in_height * CONFIG_T::in
     const int multiplier_limit = compute_multiplier_limit_conv2d<CONFIG_T>(weights);
 
     // Convolve, saving all multiplication results to accumulate later
-    #pragma hls_pipeline_init_interval 1
+    #pragma hls_pipeline_init_interval ce_reuse_factor
 ConvOutHeight:
     for (int oh = 0; oh < CONFIG_T::out_height; oh++) {
+        #pragma hls_unroll
     ConvOutWidth:
         for (int ow = 0; ow < CONFIG_T::out_width; ow++) {
+            #pragma hls_unroll
         ConvFilt:
             for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
-            #pragma hls_unroll
+                #pragma hls_unroll
             ConvChan:
                 for (int cc = 0; cc < CONFIG_T::n_chan; cc++) {
 
@@ -324,7 +344,9 @@ ConvOutHeight:
     }
 
     // Initialize accumulator with input biases
+    #pragma hls_pipeline_init_interval ce_reuse_factor
     for (int oh = 0; oh < CONFIG_T::out_height; oh++) {
+        #pragma hls_unroll
         for (int ow = 0; ow < CONFIG_T::out_width; ow++) {
             #pragma hls_unroll
             for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
@@ -334,13 +356,17 @@ ConvOutHeight:
     }
 
 // Accumulate multiplication result
+    #pragma hls_pipeline_init_interval ce_reuse_factor
 AccumOutHeight:
     for (int oh = 0; oh < CONFIG_T::out_height; oh++) {
+        #pragma hls_unroll
     AccumOutWidth:
         for (int ow = 0; ow < CONFIG_T::out_width; ow++) {
+            #pragma hls_unroll
         AccumFilt:
             for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
             // Do "dot product" sum within filter and sum over channels
+                #pragma hls_unroll
             AccumChan:
                 for (int cc = 0; cc < CONFIG_T::n_chan; cc++) {
 
@@ -355,7 +381,9 @@ AccumOutHeight:
     }
 
     // Cast to "res_t" type
+    #pragma hls_pipeline_init_interval ce_reuse_factor
     for (int oh = 0; oh < CONFIG_T::out_height; oh++) {
+        #pragma hls_unroll
         for (int ow = 0; ow < CONFIG_T::out_width; ow++) {
             #pragma hls_unroll
             for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {

@@ -43,6 +43,8 @@ void conv_1d_latency_cl(data_T data[CONFIG_T::in_width * CONFIG_T::n_chan],
                         res_T res[CONFIG_T::out_width * CONFIG_T::n_filt],
                         typename CONFIG_T::weight_t weights[CONFIG_T::filt_width * CONFIG_T::n_chan * CONFIG_T::n_filt],
                         typename CONFIG_T::bias_t biases[CONFIG_T::n_filt]) {
+    constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
+    (void)ce_reuse_factor;
 
     typename CONFIG_T::accum_t mult[CONFIG_T::out_width * CONFIG_T::n_filt * CONFIG_T::n_chan * CONFIG_T::filt_width];
     typename CONFIG_T::accum_t acc[CONFIG_T::out_width][CONFIG_T::n_filt];
@@ -51,14 +53,16 @@ void conv_1d_latency_cl(data_T data[CONFIG_T::in_width * CONFIG_T::n_chan],
     const int multiplier_limit = compute_multiplier_limit<CONFIG_T>(weights);
 
     // Convolve, saving all multiplication results to accumulate later
-    #pragma hls_pipeline_init_interval 1
+    #pragma hls_pipeline_init_interval ce_reuse_factor
 ConvOut:
     for (int ii = 0; ii < CONFIG_T::out_width; ii++) {
+        #pragma hls_unroll
     ConvFilt:
         for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
             #pragma hls_unroll
         ConvChan:
             for (int cc = 0; cc < CONFIG_T::n_chan; cc++) {
+                #pragma hls_unroll
             ConvMult:
                 for (int jj = 0; jj < CONFIG_T::filt_width; jj++) {
 
@@ -79,6 +83,7 @@ ConvOut:
     }         // end output loop
 
     // Initialize accumulator with input biases
+    #pragma hls_pipeline_init_interval ce_reuse_factor
     for (int ii = 0; ii < CONFIG_T::out_width; ii++) {
         #pragma hls_unroll
         for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
@@ -87,13 +92,17 @@ ConvOut:
     }
 
 // Accumulate multiplication result
+    #pragma hls_pipeline_init_interval ce_reuse_factor
 AccumOut:
     for (int ii = 0; ii < CONFIG_T::out_width; ii++) {
+        #pragma hls_unroll
     AccumFilt:
         for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
         // Do "dot product" sum within filter and sum over channels
+            #pragma hls_unroll
         AccumChan:
             for (int cc = 0; cc < CONFIG_T::n_chan; cc++) {
+                #pragma hls_unroll
             AccumDot:
                 for (int jj = 0; jj < CONFIG_T::filt_width; jj++) {
                     int index_mult = ii * CONFIG_T::n_filt * CONFIG_T::n_chan * CONFIG_T::filt_width +
@@ -105,6 +114,7 @@ AccumOut:
     }             // end output loop
 
     // Cast to "res_t" type
+    #pragma hls_pipeline_init_interval ce_reuse_factor
     for (int ii = 0; ii < CONFIG_T::out_width; ii++) {
         #pragma hls_unroll
         for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
@@ -118,6 +128,8 @@ void pointwise_conv_1d_latency_cl(data_T data[CONFIG_T::in_width * CONFIG_T::n_c
                                   res_T res[CONFIG_T::out_width * CONFIG_T::n_filt],
                                   typename CONFIG_T::weight_t weights[CONFIG_T::n_chan * CONFIG_T::n_filt],
                                   typename CONFIG_T::bias_t biases[CONFIG_T::n_filt]) {
+    constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
+    (void)ce_reuse_factor;
     assert(CONFIG_T::filt_width == 1);
 
     typename CONFIG_T::accum_t mult[CONFIG_T::out_width * CONFIG_T::n_filt * CONFIG_T::n_chan];
@@ -127,9 +139,10 @@ void pointwise_conv_1d_latency_cl(data_T data[CONFIG_T::in_width * CONFIG_T::n_c
     const int multiplier_limit = compute_multiplier_limit<CONFIG_T>(weights);
 
     // Convolve, saving all multiplication results to accumulate later
-    #pragma hls_pipeline_init_interval 1
+    #pragma hls_pipeline_init_interval ce_reuse_factor
 ConvOut:
     for (int ii = 0; ii < CONFIG_T::out_width; ii++) {
+        #pragma hls_unroll
     ConvFilt:
         for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
             #pragma hls_unroll
@@ -150,6 +163,7 @@ ConvOut:
     }         // end output loop
 
     // Initialize accumulator with input biases
+    #pragma hls_pipeline_init_interval ce_reuse_factor
     for (int ii = 0; ii < CONFIG_T::out_width; ii++) {
         #pragma hls_unroll
         for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
@@ -158,11 +172,14 @@ ConvOut:
     }
 
 // Accumulate multiplication result
+    #pragma hls_pipeline_init_interval ce_reuse_factor
 AccumOut:
     for (int ii = 0; ii < CONFIG_T::out_width; ii++) {
+        #pragma hls_unroll
     AccumFilt:
         for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
         // Do "dot product" sum within filter and sum over channels
+            #pragma hls_unroll
         AccumChan:
             for (int cc = 0; cc < CONFIG_T::n_chan; cc++) {
                 int index_mult = ii * CONFIG_T::n_filt * CONFIG_T::n_chan + ff * CONFIG_T::n_chan + cc;
@@ -172,6 +189,7 @@ AccumOut:
     }         // end output loop
 
     // Cast to "res_t" type
+    #pragma hls_pipeline_init_interval ce_reuse_factor
     for (int ii = 0; ii < CONFIG_T::out_width; ii++) {
         #pragma hls_unroll
         for (int ff = 0; ff < CONFIG_T::n_filt; ff++) {
