@@ -309,6 +309,6 @@ class IsolatedLayerReader:
     def get_weights_data(self, layer_name, var_name):
         assert layer_name == self.layer.name, f'Processing {self.layer.name}, but handler tried to read {layer_name}'
         for w in self.layer.weights:
-            if var_name in w.name:
+            if var_name in getattr(w, 'path', w.name):  # Keras 3 scopes the name in .path
                 return np.array(w)
         return None

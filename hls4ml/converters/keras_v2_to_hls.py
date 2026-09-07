@@ -86,7 +86,7 @@ class KerasModelReader(KerasReader):
     def get_weights_data(self, layer_name, var_name):
         layer = self.model.get_layer(layer_name)
         for i, w in enumerate(layer.weights):
-            if var_name in w.name:
+            if var_name in getattr(w, 'path', w.name):  # Keras 3 scopes the name in .path
                 try:
                     return w.numpy()  # TF 2.x
                 except Exception:
@@ -102,7 +102,7 @@ class KerasWrappedLayerReader(KerasReader):
     def get_weights_data(self, layer_name, var_name):
         assert self.layer.name == layer_name
         for _, w in enumerate(self.layer.weights):
-            if var_name in w.name:
+            if var_name in getattr(w, 'path', w.name):  # Keras 3 scopes the name in .path
                 return w.numpy()
 
         return None
