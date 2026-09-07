@@ -112,6 +112,8 @@ template <typename __SHIFT_T__, unsigned int __SHIFT_DEPTH__ = 32> class ap_shif
 #endif
         __SHIFT_T__ ret = Array[Addr];
         if (Enable) {
+            // a shift register must shift in one cycle: unroll (Siemens' ap_shift_reg does the same)
+            #pragma hls_unroll yes
             for (unsigned int i = __SHIFT_DEPTH__ - 1; i > 0; --i)
                 Array[i] = Array[i - 1];
             Array[0] = DataIn;

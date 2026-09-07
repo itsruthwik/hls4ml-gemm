@@ -58,7 +58,10 @@ void multiply(ac_channel<input1_T> &data1, ac_channel<input2_T> &data2, ac_chann
 
     constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
     (void)ce_reuse_factor;
-#pragma hls_pipeline_init_interval ce_reuse_factor
+// Vitis treats PIPELINE II=reuse_factor as a target it may beat (it achieves 1 here); Catapult
+    // pipelines at exactly the requested II, so the stream driver runs at 1 and the reuse
+    // factor sets the rate through the inner reuse loop where it applies.
+    #pragma hls_pipeline_init_interval 1
 MultiplyLoop:
     for (int i = 0; i < CONFIG_T::n_elem / input1_T::size; i++) {
 
@@ -82,7 +85,10 @@ void average(ac_channel<input1_T> &data1, ac_channel<input2_T> &data2, ac_channe
 
     constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
     (void)ce_reuse_factor;
-#pragma hls_pipeline_init_interval ce_reuse_factor
+// Vitis treats PIPELINE II=reuse_factor as a target it may beat (it achieves 1 here); Catapult
+    // pipelines at exactly the requested II, so the stream driver runs at 1 and the reuse
+    // factor sets the rate through the inner reuse loop where it applies.
+    #pragma hls_pipeline_init_interval 1
 AverageLoop:
     for (int i = 0; i < CONFIG_T::n_elem / input1_T::size; i++) {
 
@@ -106,7 +112,10 @@ void maximum(ac_channel<input1_T> &data1, ac_channel<input2_T> &data2, ac_channe
 
     constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
     (void)ce_reuse_factor;
-#pragma hls_pipeline_init_interval ce_reuse_factor
+// Vitis treats PIPELINE II=reuse_factor as a target it may beat (it achieves 1 here); Catapult
+    // pipelines at exactly the requested II, so the stream driver runs at 1 and the reuse
+    // factor sets the rate through the inner reuse loop where it applies.
+    #pragma hls_pipeline_init_interval 1
 MaximumLoop:
     for (int i = 0; i < CONFIG_T::n_elem / input1_T::size; i++) {
 
@@ -130,7 +139,10 @@ void minimum(ac_channel<input1_T> &data1, ac_channel<input2_T> &data2, ac_channe
 
     constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
     (void)ce_reuse_factor;
-#pragma hls_pipeline_init_interval ce_reuse_factor
+// Vitis treats PIPELINE II=reuse_factor as a target it may beat (it achieves 1 here); Catapult
+    // pipelines at exactly the requested II, so the stream driver runs at 1 and the reuse
+    // factor sets the rate through the inner reuse loop where it applies.
+    #pragma hls_pipeline_init_interval 1
 MinimumLoop:
     for (int i = 0; i < CONFIG_T::n_elem / input1_T::size; i++) {
 

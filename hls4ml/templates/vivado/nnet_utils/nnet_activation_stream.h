@@ -429,7 +429,7 @@ UnaryLUTActLoop:
     UnaryLUTPackLoop:
         for (int j = 0; j < res_T::size; j++) {
             #pragma HLS UNROLL
-            unsigned index = get_index_unary_lut<CONFIG_T::table_size>(in_data[j].V);
+            unsigned index = get_index_unary_lut<CONFIG_T::table_size>(in_data[j]);
             out_data[j] = table[index];
         }
 

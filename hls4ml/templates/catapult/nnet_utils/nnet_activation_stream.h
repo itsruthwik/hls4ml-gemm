@@ -379,7 +379,10 @@ template <class data_T, class res_T, typename CONFIG_T> void softmax(ac_channel<
     typename res_T::value_type res_cache[res_T::size];
     constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
     (void)ce_reuse_factor;
-    #pragma hls_pipeline_init_interval ce_reuse_factor
+    // Vitis treats PIPELINE II=reuse_factor as a target it may beat (it achieves 1 here); Catapult
+    // pipelines at exactly the requested II, so the stream driver runs at 1 and the reuse
+    // factor sets the rate through the inner reuse loop where it applies.
+    #pragma hls_pipeline_init_interval 1
 SoftmaxInitLoop:
     for (unsigned s = 0; s < CONFIG_T::n_in / data_T::size; s++) {
         data_T in_pack = data.read();
@@ -475,7 +478,10 @@ void unary_lut(ac_channel<data_T> &data, ac_channel<res_T> &res, typename CONFIG
     // Vivado: #pragma HLS PIPELINE II=CONFIG_T::reuse_factor (Catapult takes a constexpr name)
     constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
     (void)ce_reuse_factor;
-    #pragma hls_pipeline_init_interval ce_reuse_factor
+    // Vitis treats PIPELINE II=reuse_factor as a target it may beat (it achieves 1 here); Catapult
+    // pipelines at exactly the requested II, so the stream driver runs at 1 and the reuse
+    // factor sets the rate through the inner reuse loop where it applies.
+    #pragma hls_pipeline_init_interval 1
 UnaryLUTActLoop:
     for (int i = 0; i < CONFIG_T::n_in / res_T::size; i++) {
         data_T in_data = data.read();

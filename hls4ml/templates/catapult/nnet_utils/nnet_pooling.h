@@ -9,6 +9,7 @@ namespace nnet {
 // Return the maximum value from an array
 template <typename T, int N> T max(T x[N]) {
     T y = x[0];
+    #pragma hls_unroll
     for (int i = 1; i < N; i++) {
         y = x[i] > y ? x[i] : y;
     }
@@ -18,6 +19,7 @@ template <typename T, int N> T max(T x[N]) {
 template <int W, int N> ac_int<W, true> avg(ac_int<W, true> (&x)[N]) {
     // Use a wider accumulator than the input to avoid overflow
     ac_int<W + ceillog2(N), true> tmp = 0;
+    #pragma hls_unroll
     for (int i = 0; i < N; i++) {
         tmp += x[i];
     }
@@ -30,6 +32,7 @@ template <int W, int N> ac_int<W, true> avg(ac_int<W, true> (&x)[N]) {
 template <int W, int I, int N> ac_fixed<W, I, true> avg(ac_fixed<W, I, true> (&x)[N]) {
     // Use a wider accumulator than the input to avoid overflow
     ac_fixed<W + ceillog2(N), I + ceillog2(N), true> tmp = 0;
+    #pragma hls_unroll
     for (int i = 0; i < N; i++) {
         tmp += x[i];
     }
@@ -42,6 +45,7 @@ template <int W, int I, int N> ac_fixed<W, I, true> avg(ac_fixed<W, I, true> (&x
 // Return the mean value of an array
 template <typename T, int N> T avg(T (&x)[N]) {
     T y = 0;
+    #pragma hls_unroll
     for (int i = 0; i < N; i++) {
         y += x[i];
     }

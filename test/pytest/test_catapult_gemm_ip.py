@@ -457,10 +457,10 @@ def test_catapult_io_stream_stage_wrapper_codegen(test_case_id):
 
     myproject_text = (output_dir / 'firmware' / 'myproject.cpp').read_text()
 
-    assert '#pragma hls_design block\n#pragma hls_pipeline_init_interval 1\nvoid dense1_stage(' in myproject_text
-    assert '#pragma hls_design block\n#pragma hls_pipeline_init_interval 1\nvoid dense1_relu_stage(' in myproject_text
-    assert '#pragma hls_design block\n#pragma hls_pipeline_init_interval 1\nvoid dense2_stage(' in myproject_text
-    assert '#pragma hls_design block\n#pragma hls_pipeline_init_interval 1\nvoid dense2_relu_stage(' in myproject_text
+    assert '#pragma hls_design block\nvoid dense1_stage(' in myproject_text
+    assert '#pragma hls_design block\nvoid dense1_relu_stage(' in myproject_text
+    assert '#pragma hls_design block\nvoid dense2_stage(' in myproject_text
+    assert '#pragma hls_design block\nvoid dense2_relu_stage(' in myproject_text
     assert 'void CCS_BLOCK(dense1_stage)' not in myproject_text
     assert '#pragma hls_design ccore' not in myproject_text
 

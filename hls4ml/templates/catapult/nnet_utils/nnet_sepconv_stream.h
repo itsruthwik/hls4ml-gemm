@@ -19,7 +19,10 @@ void depthwise_product(data_T data[CONFIG_T::kernel_size * CONFIG_T::n_chan], re
     (void)ce_reuse_factor;
 
     // Add dummy loop to which the pipeline pragma can be applied
-    #pragma hls_pipeline_init_interval ce_reuse_factor
+    // Vitis treats PIPELINE II=reuse_factor as a target it may beat (it achieves 1 here); Catapult
+    // pipelines at exactly the requested II, so the stream driver runs at 1 and the reuse
+    // factor sets the rate through the inner reuse loop where it applies.
+    #pragma hls_pipeline_init_interval 1
     do {
 
     // Do the matrix-multiply
@@ -106,7 +109,10 @@ void compute_depthwise_output_encoded(
     typename CONFIG_T::bias_t biases[CONFIG_T::n_chan], ac_int<CONFIG_T::kernel_size, false> *pixel_idx) {
     constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
     (void)ce_reuse_factor;
-    #pragma hls_pipeline_init_interval ce_reuse_factor
+    // Vitis treats PIPELINE II=reuse_factor as a target it may beat (it achieves 1 here); Catapult
+    // pipelines at exactly the requested II, so the stream driver runs at 1 and the reuse
+    // factor sets the rate through the inner reuse loop where it applies.
+    #pragma hls_pipeline_init_interval 1
 MultLoop:
     for (unsigned p = 0; p < data_T::size / CONFIG_T::n_chan; p++) {
     #pragma hls_unroll

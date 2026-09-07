@@ -122,7 +122,10 @@ void compute_output_encoded(const data_T &in_elem,
                             ac_int<CONFIG_T::kernel_size, false> *pixel_idx) {
     constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
     (void)ce_reuse_factor;
-    #pragma hls_pipeline_init_interval ce_reuse_factor
+    // Vitis treats PIPELINE II=reuse_factor as a target it may beat (it achieves 1 here); Catapult
+    // pipelines at exactly the requested II, so the stream driver runs at 1 and the reuse
+    // factor sets the rate through the inner reuse loop where it applies.
+    #pragma hls_pipeline_init_interval 1
 MultLoop:
     for (unsigned p = 0; p < data_T::size / CONFIG_T::n_chan; p++) {
         #pragma hls_unroll

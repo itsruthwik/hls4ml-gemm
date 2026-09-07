@@ -75,15 +75,11 @@ class CatapultWriter(Writer):
             if getattr(var, 'pragma', None):
                 pragmas.append('    ' + self._make_array_pragma(var, layer.model) + '\n')
 
-        # Each stage is a Catapult block; its implicit 'main' loop is the per-beat driver.
-        # Pipeline it at II=reuse_factor in-source (the analogue of Vitis' function-level
-        # PIPELINE on a dataflow stage) instead of via a tcl directive.
-        try:
-            ii = int(layer.model.config.get_reuse_factor(layer))
-        except Exception:
-            ii = 1
+        # Each stage is a Catapult block. No pipeline pragma on the block itself: Vitis has no
+        # function-level II on a dataflow stage either, and each layer header pipelines its own
+        # driver loop at II=reuse_factor. A block-level II serialises the inner loop bodies at
+        # rf>1 and over-constrains the Resource accumulate feedback at 1.
         wrapper = '#pragma hls_design block\n'
-        wrapper += f'#pragma hls_pipeline_init_interval {max(ii, 1)}\n'
         wrapper += f'void {layer.name}_stage(\n'
         wrapper += ',\n'.join(f'    {param}' for param in params)
         wrapper += '\n) {\n'

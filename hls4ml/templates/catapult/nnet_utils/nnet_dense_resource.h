@@ -10,6 +10,14 @@
 
 namespace nnet {
 
+// Balanced adder tree over N consecutive elements (used to reduce split accumulators).
+template <class T, int N> struct tree_sum_t {
+    static T sum(const T *p) { return tree_sum_t<T, N / 2>::sum(p) + tree_sum_t<T, N - N / 2>::sum(p + N / 2); }
+};
+template <class T> struct tree_sum_t<T, 1> {
+    static T sum(const T *p) { return p[0]; }
+};
+
 template <class data_T, class res_T, typename CONFIG_T>
 void dense_resource_rf_leq_nin(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_out],
                                typename CONFIG_T::weight_t weights[CONFIG_T::n_in * CONFIG_T::n_out],
@@ -28,11 +36,17 @@ void dense_resource_rf_leq_nin(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::
 
 
     typename CONFIG_T::accum_t acc[CONFIG_T::n_out];
+    typename CONFIG_T::accum_t acc_part[CONFIG_T::n_out][multscale];
 
 #pragma hls_unroll
 InitAccum:
     for (int iacc = 0; iacc < nout; iacc++) {
         acc[iacc] = (typename CONFIG_T::accum_t)biases[iacc];
+    #pragma hls_unroll
+    InitPart:
+        for (int ip = 0; ip < multscale; ip++) {
+            acc_part[iacc][ip] = 0;
+        }
     }
 
 #pragma hls_pipeline_init_interval 1
@@ -47,7 +61,11 @@ ReuseLoop:
     #pragma hls_unroll
     MultLoop:
         for (int im = 0; im < block_factor; im++) {
-            acc[out_index] += static_cast<typename CONFIG_T::accum_t>(
+            // One partial accumulator per (output, slot): each loop-carried chain is a single
+            // multiply-add. Summing the multscale products into one acc per iteration makes
+            // Catapult fuse the whole chain into the II=1 feedback, which cannot close at 5 ns.
+            // Bit-exact: accum_t is wrap-mode fixed point without rounding (order-independent).
+            acc_part[out_index][acc_step] += static_cast<typename CONFIG_T::accum_t>(
                 CONFIG_T::template product<data_T, typename CONFIG_T::weight_t>::product(data[in_index], weights[w_index]));
 
             // Increment w_index
@@ -68,6 +86,12 @@ ReuseLoop:
     }
 
 // Cast to "res_t" type
+#pragma hls_unroll
+ReducePart:
+    for (int io = 0; io < nout; io++) {
+        acc[io] += tree_sum_t<typename CONFIG_T::accum_t, multscale>::sum(acc_part[io]);
+    }
+
 #pragma hls_unroll
 Result:
     for (unsigned int ires = 0; ires < CONFIG_T::n_out; ires++) {

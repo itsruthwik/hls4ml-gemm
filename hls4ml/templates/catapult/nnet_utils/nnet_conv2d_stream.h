@@ -48,7 +48,10 @@ void conv_2d_encoded_cl(
     (void)ce_reuse_factor;
 ReadInputHeight:
     for (unsigned i_ih = 0; i_ih < CONFIG_T::in_height; i_ih++) {
-    #pragma hls_pipeline_init_interval ce_reuse_factor
+    // Vitis treats PIPELINE II=reuse_factor as a target it may beat (it achieves 1 here); Catapult
+    // pipelines at exactly the requested II, so the stream driver runs at 1 and the reuse
+    // factor sets the rate through the inner reuse loop where it applies.
+    #pragma hls_pipeline_init_interval 1
     ReadInputWidth:
         for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width / (data_T::size / CONFIG_T::n_chan); i_iw++) {
             compute_scaled_indices_2d<data_T, CONFIG_T>(i_ih, i_iw, pixel_idx);
@@ -73,7 +76,10 @@ void conv_2d_buffer_cl(
     (void)ce_reuse_factor;
 ReadInputHeight:
     for (unsigned i_ih = 0; i_ih < CONFIG_T::in_height; i_ih++) {
-    #pragma hls_pipeline_init_interval ce_reuse_factor
+    // Vitis treats PIPELINE II=reuse_factor as a target it may beat (it achieves 1 here); Catapult
+    // pipelines at exactly the requested II, so the stream driver runs at 1 and the reuse
+    // factor sets the rate through the inner reuse loop where it applies.
+    #pragma hls_pipeline_init_interval 1
     ReadInputWidth:
         for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width; i_iw++) {
             if (CONFIG_T::filt_height > 1) {

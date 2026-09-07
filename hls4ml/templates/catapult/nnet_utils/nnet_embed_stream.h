@@ -13,7 +13,10 @@ void embedding(ac_channel<data_T> &data, ac_channel<res_T> &res,
     data_T in_data = data.read();
     constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
     (void)ce_reuse_factor;
-#pragma hls_pipeline_init_interval ce_reuse_factor
+// Vitis treats PIPELINE II=reuse_factor as a target it may beat (it achieves 1 here); Catapult
+    // pipelines at exactly the requested II, so the stream driver runs at 1 and the reuse
+    // factor sets the rate through the inner reuse loop where it applies.
+    #pragma hls_pipeline_init_interval 1
 InputSequence:
     for (int j = 0; j < data_T::size; j++) {
 

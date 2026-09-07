@@ -74,14 +74,15 @@ void compute_pool_encoded_2d(
 
     const unsigned sh_idx = pool_table_height[h_idx] * CONFIG_T::pool_width;
     const unsigned wp_idx = w_idx * (data_T::size / CONFIG_T::n_filt);
+    #pragma hls_unroll
 PixelLoop:
-    #pragma hls_pipeline_init_interval 1
     for (unsigned p = 0; p < data_T::size / CONFIG_T::n_filt; p++) {
 
         ac_int<CONFIG_T::pool_height * CONFIG_T::pool_width, false> filt_mask = 0;
         if ((h_idx < nH) && (wp_idx + p < nW)) {
             filt_mask = sh_idx + pool_table_width[wp_idx + p] + 1;
         }
+        #pragma hls_unroll
     CopyDataFilt:
         for (unsigned c = 0; c < CONFIG_T::n_filt; c++) {
             if (filt_mask > 0)
@@ -90,8 +91,10 @@ PixelLoop:
         }
 
         if (filt_mask == CONFIG_T::pool_height * CONFIG_T::pool_width) {
+            #pragma hls_unroll
         FiltLoop:
             for (unsigned c = 0; c < CONFIG_T::n_filt; c++) {
+                #pragma hls_unroll
             PoolLoop:
                 for (unsigned f = 0; f < CONFIG_T::pool_height * CONFIG_T::pool_width; f++) {
                     pool_window[f] = data_window[c * CONFIG_T::pool_height * CONFIG_T::pool_width + f].read();
@@ -177,11 +180,12 @@ void compute_pool_buffer_2d(const data_T &in_elem,
 
     // Can compute pooling output
     if ((sX - lShiftX) == 0 && (sY - lShiftY) == 0 && pY > lShiftY - 1 && pX > lShiftX - 1) {
+        #pragma hls_unroll
     FiltLoop:
-        #pragma hls_pipeline_init_interval 1
         for (unsigned i_ic = 0; i_ic < CONFIG_T::n_filt; i_ic++) {
 
         // Retrieve data for current channel
+            #pragma hls_unroll
         PoolLoop:
             for (unsigned i_ihw = 0; i_ihw < CONFIG_T::pool_height * CONFIG_T::pool_width; i_ihw++) {
                 pool_window[i_ihw] = kernel_data[i_ihw * CONFIG_T::n_filt + i_ic];
@@ -283,8 +287,8 @@ void compute_pool_encoded_1d(const unsigned w_idx, const data_T &in_elem,
 
     const unsigned wp_idx = w_idx * (data_T::size / CONFIG_T::n_filt);
 
+    #pragma hls_unroll
 PixelLoop:
-    #pragma hls_pipeline_init_interval 1
     for (unsigned p = 0; p < data_T::size / CONFIG_T::n_filt; p++) {
 
         ac_int<CONFIG_T::pool_width, false> filt_mask = 0;
@@ -292,6 +296,7 @@ PixelLoop:
             filt_mask = pool_table_width[wp_idx + p] + 1;
         }
 
+        #pragma hls_unroll
     CopyDataFilt:
         for (unsigned c = 0; c < CONFIG_T::n_filt; c++) {
             if (filt_mask > 0)
@@ -299,8 +304,10 @@ PixelLoop:
         }
 
         if (filt_mask == CONFIG_T::pool_width) {
+            #pragma hls_unroll
         FiltLoop:
             for (unsigned c = 0; c < CONFIG_T::n_filt; c++) {
+                #pragma hls_unroll
             PoolLoop:
                 for (unsigned f = 0; f < CONFIG_T::pool_width; f++) {
                     pool_window[f] = data_window[c * CONFIG_T::pool_width + f].read();
@@ -374,11 +381,12 @@ void compute_pool_buffer_1d(const data_T &in_elem, ac_channel<res_T> &res) {
 
     // Can compute pooling output
     if ((sX - lShiftX) == 0 && pX > lShiftX - 1) {
+        #pragma hls_unroll
     FiltLoop:
-        #pragma hls_pipeline_init_interval 1
         for (unsigned i_ic = 0; i_ic < CONFIG_T::n_filt; i_ic++) {
 
         // Retrieve data for current channel
+            #pragma hls_unroll
         PoolLoop:
             for (unsigned i_iw = 0; i_iw < CONFIG_T::pool_width; i_iw++) {
                 pool_window[i_iw] = kernel_data[i_iw * CONFIG_T::n_filt + i_ic];
