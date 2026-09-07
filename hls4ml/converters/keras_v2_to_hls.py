@@ -221,6 +221,34 @@ def get_model_arch(config):
     return model_arch, reader
 
 
+def _flatten_inbound_refs(inbound_entries):
+    """Flatten one layer call's inbound-node entries into an ordered list of
+    (source_layer_name, ...) refs, one per tensor argument to the call.
+
+    Most layers' calls take a single positional tensor (or a single positional
+    list of tensors, e.g. Add/Concatenate, which keras serializes as one entry
+    per tensor already) -- for those this is exactly `inbound_entries`. But a
+    call like `layer(query, value, key=key)` (or the equivalent `layer(query,
+    value)` with `value` bound positionally to a named `call` argument) records
+    `value`/`key` as *kwargs* on the query entry rather than as sibling entries,
+    e.g. `["query_layer", 0, 0, {"value": ["value_layer", 0, 0]}]`. Multi-input
+    handlers (e.g. the MultiHeadAttention converter) need those extra tensor
+    refs alongside the positional ones; this expands each entry's kwargs dict
+    for values that look like a tensor ref ([layer_name, node_idx, tensor_idx,
+    ...]), in dict order, after its own positional ref. Non-tensor kwargs
+    (e.g. {"training": None}) are skipped, so this is a no-op for layers that
+    don't do this (nothing else in a normal kwargs dict looks like a ref).
+    """
+    refs = []
+    for entry in inbound_entries:
+        refs.append(entry)
+        if len(entry) >= 4 and isinstance(entry[3], dict):
+            for ref in entry[3].values():
+                if isinstance(ref, list) and len(ref) >= 3 and isinstance(ref[0], str):
+                    refs.append(ref)
+    return refs
+
+
 def parse_keras_model(model_arch, reader):
     # This is a list of dictionaries to hold all the layer info we need to generate HLS
     layer_list = []
@@ -283,12 +311,16 @@ def parse_keras_model(model_arch, reader):
     for keras_layer in layer_config:
         if 'batch_input_shape' in keras_layer['config']:
             if 'inbound_nodes' in keras_layer and len(keras_layer['inbound_nodes']) > 0:
-                input_shapes = [output_shapes[inbound_node[0]] for inbound_node in keras_layer['inbound_nodes'][0]]
+                input_shapes = [
+                    output_shapes[ref[0]] for ref in _flatten_inbound_refs(keras_layer['inbound_nodes'][0])
+                ]
             else:
                 input_shapes = [keras_layer['config']['batch_input_shape']]
         else:
             if 'inbound_nodes' in keras_layer:
-                input_shapes = [output_shapes[inbound_node[0]] for inbound_node in keras_layer['inbound_nodes'][0]]
+                input_shapes = [
+                    output_shapes[ref[0]] for ref in _flatten_inbound_refs(keras_layer['inbound_nodes'][0])
+                ]
             else:
                 # Sequential model, so output_shape from the previous layer is still valid
                 input_shapes = [output_shape]
@@ -312,11 +344,43 @@ def parse_keras_model(model_arch, reader):
 
         # Extract inbound nodes
         if 'inbound_nodes' in keras_layer and len(keras_layer['inbound_nodes']) > 0:
-            input_names = [inputs_map.get(inp[0], inp[0]) for inp in keras_layer['inbound_nodes'][0]]
+            input_names = [
+                inputs_map.get(ref[0], ref[0]) for ref in _flatten_inbound_refs(keras_layer['inbound_nodes'][0])
+            ]
         else:
             input_names = None
 
-        layer, output_shape = layer_handlers[keras_class](keras_layer, input_names, input_shapes, reader)
+        ret = layer_handlers[keras_class](keras_layer, input_names, input_shapes, reader)
+
+        if isinstance(ret, list):
+            # Multi-node handler expansion (e.g. QMultiHeadAttention decomposed into
+            # projections + einsums + softmax). Append every node in order and wire
+            # the Keras layer's name to the *last* node, so downstream consumers that
+            # look the layer up by its original Keras name find the final output.
+            assert len(ret) > 0
+            keras_name = keras_layer['config']['name']
+            for sub_layer, sub_shape in ret:
+                layer_list.append(sub_layer)
+                output_shapes[sub_layer['name']] = sub_shape
+            layer, output_shape = ret[-1]
+            # A trailing activation on a multi-node return is not supported: the
+            # decomposition already ends in a projection (EinsumDense/Dense) whose
+            # own 'activation' key (if any) is handled by its single-node handler,
+            # not here. Multi-node handlers must fully resolve activations themselves.
+            assert 'activation' not in layer or layer['class_name'] in activation_layers + recurrent_layers
+            if layer['name'] != keras_name:
+                inputs_map[keras_name] = layer['name']
+                if output_layers is not None and keras_name in output_layers:
+                    output_layers = [layer['name'] if name == keras_name else name for name in output_layers]
+            # Fall through to the common tail below (output_shapes[keras_name] / assert);
+            # `layer` was already appended to layer_list above (as the last of `ret`),
+            # so skip the single-node append/activation handling that follows.
+            assert output_shape is not None
+            output_shapes[layer['name']] = output_shape
+            continue
+
+        else:
+            layer, output_shape = ret
 
         layer_list.append(layer)
         if 'activation' in layer and layer['class_name'] not in activation_layers + recurrent_layers:  # + qkeras_layers:

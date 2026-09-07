@@ -1,7 +1,7 @@
-"""Keras 2 converter for (Q)MultiHeadAttention.
+"""Keras 2 converter for QMultiHeadAttention.
 
-QKeras has no attention layer; ATLAS supplies a Keras 2 QMultiHeadAttention built
-on QKeras-quantized EinsumDense projections (see experiments/attention/qmha.py).
+QKeras has no attention layer; ATLAS supplies a Keras 2 `QMultiHeadAttention` built
+on QKeras-quantized EinsumDense projections (`hls4ml.utils.qkeras_attention`).
 This handler decomposes it — at parse time, entirely within the Keras 2 path —
 into the same primitive nodes HGQ2's Keras 3 handler produces:
 
@@ -10,12 +10,12 @@ into the same primitive nodes HGQ2's Keras 3 handler produces:
 The einsum equations and intermediate shapes are quantization-independent, so we
 reconstruct a stock keras MultiHeadAttention from the numeric config to derive
 them exactly (no dependency on the ATLAS layer), and read the trained weights
-through the reader. Handles both 'MultiHeadAttention' and 'QMultiHeadAttention';
-the latter carries `weight_bits`, from which this handler stamps the projection
-WEIGHT precision. Projection ACTIVATION/result precision is set separately, via
-the hls4ml config on the decomposed node names (see
-experiments/attention/qmha.py:attention_hls_config) -- keeping this handler
-purely structural.
+through the reader. Only 'QMultiHeadAttention' is registered (stock Keras 2
+`MultiHeadAttention` is out of scope by design); it carries `weight_bits`, from
+which this handler stamps the projection WEIGHT precision. Projection
+ACTIVATION/result precision is set separately, via the hls4ml config on the
+decomposed node names (see hls4ml.utils.qkeras_attention.attention_hls_config)
+-- keeping this handler purely structural.
 
 Supported: rank-3 (batch, seq, feature) self- and cross-attention, multi-head,
 single attention axis. Rejected with a clear error: attention masks, rank != 3,
@@ -49,7 +49,7 @@ def _strip_batch_dim(equation, einsum_dense):
     return f'{inp0[1:]},{inp1[1:]}->{out[1:]}'
 
 
-@keras_handler('MultiHeadAttention', 'QMultiHeadAttention')
+@keras_handler('QMultiHeadAttention')
 def parse_mha_layer(keras_layer, input_names, input_shapes, data_reader):
     import keras
 
