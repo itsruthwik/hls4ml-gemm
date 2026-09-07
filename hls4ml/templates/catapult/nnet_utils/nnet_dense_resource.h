@@ -65,8 +65,16 @@ ReuseLoop:
             // multiply-add. Summing the multscale products into one acc per iteration makes
             // Catapult fuse the whole chain into the II=1 feedback, which cannot close at 5 ns.
             // Bit-exact: accum_t is wrap-mode fixed point without rounding (order-independent).
-            acc_part[out_index][acc_step] += static_cast<typename CONFIG_T::accum_t>(
-                CONFIG_T::template product<data_T, typename CONFIG_T::weight_t>::product(data[in_index], weights[w_index]));
+            // rf==1 has a single reuse iteration, so there is no loop-carried chain to break;
+            // keep the plain accumulate there (the split form produced RTL that failed cosim at
+            // rf==1 while its C model was exact).
+            if (rufactor == 1) {
+                acc[out_index] += static_cast<typename CONFIG_T::accum_t>(
+                    CONFIG_T::template product<data_T, typename CONFIG_T::weight_t>::product(data[in_index], weights[w_index]));
+            } else {
+                acc_part[out_index][acc_step] += static_cast<typename CONFIG_T::accum_t>(
+                    CONFIG_T::template product<data_T, typename CONFIG_T::weight_t>::product(data[in_index], weights[w_index]));
+            }
 
             // Increment w_index
             w_index += rufactor;
@@ -86,10 +94,12 @@ ReuseLoop:
     }
 
 // Cast to "res_t" type
-#pragma hls_unroll
-ReducePart:
-    for (int io = 0; io < nout; io++) {
-        acc[io] += tree_sum_t<typename CONFIG_T::accum_t, multscale>::sum(acc_part[io]);
+    if (rufactor > 1) {
+    #pragma hls_unroll
+    ReducePart:
+        for (int io = 0; io < nout; io++) {
+            acc[io] += tree_sum_t<typename CONFIG_T::accum_t, multscale>::sum(acc_part[io]);
+        }
     }
 
 #pragma hls_unroll
