@@ -8,16 +8,20 @@ from hls4ml.model.optimizer.passes.hgq_proxy_model import FixedPointQuantizer, U
 from hls4ml.model.types import Source
 
 
-def to_apfixed(k, b, i, RND, SAT):
+def to_apfixed(k, b, i, RND, SAT, backend='vivado'):
     u = 'u' if k == 0 else ''
     return f'ap_{u}fixed<{b},{i},AP_{RND},AP_{SAT}>'
 
 
-def to_acfixed(k, b, i, RND, SAT):
+def to_acfixed(k, b, i, RND, SAT, backend='oneapi'):
     k = 'false' if k == 0 else 'true'
-    if b == 1:
+    if b == 1 and backend.lower() in ('oneapi', 'quartus'):
         # Currently oneAPI ac_fixed requires at least two bits for both signed and unsigned cases
         # Should be fixed in the future once oneAPI supports 1-bit unsigned ac_fixed
+        # Catapult's ac_types have no such restriction (ac_fixed.h only requires MSB < W), so
+        # this padding must not be applied there: it silently doubles the resolution of 1-bit
+        # quantized values (b=1 differs numerically from b=2, not just in representation), which
+        # was causing the Catapult native path to diverge from HGQ2/Vivado at HGQ input quantizers.
         b = 2
     return f'ac_fixed<{b},{i},{k},AC_{RND},AC_{SAT}>'
 
@@ -50,7 +54,7 @@ def _mask_body(
         if b == 0:
             fn = f'out[{idx}] = 0;'
         else:
-            fn = f'out[{idx}] = {to_fixed(k, b, i, RND, SAT)}(inp[{idx}]);'
+            fn = f'out[{idx}] = {to_fixed(k, b, i, RND, SAT, backend)}(inp[{idx}]);'
         masks.append(f'    {fn}')
     return '\n'.join(masks), len(Ks)
 
@@ -88,7 +92,7 @@ def _mask_lanes(
     to_fixed = to_acfixed if backend.lower() in ['oneapi', 'quartus', 'catapult'] else to_apfixed
     exprs: list[str | None] = []
     for _k, _b, _i in zip(Ks, Bs, Is):
-        exprs.append(None if _b == 0 else to_fixed(_k, _b, _i, RND, SAT) + '({})')
+        exprs.append(None if _b == 0 else to_fixed(_k, _b, _i, RND, SAT, backend) + '({})')
     return exprs, len(Ks)
 
 
