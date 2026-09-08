@@ -187,10 +187,24 @@ def _inject_weight_rom_accessor(cfg, node):
     lookup resolves here.
     """
     w = node.get_weights('weight').name
-    inject = (
-        '    typedef nnet::array<weight_t, gemm_k> weight_col_t;\n'
-        f'    static weight_col_t* gemm_weight_cols() {{ return {w}_gemm_cols; }}\n'
-    )
+    if node.get_attr('second_operand_row_major', False):
+        # Row-major (SecondOperandRowMajor): one N-wide contraction row per beat.
+        inject = (
+            '    static const bool weights_row_major = true;\n'
+            '    typedef nnet::array<weight_t, gemm_n> weight_beat_t;\n'
+            f'    static weight_beat_t* gemm_weight_beats() {{ return {w}_gemm_rows; }}\n'
+        )
+    else:
+        # Column-major (default): one K-high output column per beat. weight_col_t /
+        # gemm_weight_cols() are the legacy names of the same ROM, kept for consumers
+        # that predate weight_beat_t.
+        inject = (
+            '    static const bool weights_row_major = false;\n'
+            '    typedef nnet::array<weight_t, gemm_k> weight_beat_t;\n'
+            f'    static weight_beat_t* gemm_weight_beats() {{ return {w}_gemm_cols; }}\n'
+            '    typedef weight_beat_t weight_col_t;\n'
+            f'    static weight_col_t* gemm_weight_cols() {{ return {w}_gemm_cols; }}\n'
+        )
     stripped = cfg.rstrip()
     assert stripped.endswith('};'), 'unexpected gemm config layout'
     return stripped[:-2] + inject + '};\n'

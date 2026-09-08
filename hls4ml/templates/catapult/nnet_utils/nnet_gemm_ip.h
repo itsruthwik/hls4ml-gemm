@@ -16,7 +16,8 @@
 // Row/column contract: A rows of width gemm_k, B columns of height gemm_k, C rows
 // of width gemm_n. M = n_patches, K = n_in, N = n_out. For the const_weights entries
 // the constant operand is the IP's own; csim sources it from
-// CONFIG_T::gemm_weight_cols() (a ROM accessor the writer injects into the config).
+// CONFIG_T::gemm_weight_beats() (a ROM accessor the writer injects into the config; beat
+// layout per CONFIG_T::weights_row_major, read via gemm_weight_at).
 //
 // Argument order is uniform across all four: activation operand(s), then the
 // result (out array / out channel), then biases LAST.
@@ -34,6 +35,22 @@
 #endif
 
 namespace nnet {
+
+// ---------------------------------------------------------------------------
+// Constant-operand ROM access, layout-agnostic. The writer packs a weight-stationary
+// GEMM's weights per SecondOperandRowMajor (CONFIG_T::weights_row_major):
+//   false (default): gemm_weight_beats()[n][k] = W[k][n]  (K-high output columns)
+//   true           : gemm_weight_beats()[k][n] = W[k][n]  (N-wide contraction rows)
+// Both index forms are type-valid on either beat array; the dead branch folds away.
+// ---------------------------------------------------------------------------
+template <typename CONFIG_T>
+inline typename CONFIG_T::weight_t gemm_weight_at(typename CONFIG_T::weight_beat_t *beats,
+                                                  unsigned k, unsigned n) {
+    if (CONFIG_T::weights_row_major) {
+        return beats[k][n];
+    }
+    return beats[n][k];
+}
 
 #if !defined(GEMM_IP_HEADER)
 #if !defined(__SYNTHESIS__)
@@ -78,15 +95,15 @@ void gemm_array_const_weights(a_row_T a_rows[CONFIG_T::gemm_m],
     static_assert(a_row_T::size == CONFIG_T::gemm_k, "A row width must equal gemm_k.");
     static_assert(res_row_T::size == CONFIG_T::gemm_n, "C row width must equal gemm_n.");
 
-    typename CONFIG_T::weight_col_t *weight_cols = CONFIG_T::gemm_weight_cols();
+    typename CONFIG_T::weight_beat_t *weights = CONFIG_T::gemm_weight_beats();
     for (unsigned int m = 0; m < CONFIG_T::gemm_m; m++) {
         res_row_T c_row;
         for (unsigned int n = 0; n < CONFIG_T::gemm_n; n++) {
             typename CONFIG_T::accum_t accum = 0;
             for (unsigned int k = 0; k < CONFIG_T::gemm_k; k++) {
                 accum += CONFIG_T::template product<typename a_row_T::value_type,
-                                                    typename CONFIG_T::weight_col_t::value_type>::product(
-                    a_rows[m][k], weight_cols[n][k]);
+                                                    typename CONFIG_T::weight_t>::product(
+                    a_rows[m][k], gemm_weight_at<CONFIG_T>(weights, k, n));
             }
             accum += biases[n];
             c_row[n] = cast<typename a_row_T::value_type, typename res_row_T::value_type, CONFIG_T>(accum);

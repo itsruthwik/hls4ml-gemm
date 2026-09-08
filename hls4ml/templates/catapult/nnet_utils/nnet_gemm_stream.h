@@ -31,7 +31,8 @@ struct gemm_config {
 // gemm_stream_const_weights — io_stream, constant operand held by the IP
 // (Dense / Conv / EinsumDense projections). A streams in one K-wide row per beat;
 // the constant columns come from the config ROM. csim sources them from
-// CONFIG_T::gemm_weight_cols(); synth binds the IP's own weights.
+// CONFIG_T::gemm_weight_beats() (either beat layout, see gemm_weight_at); synth binds the
+// IP's own weights.
 //
 // The K-wide A row may arrive as one beat (feature vector == last dim, the common
 // Dense case) OR as several narrower beats (gemm_k = P * beat), which happens when
@@ -49,7 +50,7 @@ void gemm_stream_const_weights(ac_channel<data_T> &data_stream, ac_channel<res_T
     typedef typename data_T::value_type a_val_T;
     static const unsigned PACKETS = CONFIG_T::gemm_k / data_T::size;
 
-    typename CONFIG_T::weight_col_t *weight_cols = CONFIG_T::gemm_weight_cols();
+    typename CONFIG_T::weight_beat_t *weights = CONFIG_T::gemm_weight_beats();
     for (unsigned int m = 0; m < CONFIG_T::gemm_m; m++) {
         a_val_T a_row[CONFIG_T::gemm_k];
         for (unsigned int kp = 0; kp < PACKETS; kp++) {
@@ -62,8 +63,8 @@ void gemm_stream_const_weights(ac_channel<data_T> &data_stream, ac_channel<res_T
         for (unsigned int n = 0; n < CONFIG_T::gemm_n; n++) {
             typename CONFIG_T::accum_t accum = 0;
             for (unsigned int k = 0; k < CONFIG_T::gemm_k; k++) {
-                accum += CONFIG_T::template product<a_val_T, typename CONFIG_T::weight_col_t::value_type>::product(
-                    a_row[k], weight_cols[n][k]);
+                accum += CONFIG_T::template product<a_val_T, typename CONFIG_T::weight_t>::product(
+                    a_row[k], gemm_weight_at<CONFIG_T>(weights, k, n));
             }
             accum += biases[n];
             c_row[n] = cast<a_val_T, typename res_T::value_type, CONFIG_T>(accum);

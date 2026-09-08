@@ -1,7 +1,19 @@
-"""Shared GEMM-IP packed weight-column writer.
+"""Shared GEMM-IP packed weight writer.
 
 Used by both the Catapult and Vivado/Vitis writers so the packing logic cannot
 silently diverge between backends.
+
+Layout is selected per layer by ``SecondOperandRowMajor`` (resolved onto the node
+as ``second_operand_row_major``), the same knob that flips the B beat order of a
+two-operand GEMM. For a weight-stationary GEMM the constant operand IS the second
+operand, so the knob picks how its ROM / ``.dat`` are packed:
+
+- column-major (default): ``<w>_gemm_cols[gemm_n]``, each beat an
+  ``array<weight_t, gemm_k>`` holding one output column (``cols[n][k] = W[k][n]``).
+- row-major: ``<w>_gemm_rows[gemm_k]``, each beat an ``array<weight_t, gemm_n>``
+  holding one contraction row (``rows[k][n] = W[k][n]``).
+
+The manifest (``gemm_config.json``) reports the choice as ``weight_layout``.
 """
 
 import numpy as np
@@ -9,39 +21,94 @@ import numpy as np
 from hls4ml.model.layers import EinsumDense
 
 
+def gemm_ip_weight_row_major(layer):
+    """True if the layer's constant operand is packed row-major (SecondOperandRowMajor)."""
+    return bool(layer.get_attr('second_operand_row_major', False))
+
+
+def gemm_ip_weight_layout(layer):
+    """Manifest spelling of the packed weight layout: ``row_major`` | ``column_major``."""
+    return 'row_major' if gemm_ip_weight_row_major(layer) else 'column_major'
+
+
+def gemm_ip_weight_basename(var, layer):
+    """Basename (no extension) shared by the packed ROM header and the raw-int ``.dat``."""
+    return f'{var.name}_gemm_rows' if gemm_ip_weight_row_major(layer) else f'{var.name}_gemm_cols'
+
+
+def _single_kn_block(var, weight_data):
+    # EinsumDense stores its kernel as [n_inplace, n_contract, n_free_kernel].
+    # The packed header holds a single [K, N] block, so peel a leading unit
+    # in-place dimension; refuse anything we cannot represent rather than
+    # falling through to a layout guess.
+    if weight_data.ndim == 3:
+        if weight_data.shape[0] != 1:
+            raise NotImplementedError(
+                f'{var.name}: GEMM-IP packed weights with n_inplace={weight_data.shape[0]} '
+                'are not supported (one [K, N] block per file).'
+            )
+        weight_data = weight_data[0]
+    return weight_data
+
+
+def _kn_reader(var, layer, weight_data, gemm_k, gemm_n):
+    """Return ``value(k, n)`` = the weight multiplying input k for output n.
+
+    The SOURCE layout is decided by the layer type, never sniffed from the shape —
+    a square kernel is ambiguous and a shape guess silently packed transposed
+    weights for square EinsumDense kernels (e.g. MHA projections).
+      - EinsumDense kernels are [n_contract, n_free_kernel] = [K, N];
+        TransposeWeightsForGemmIP does not touch them (whether still an EinsumDense
+        layer or lowered to a Gemm node, which sets _original_type).
+      - Dense/conv kernels reach the writer transposed/flattened to [N, K] by
+        TransposeWeightsForGemmIP.
+    """
+    kn_source = isinstance(layer, EinsumDense) or layer.get_attr('_original_type') == 'EinsumDense'
+    if kn_source:
+        if weight_data.shape != (gemm_k, gemm_n):
+            raise NotImplementedError(
+                f'{var.name}: EinsumDense GEMM-IP weights expected [K, N] = '
+                f'({gemm_k}, {gemm_n}), got {weight_data.shape}.'
+            )
+        return lambda k, n: weight_data[k, n]
+    if weight_data.shape == (gemm_n, gemm_k):
+        return lambda k, n: weight_data[n, k]
+    flat = weight_data.reshape(-1)
+    return lambda k, n: flat[n * gemm_k + k]
+
+
+def _beat_iter(row_major, gemm_k, gemm_n):
+    """(outer, inner) index pairs: one beat per outer index.
+
+    column-major: beat n holds k = 0..K-1;  row-major: beat k holds n = 0..N-1.
+    """
+    if row_major:
+        return gemm_k, gemm_n, (lambda outer, inner: (outer, inner))   # (k, n)
+    return gemm_n, gemm_k, (lambda outer, inner: (inner, outer))       # (k, n)
+
+
 def write_gemm_ip_weight_cols(var, layer, odir):
-    """Write GEMM-IP packed weight columns.
+    """Write the GEMM-IP packed weight ROM header (see the module docstring for layout).
 
     The scalar weight header remains the source of truth for native and
     simulation paths. This extra header is consumed only by GEMM-IP
     synthesis calls to avoid repacking flat scalar weights in hardware.
-
-    Weight storage is column-major: ``w_gemm_cols[gemm_n]`` where each
-    entry is an ``array<weight_t, gemm_k>`` holding one column of the
-    [K, N] weight matrix.
     """
 
     gemm_k = layer.get_attr('gemm_k', layer.get_attr('n_in'))
     gemm_n = layer.get_attr('gemm_n', layer.get_attr('n_out'))
-    beat_name = f'{var.name}_gemm_cols'
+    row_major = gemm_ip_weight_row_major(layer)
+    beat_name = gemm_ip_weight_basename(var, layer)
     guard = f'{beat_name.upper()}_H_'
 
-    weight_data = np.asarray(var.data)
-
-    # EinsumDense stores its kernel as [n_inplace, n_contract, n_free_kernel].
-    # The gemm_cols header holds a single [K, N] block, so peel a leading
-    # unit in-place dimension; refuse anything we cannot represent rather
-    # than falling through to a layout guess.
-    if weight_data.ndim == 3:
-        if weight_data.shape[0] != 1:
-            raise NotImplementedError(
-                f'{var.name}: GEMM-IP weight columns with n_inplace={weight_data.shape[0]} '
-                'are not supported (one [K, N] block per header).'
-            )
-        weight_data = weight_data[0]
+    weight_data = _single_kn_block(var, np.asarray(var.data))
+    value = _kn_reader(var, layer, weight_data, gemm_k, gemm_n)
+    n_beats, beat_len, kn = _beat_iter(row_major, gemm_k, gemm_n)
 
     with open(f'{odir}/firmware/weights/{beat_name}.h', 'w') as h_file:
-        h_file.write(f'// Packed GEMM-IP weight columns for {var.name}\n')
+        layout = 'rows (row-major, one contraction row per beat)' if row_major \
+            else 'columns (column-major, one output column per beat)'
+        h_file.write(f'// Packed GEMM-IP weight {layout} for {var.name}\n')
         h_file.write(f'// Source numpy array shape {var.shape}\n\n')
         h_file.write(f'#ifndef {guard}\n')
         h_file.write(f'#define {guard}\n\n')
@@ -50,37 +117,14 @@ def write_gemm_ip_weight_cols(var, layer, odir):
         # none that reach nnet_utils, and the bare "nnet_utils/..." form only
         # worked on Catapult via the copy shipped inside MGC_HOME).
         h_file.write('#include "../nnet_utils/nnet_types.h"\n\n')
-        h_file.write(f'static nnet::array<{var.type.name}, {gemm_k}> {beat_name}[{gemm_n}] = {{')
-
-        # Column-major packing: w_gemm_cols[n][k] = the weight multiplying
-        # input k for output n. The SOURCE layout is decided by the layer type,
-        # never sniffed from the shape — a square kernel is ambiguous and the
-        # old shape guess silently packed transposed weights for square
-        # EinsumDense kernels (e.g. MHA projections).
-        #   - EinsumDense kernels are [n_contract, n_free_kernel] = [K, N];
-        #     TransposeWeightsForGemmIP does not touch them.
-        #   - Dense/conv kernels reach the writer transposed/flattened to
-        #     [N, K] by TransposeWeightsForGemmIP.
-        # EinsumDense keeps its [K, N] kernel whether it is still an EinsumDense layer
-        # or has been lowered to a Gemm node (LowerEinsumToGemm sets _original_type).
-        kn_source = isinstance(layer, EinsumDense) or layer.get_attr('_original_type') == 'EinsumDense'
-        if kn_source and weight_data.shape != (gemm_k, gemm_n):
-            raise NotImplementedError(
-                f'{var.name}: EinsumDense GEMM-IP weights expected [K, N] = '
-                f'({gemm_k}, {gemm_n}), got {weight_data.shape}.'
-            )
+        h_file.write(f'static nnet::array<{var.type.name}, {beat_len}> {beat_name}[{n_beats}] = {{')
         sep = ''
-        for n in range(gemm_n):
+        for outer in range(n_beats):
             h_file.write(sep + '{')
             col_sep = ''
-            for k in range(gemm_k):
-                if kn_source:
-                    value = weight_data[k, n]
-                elif weight_data.shape == (gemm_n, gemm_k):
-                    value = weight_data[n, k]
-                else:
-                    value = weight_data.reshape(-1)[n * gemm_k + k]
-                h_file.write(col_sep + var.precision_fmt.format(value))
+            for inner in range(beat_len):
+                k, n = kn(outer, inner)
+                h_file.write(col_sep + var.precision_fmt.format(value(k, n)))
                 col_sep = ', '
             h_file.write('}')
             sep = ', '
@@ -101,37 +145,27 @@ def _fixed_point_int(value, precision):
 
 
 def write_gemm_ip_weight_dat(var, layer, odir):
-    """Write column-major raw fixed-point weight integers for the GEMM IP generator.
+    """Write raw fixed-point weight integers for the GEMM IP generator.
 
-    Same ``[gemm_n][gemm_k]`` column-major order as :func:`write_gemm_ip_weight_cols`,
-    but as raw integer bit-patterns (one column per line, ``gemm_k`` space-separated
-    integers) instead of a C++ ROM header. Consumed out-of-band by gemm-ip-gen for
-    weight-stationary layers; never ``#include``d into the hls4ml project.
+    Same beat order as :func:`write_gemm_ip_weight_cols` (column-major: one output
+    column per line, ``gemm_k`` integers; row-major: one contraction row per line,
+    ``gemm_n`` integers) but as raw integer bit-patterns instead of a C++ ROM header.
+    Consumed out-of-band by gemm-ip-gen for weight-stationary layers (which reads the
+    manifest's ``weight_layout`` to decode it); never ``#include``d into the hls4ml
+    project.
     """
     gemm_k = layer.get_attr('gemm_k', layer.get_attr('n_in'))
     gemm_n = layer.get_attr('gemm_n', layer.get_attr('n_out'))
-    dat_name = f'{var.name}_gemm_cols'
+    dat_name = gemm_ip_weight_basename(var, layer)
 
-    weight_data = np.asarray(var.data)
-    if weight_data.ndim == 3:
-        if weight_data.shape[0] != 1:
-            raise NotImplementedError(
-                f'{var.name}: GEMM-IP weight .dat with n_inplace={weight_data.shape[0]} '
-                'is not supported (one [K, N] block per file).'
-            )
-        weight_data = weight_data[0]
-
-    kn_source = isinstance(layer, EinsumDense) or layer.get_attr('_original_type') == 'EinsumDense'
+    weight_data = _single_kn_block(var, np.asarray(var.data))
+    value = _kn_reader(var, layer, weight_data, gemm_k, gemm_n)
+    n_beats, beat_len, kn = _beat_iter(gemm_ip_weight_row_major(layer), gemm_k, gemm_n)
     precision = var.type.precision
     with open(f'{odir}/firmware/weights/{dat_name}.dat', 'w') as f:
-        for n in range(gemm_n):
+        for outer in range(n_beats):
             row = []
-            for k in range(gemm_k):
-                if kn_source:
-                    value = weight_data[k, n]
-                elif weight_data.shape == (gemm_n, gemm_k):
-                    value = weight_data[n, k]
-                else:
-                    value = weight_data.reshape(-1)[n * gemm_k + k]
-                row.append(str(_fixed_point_int(value, precision)))
+            for inner in range(beat_len):
+                k, n = kn(outer, inner)
+                row.append(str(_fixed_point_int(value(k, n), precision)))
             f.write(' '.join(row) + '\n')

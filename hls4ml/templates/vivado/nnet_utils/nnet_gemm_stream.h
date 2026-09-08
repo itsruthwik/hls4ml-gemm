@@ -32,34 +32,41 @@ struct gemm_config {
 // ---------------------------------------------------------------------------
 // gemm_stream_const_weights — io_stream, constant operand held by the IP
 // (Dense / Conv / EinsumDense projections). No weight argument on the signature:
-// the columns come from the config ROM via CONFIG_T::gemm_weight_cols(). A streams in
-// one K-wide row per beat (gemm_k may span several narrower beats). No tiling:
-// gemm_m == n_patches.
+// the weights come from the config ROM via CONFIG_T::gemm_weight_beats() (either beat
+// layout, see gemm_weight_at). A streams in one K-wide row per beat (gemm_k may span
+// several narrower beats). No tiling: gemm_m == n_patches.
 // ---------------------------------------------------------------------------
 template <class data_T, class res_T, typename CONFIG_T>
 void gemm_stream_const_weights(hls::stream<data_T> &data_stream, hls::stream<res_T> &res_stream,
                             typename CONFIG_T::bias_t biases[CONFIG_T::n_out]) {
-    typedef nnet::array<typename data_T::value_type, CONFIG_T::gemm_k> a_row_T;
-    typedef typename CONFIG_T::weight_col_t b_col_T;
+    typedef typename data_T::value_type a_val_T;
     static_assert(CONFIG_T::gemm_m == CONFIG_T::n_patches,
                   "gemm_stream expects gemm_m == n_patches (no tiling).");
+    static_assert(res_T::size == CONFIG_T::gemm_n, "C row width must equal gemm_n.");
 
-    typename CONFIG_T::weight_col_t *weight_cols = CONFIG_T::gemm_weight_cols();
+    typename CONFIG_T::weight_beat_t *weights = CONFIG_T::gemm_weight_beats();
 
-    // Simulation: source the constant columns from the config ROM (like Catapult).
-    hls::stream<a_row_T> a_row_stream("a_row_stream_sim");
+    // Simulation: source the constant operand from the config ROM (like Catapult).
     for (unsigned int m = 0; m < CONFIG_T::gemm_m; m++) {
-        a_row_T a_row;
+        a_val_T a_row[CONFIG_T::gemm_k];
         for (unsigned int kp = 0; kp < CONFIG_T::gemm_k / data_T::size; kp++) {
             data_T a_pack = data_stream.read();
             for (unsigned int k = 0; k < data_T::size; k++) {
                 a_row[kp * data_T::size + k] = a_pack[k];
             }
         }
-        a_row_stream.write(a_row);
+        res_T c_row;
+        for (unsigned int n = 0; n < CONFIG_T::gemm_n; n++) {
+            typename CONFIG_T::accum_t accum = 0;
+            for (unsigned int k = 0; k < CONFIG_T::gemm_k; k++) {
+                accum += CONFIG_T::template product<a_val_T, typename CONFIG_T::weight_t>::product(
+                    a_row[k], gemm_weight_at<CONFIG_T>(weights, k, n));
+            }
+            accum += biases[n];
+            c_row[n] = cast<a_val_T, typename res_T::value_type, CONFIG_T>(accum);
+        }
+        res_stream.write(c_row);
     }
-    gemm_ip_stream_sim<a_row_T, b_col_T, typename CONFIG_T::bias_t, res_T, CONFIG_T>(
-        a_row_stream, weight_cols, biases, res_stream);
 }
 
 // ---------------------------------------------------------------------------

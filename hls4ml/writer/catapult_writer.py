@@ -10,7 +10,11 @@ from shutil import copyfile, copytree, rmtree
 
 import numpy as np
 
-from hls4ml.writer.gemm_ip_weights import write_gemm_ip_weight_cols
+from hls4ml.writer.gemm_ip_weights import (
+    gemm_ip_weight_basename,
+    gemm_ip_weight_layout,
+    write_gemm_ip_weight_cols,
+)
 import yaml
 
 from hls4ml.backends import get_backend
@@ -577,7 +581,7 @@ class CatapultWriter(Writer):
                             # (In synth-with-package the weight-stationary call is const_weights and
                             # this static array is unused → dead-code-eliminated.)
                             if self._is_gemm_ip_weight(layer, w):
-                                newline += f'#include "weights/{w.name}_gemm_cols.h"\n'
+                                newline += f'#include "weights/{gemm_ip_weight_basename(w, layer)}.h"\n'
 
             elif '// hls-fpga-machine-learning insert layer-config' in line:
                 newline = line
@@ -1235,7 +1239,11 @@ class CatapultWriter(Writer):
         return 'stream'
 
     @staticmethod
-    def _gemm_ip_protocol(interface):
+    def _gemm_ip_protocol(interface, weight_layout='column_major'):
+        # weight_layout: how a weight-stationary IP's constant operand is packed
+        # (SecondOperandRowMajor): column_major = w_gemm_cols[N][K] (one K-high output
+        # column per beat, default); row_major = w_gemm_rows[K][N] (one N-wide
+        # contraction row per beat).
         if interface == 'array':
             return {
                 'kind': 'catapult_ccore_array',
@@ -1244,17 +1252,17 @@ class CatapultWriter(Writer):
                 'internal_run': 'self_timed_after_start',
                 'result_order': 'row_major',
                 'input_beat_order': 'row_major',
-                'weight_layout': 'column_major',
+                'weight_layout': weight_layout,
             }
         # Row/column streaming contract:
         #   A stream: one K-wide row per cycle (row_major)
-        #   B stream: one K-high column per cycle from w_gemm_cols[N][K] (column_major)
+        #   B stream: one beat per cycle from the packed ROM (weight_layout)
         #   C stream: one N-wide row per cycle (row_major)
         return {
             'kind': 'catapult_ac_channel_stream',
             'result_order': 'row_major',
             'input_beat_order': 'row_major',
-            'weight_layout': 'column_major',
+            'weight_layout': weight_layout,
         }
 
     @staticmethod
@@ -1275,12 +1283,15 @@ class CatapultWriter(Writer):
             'gemm_ip_id': node.name,
             'gemm_ip_index': node.index,
             'interface': interface,
-            'protocol': self._gemm_ip_protocol(interface),
+            'protocol': self._gemm_ip_protocol(interface, gemm_ip_weight_layout(node)),
             'blackbox': self._gemm_ip_blackbox(node),
             # The generator derives the blackbox combinational-delay budget
             # from the project clock so the wrapper schedule and the core
             # share one timing contract.
             'clock_period_ns': node.model.config.get_config_value('ClockPeriod'),
+            # How the constant operand is packed (SecondOperandRowMajor): the ROM
+            # header / .dat beat order; also mirrored in protocol.weight_layout.
+            'weight_layout': gemm_ip_weight_layout(node),
         }
 
     def write_gemm_config(self, model):
@@ -1375,7 +1386,9 @@ class CatapultWriter(Writer):
                         wname = node.get_weights('weight').name
                         # Path is relative to gemm_config.json (in output_dir); the .dat
                         # lives under output_dir/firmware/weights/.
-                        gemm_info[node.name]['weight_file'] = f'firmware/weights/{wname}_gemm_cols.dat'
+                        basename = gemm_ip_weight_basename(node.get_weights('weight'), node)
+                        gemm_info[node.name]['weight_file'] = f'firmware/weights/{basename}.dat'
+                        gemm_info[node.name]['weight_layout'] = gemm_ip_weight_layout(node)
                     except Exception:
                         pass
 

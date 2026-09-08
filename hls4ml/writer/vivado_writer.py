@@ -9,7 +9,11 @@ from shutil import copyfile, copytree, rmtree
 
 import numpy as np
 
-from hls4ml.writer.gemm_ip_weights import write_gemm_ip_weight_cols
+from hls4ml.writer.gemm_ip_weights import (
+    gemm_ip_weight_basename,
+    gemm_ip_weight_layout,
+    write_gemm_ip_weight_cols,
+)
 import yaml
 
 from hls4ml.backends.fpga.passes.gemm_nodes import Gemm, Im2ColGemm
@@ -33,7 +37,7 @@ class VivadoWriter(Writer):
             'gemm_ip_id': node.name,
             'gemm_ip_index': node.index,
             'interface': interface,
-            'protocol': VivadoWriter._gemm_ip_protocol(interface),
+            'protocol': VivadoWriter._gemm_ip_protocol(interface, gemm_ip_weight_layout(node)),
             'blackbox': VivadoWriter._gemm_ip_blackbox(node),
             # The generator derives the blackbox combinational-delay budget
             # from the project clock so the wrapper schedule and the core
@@ -48,13 +52,16 @@ class VivadoWriter(Writer):
             'target_cycles': node.get_attr('target_cycles', None),
             'sparse': bool(node.get_attr('sparse', False)),
             'has_bias': bool(node.get_attr('has_bias', True)),
-            # Two-operand only: the actual B beat layout the emitted call uses. row_major =
-            # N-wide beats (one contraction row/beat, mvau IP); col_major = K-wide beats
-            # (one output column/beat, default). Const_weights nodes are always False here.
+            # SecondOperandRowMajor, resolved per layer. Two-operand GEMM: the B beat
+            # layout the emitted call uses (row_major = N-wide beats, one contraction
+            # row/beat, mvau IP; col_major = K-wide beats, one output column/beat,
+            # default). Weight-stationary GEMM: how the constant operand is packed into
+            # the ROM header / .dat (see weight_layout, mirrored in protocol).
             'second_operand_row_major': bool(node.get_attr('second_operand_row_major', False)),
             'second_operand_beat_order': (
                 'row_major' if node.get_attr('second_operand_row_major', False) else 'col_major'
             ),
+            'weight_layout': gemm_ip_weight_layout(node),
         }
 
     @staticmethod
@@ -67,11 +74,11 @@ class VivadoWriter(Writer):
         return 'stream'
 
     @staticmethod
-    def _gemm_ip_protocol(interface):
+    def _gemm_ip_protocol(interface, weight_layout='column_major'):
         protocol = {
             'result_order': 'row_major',
             'input_beat_order': 'row_major',
-            'weight_layout': 'column_major',
+            'weight_layout': weight_layout,
         }
         if interface == 'array':
             return {
@@ -188,7 +195,9 @@ class VivadoWriter(Writer):
                     wname = node.get_weights('weight').name
                     # Path is relative to gemm_config.json (in output_dir); the .dat
                     # lives under output_dir/firmware/weights/.
-                    info['weight_file'] = f'firmware/weights/{wname}_gemm_cols.dat'
+                    basename = gemm_ip_weight_basename(node.get_weights('weight'), node)
+                    info['weight_file'] = f'firmware/weights/{basename}.dat'
+                    info['weight_layout'] = gemm_ip_weight_layout(node)
                 except Exception:
                     pass
             gemm_info[node.name] = info
@@ -646,7 +655,7 @@ class VivadoWriter(Writer):
                         if w.storage.lower() != 'bram':
                             newline += f'#include "weights/{w.name}.h"\n'
                             if self._is_gemm_ip_weight(layer, w):
-                                newline += f'#include "weights/{w.name}_gemm_cols.h"\n'
+                                newline += f'#include "weights/{gemm_ip_weight_basename(w, layer)}.h"\n'
 
             elif '// hls-fpga-machine-learning insert layer-config' in line:
                 newline = line
