@@ -81,12 +81,10 @@ gemm_const_weights_config_template = """struct config{index} : nnet::gemm_config
 # branches internally: synth + GEMM_IP_HEADER → external weight-stationary IP; csim /
 # no package → native behavioral model sourcing weights from CONFIG_T::gemm_weight_cols()
 # (the ROM accessor injected into the config struct). No weights on the call site.
+# Bias, when this node has one, is read through the config (CONFIG_T::gemm_bias(),
+# injected alongside the weight ROM) rather than a function argument -- the same
+# mechanism the baked weight matrix uses, so there is only ever this one call form.
 gemm_stream_const_weights_function_template = (
-    'nnet::gemm_stream_const_weights<{input_t}, {output_t}, {config}>({input}, {output}, {b});'
-)
-
-# has_bias is False (no bias tensor, or the tensor is all-zero): no bias port.
-gemm_stream_const_weights_no_bias_function_template = (
     'nnet::gemm_stream_const_weights<{input_t}, {output_t}, {config}>({input}, {output});'
 )
 
@@ -127,10 +125,6 @@ gemm_array_two_op_function_template = """
         typedef nnet::array<{input1_scalar_t}, config{index}::gemm_k> b_col_t;
         typedef nnet::array<{output_scalar_t}, config{index}::gemm_n> res_row_t;
 
-        config{index}::bias_t {output}_zero_bias[config{index}::gemm_n];
-        #pragma hls_unroll
-        for (unsigned n = 0; n < config{index}::gemm_n; n++) {output}_zero_bias[n] = 0;
-
         #pragma hls_unroll
         for (unsigned i = 0; i < config{index}::n_inplace; i++) {{
             a_row_t a_rows[config{index}::gemm_m];
@@ -150,8 +144,8 @@ gemm_array_two_op_function_template = """
                     b_cols[l1][c] = {input1}[(i * config{index}::gemm_n + l1) * config{index}::gemm_k + c];
                 }}
             }}
-            nnet::gemm_array<a_row_t, b_col_t, config{index}::bias_t, res_row_t, config{index}>(
-                a_rows, b_cols, result_rows, {output}_zero_bias
+            nnet::gemm_array<a_row_t, b_col_t, res_row_t, config{index}>(
+                a_rows, b_cols, result_rows
             );
             for (unsigned l0 = 0; l0 < config{index}::gemm_m; l0++) {{
                 #pragma hls_unroll
@@ -168,13 +162,10 @@ gemm_array_two_op_function_template = """
 # the two-stream core once per head (unrolled, inlined -> one design block).
 gemm_stream_two_op_function_template = """
     {{
-        config{index}::bias_t {output}_zero_bias[config{index}::gemm_n];
-        #pragma hls_unroll
-        for (unsigned n = 0; n < config{index}::gemm_n; n++) {output}_zero_bias[n] = 0;
         #pragma hls_unroll
         for (unsigned i = 0; i < config{index}::n_inplace; i++) {{
             nnet::gemm_stream<{input0_t}, {input1_t}, {output_t}, config{index}>(
-                {input0}, {input1}, {output}, {output}_zero_bias
+                {input0}, {input1}, {output}
             );
         }}
     }}
@@ -216,6 +207,19 @@ def _inject_weight_rom_accessor(cfg, node):
             '    typedef weight_beat_t weight_col_t;\n'
             f'    static weight_col_t* gemm_weight_cols() {{ return {w}_gemm_cols; }}\n'
         )
+    # Bias, like the weight ROM above, is read through the config
+    # (CONFIG_T::gemm_bias()) rather than a function argument -- the same
+    # mechanism, so it never becomes a port. The bias weight variable always
+    # exists (added unconditionally in gemm_nodes.py); a row-varying EinsumDense
+    # bias is added in the wrapper instead, so point the accessor at a zero array.
+    row_varying = bool(node.get_attr('_row_varying_bias', False))
+    if row_varying:
+        inject += (
+            '    static bias_t* gemm_bias() { static bias_t zero_bias[gemm_n] = {}; return zero_bias; }\n'
+        )
+    else:
+        b = node.get_weights('bias').name
+        inject += f'    static bias_t* gemm_bias() {{ return {b}; }}\n'
     stripped = cfg.rstrip()
     assert stripped.endswith('};'), 'unexpected gemm config layout'
     return stripped[:-2] + inject + '};\n'
@@ -327,46 +331,11 @@ class GemmFunctionTemplate(FunctionCallTemplate):
             )
 
         if io_type == 'io_parallel':
-            if not has_bias:
-                return gemm_array_no_bias_function_template.format(**params)
             return gemm_array_function_template.format(**params)
-        if not has_bias:
-            return gemm_stream_const_weights_no_bias_function_template.format(**params)
         return gemm_stream_const_weights_function_template.format(**params)
 
 
 gemm_array_function_template = """
-    {{
-        typedef nnet::array<{input_t}, config{index}::gemm_k> a_row_t;
-        typedef nnet::array<{output_t}, config{index}::gemm_n> res_row_t;
-
-        a_row_t a_rows[config{index}::gemm_m];
-        res_row_t result_rows[config{index}::gemm_m];
-
-        PACK_A_ROWS_{index}: for (unsigned row = 0; row < config{index}::gemm_m; row++) {{
-            #pragma hls_unroll
-            for (unsigned kk = 0; kk < config{index}::gemm_k; kk++) {{
-                #pragma hls_unroll
-                a_rows[row][kk] = {input}[row * config{index}::gemm_k + kk];
-            }}
-        }}
-
-        nnet::gemm_array_const_weights<a_row_t, {bias_t}, res_row_t, config{index}>(
-            a_rows, result_rows, {b}
-        );
-
-        UNPACK_C_ROWS_{index}: for (unsigned row = 0; row < config{index}::gemm_m; row++) {{
-            #pragma hls_unroll
-            for (unsigned col = 0; col < config{index}::gemm_n; col++) {{
-                #pragma hls_unroll
-                {output}[row * config{index}::gemm_n + col] = result_rows[row][col];
-            }}
-        }}
-    }}
-"""
-
-# has_bias is False (no bias tensor, or the tensor is all-zero): no bias port.
-gemm_array_no_bias_function_template = """
     {{
         typedef nnet::array<{input_t}, config{index}::gemm_k> a_row_t;
         typedef nnet::array<{output_t}, config{index}::gemm_n> res_row_t;
@@ -411,10 +380,6 @@ gemm_array_row_bias_function_template = """
         a_row_t a_rows[config{index}::gemm_m];
         res_row_t result_rows[config{index}::gemm_m];
 
-        {bias_t} {output}_zero_bias[config{index}::gemm_n];
-        #pragma hls_unroll
-        for (unsigned n = 0; n < config{index}::gemm_n; n++) {output}_zero_bias[n] = 0;
-
         PACK_A_ROWS_{index}: for (unsigned row = 0; row < config{index}::gemm_m; row++) {{
             #pragma hls_unroll
             for (unsigned kk = 0; kk < config{index}::gemm_k; kk++) {{
@@ -423,8 +388,8 @@ gemm_array_row_bias_function_template = """
             }}
         }}
 
-        nnet::gemm_array_const_weights<a_row_t, {bias_t}, res_row_t, config{index}>(
-            a_rows, result_rows, {output}_zero_bias
+        nnet::gemm_array_const_weights<a_row_t, res_row_t, config{index}>(
+            a_rows, result_rows
         );
 
         UNPACK_C_ROWS_{index}: for (unsigned row = 0; row < config{index}::gemm_m; row++) {{
@@ -486,7 +451,7 @@ im2col_gemm_stream_function_template = """
         static ac_channel<a_row_t> activation_rows;
         nnet::im2col_{n_dim}d_gemm_rows<{input_t}, a_row_t, config{index}_im2col>({input}, activation_rows);
         nnet::gemm_stream_const_weights<a_row_t, {result_t}, config{index}_gemm>(
-            activation_rows, {output}, {b}
+            activation_rows, {output}
         );
     }}
 """
@@ -520,8 +485,8 @@ im2col_gemm_array_function_template = """
 
         nnet::im2col_{n_dim}d_gemm_rows_array<{input_t}, a_row_t, config{index}_im2col>({input}, a_rows);
 
-        nnet::gemm_array_const_weights<a_row_t, {bias_t}, res_row_t, config{index}_gemm>(
-            a_rows, result_rows, {b}
+        nnet::gemm_array_const_weights<a_row_t, res_row_t, config{index}_gemm>(
+            a_rows, result_rows
         );
 
         UNPACK_C_ROWS_{index}: for (unsigned row = 0; row < config{index}_gemm::gemm_m; row++) {{

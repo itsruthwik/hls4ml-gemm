@@ -59,11 +59,12 @@ inline typename CONFIG_T::weight_t gemm_weight_at(typename CONFIG_T::weight_beat
 // gemm_array — io_parallel, TWO activation operands (attention QK^T / A.V).
 // Both A rows and B columns are passed in as arrays.
 // ---------------------------------------------------------------------------
-template <class a_row_T, class b_col_T, class bias_T, class res_row_T, typename CONFIG_T>
+// Two-operand GEMM (QK^T / A.V) never has a real bias -- there is only ever this
+// one signature, no bias argument at all.
+template <class a_row_T, class b_col_T, class res_row_T, typename CONFIG_T>
 void gemm_array(a_row_T a_rows[CONFIG_T::gemm_m],
                 b_col_T weight_cols[CONFIG_T::gemm_n],
-                res_row_T results[CONFIG_T::gemm_m],
-                bias_T biases[CONFIG_T::gemm_n]) {
+                res_row_T results[CONFIG_T::gemm_m]) {
     static_assert(a_row_T::size == CONFIG_T::gemm_k, "A row width must equal gemm_k.");
     static_assert(b_col_T::size == CONFIG_T::gemm_k, "B column height must equal gemm_k.");
     static_assert(res_row_T::size == CONFIG_T::gemm_n, "C row width must equal gemm_n.");
@@ -76,7 +77,6 @@ void gemm_array(a_row_T a_rows[CONFIG_T::gemm_m],
                 accum += CONFIG_T::template product<typename a_row_T::value_type, typename b_col_T::value_type>::product(
                     a_rows[m][k], weight_cols[n][k]);
             }
-            accum += biases[n];
             c_row[n] = cast<typename a_row_T::value_type, typename res_row_T::value_type, CONFIG_T>(accum);
         }
         results[m] = c_row;
@@ -88,14 +88,18 @@ void gemm_array(a_row_T a_rows[CONFIG_T::gemm_m],
 // (Dense / Conv / EinsumDense projections). csim sources the columns from the
 // config ROM; no weight argument on the signature.
 // ---------------------------------------------------------------------------
-template <class a_row_T, class bias_T, class res_row_T, typename CONFIG_T>
+// Bias, like the weight ROM, is read through the config (CONFIG_T::gemm_bias(),
+// injected by the writer alongside gemm_weight_beats()) rather than a function
+// argument -- the same "compile-time constant" mechanism, so there is only ever
+// this one signature.
+template <class a_row_T, class res_row_T, typename CONFIG_T>
 void gemm_array_const_weights(a_row_T a_rows[CONFIG_T::gemm_m],
-                           res_row_T results[CONFIG_T::gemm_m],
-                           bias_T biases[CONFIG_T::gemm_n]) {
+                           res_row_T results[CONFIG_T::gemm_m]) {
     static_assert(a_row_T::size == CONFIG_T::gemm_k, "A row width must equal gemm_k.");
     static_assert(res_row_T::size == CONFIG_T::gemm_n, "C row width must equal gemm_n.");
 
     typename CONFIG_T::weight_beat_t *weights = CONFIG_T::gemm_weight_beats();
+    typename CONFIG_T::bias_t *biases = CONFIG_T::gemm_bias();
     for (unsigned int m = 0; m < CONFIG_T::gemm_m; m++) {
         res_row_T c_row;
         for (unsigned int n = 0; n < CONFIG_T::gemm_n; n++) {
@@ -112,38 +116,11 @@ void gemm_array_const_weights(a_row_T a_rows[CONFIG_T::gemm_m],
     }
 }
 
-// No-bias overload: has_bias is False (no bias tensor, or it is all-zero).
-template <class a_row_T, class res_row_T, typename CONFIG_T>
-void gemm_array_const_weights(a_row_T a_rows[CONFIG_T::gemm_m],
-                           res_row_T results[CONFIG_T::gemm_m]) {
-    static_assert(a_row_T::size == CONFIG_T::gemm_k, "A row width must equal gemm_k.");
-    static_assert(res_row_T::size == CONFIG_T::gemm_n, "C row width must equal gemm_n.");
-
-    typename CONFIG_T::weight_beat_t *weights = CONFIG_T::gemm_weight_beats();
-    for (unsigned int m = 0; m < CONFIG_T::gemm_m; m++) {
-        res_row_T c_row;
-        for (unsigned int n = 0; n < CONFIG_T::gemm_n; n++) {
-            typename CONFIG_T::accum_t accum = 0;
-            for (unsigned int k = 0; k < CONFIG_T::gemm_k; k++) {
-                accum += CONFIG_T::template product<typename a_row_T::value_type,
-                                                    typename CONFIG_T::weight_t>::product(
-                    a_rows[m][k], gemm_weight_at<CONFIG_T>(weights, k, n));
-            }
-            c_row[n] = cast<typename a_row_T::value_type, typename res_row_T::value_type, CONFIG_T>(accum);
-        }
-        results[m] = c_row;
-    }
-}
-
 #else // __SYNTHESIS__ without a package: declaration only -> loud link failure.
 
-template <class a_row_T, class b_col_T, class bias_T, class res_row_T, typename CONFIG_T>
+template <class a_row_T, class b_col_T, class res_row_T, typename CONFIG_T>
 void gemm_array(a_row_T a_rows[CONFIG_T::gemm_m], b_col_T weight_cols[CONFIG_T::gemm_n],
-                res_row_T results[CONFIG_T::gemm_m], bias_T biases[CONFIG_T::gemm_n]);
-
-template <class a_row_T, class bias_T, class res_row_T, typename CONFIG_T>
-void gemm_array_const_weights(a_row_T a_rows[CONFIG_T::gemm_m], res_row_T results[CONFIG_T::gemm_m],
-                           bias_T biases[CONFIG_T::gemm_n]);
+                res_row_T results[CONFIG_T::gemm_m]);
 
 template <class a_row_T, class res_row_T, typename CONFIG_T>
 void gemm_array_const_weights(a_row_T a_rows[CONFIG_T::gemm_m], res_row_T results[CONFIG_T::gemm_m]);

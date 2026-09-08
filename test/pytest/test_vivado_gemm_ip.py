@@ -835,10 +835,16 @@ class TestEinsumDenseLowering:
 
     def test_row_varying_bias_uses_zero_bias_add_path(self):
         # bias_axes='bd' varies along the data free axis (rows) -> row-varying path.
+        # The per-column IP bias is baked as a compile-time constant (the config's
+        # gemm_bias() accessor, zeroed for this node -- never a call argument), and
+        # the full per-element bias is added afterward in the unpack loop.
         hls_model, _ = self._write_einsum_dense('ed_rowvar_bias', bias_axes='bd')
         hls_model.write()
         top = (self.tmp_path / 'ed_rowvar_bias' / 'firmware' / 'myproject.cpp').read_text()
-        assert '_zero_bias' in top, 'row-varying bias should use the per-element add path'
+        params = (self.tmp_path / 'ed_rowvar_bias' / 'firmware' / 'parameters.h').read_text()
+        assert 'gemm_bias() { static' in params, 'row-varying node should get a zero gemm_bias() accessor'
+        assert 'gemm_array_const_weights<a_row_t, res_row_t, config' in top
+        assert 'result_rows[row][col] +' in top, 'row-varying bias should use the per-element add path'
 
 
 @pytest.mark.parametrize('backend', ['Vivado', 'Vitis'])

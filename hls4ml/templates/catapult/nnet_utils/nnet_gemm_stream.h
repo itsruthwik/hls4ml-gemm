@@ -39,10 +39,13 @@ struct gemm_config {
 // the contraction is a flattened multi-dim activation streamed one last-dim slice
 // per beat (e.g. Conv/Pool -> Flatten -> Dense). Both are gathered here into a full
 // K-wide row before the contraction; gemm_k must be a whole number of beats.
+//
+// Bias, like the weight ROM, is read through the config (CONFIG_T::gemm_bias(),
+// injected by the writer) rather than a function argument -- the same
+// "compile-time constant" mechanism, so there is only ever this one signature.
 // ---------------------------------------------------------------------------
 template <class data_T, class res_T, typename CONFIG_T>
-void gemm_stream_const_weights(ac_channel<data_T> &data_stream, ac_channel<res_T> &res_stream,
-                            typename CONFIG_T::bias_t biases[CONFIG_T::n_out]) {
+void gemm_stream_const_weights(ac_channel<data_T> &data_stream, ac_channel<res_T> &res_stream) {
     static_assert(CONFIG_T::gemm_k % data_T::size == 0, "gemm_k must be a whole number of input beats.");
     static_assert(res_T::size == CONFIG_T::gemm_n, "C row width must equal gemm_n.");
     static_assert(CONFIG_T::gemm_m == CONFIG_T::n_patches, "gemm expects gemm_m == n_patches (no tiling).");
@@ -51,6 +54,7 @@ void gemm_stream_const_weights(ac_channel<data_T> &data_stream, ac_channel<res_T
     static const unsigned PACKETS = CONFIG_T::gemm_k / data_T::size;
 
     typename CONFIG_T::weight_beat_t *weights = CONFIG_T::gemm_weight_beats();
+    typename CONFIG_T::bias_t *biases = CONFIG_T::gemm_bias();
     for (unsigned int m = 0; m < CONFIG_T::gemm_m; m++) {
         a_val_T a_row[CONFIG_T::gemm_k];
         for (unsigned int kp = 0; kp < PACKETS; kp++) {
@@ -67,40 +71,6 @@ void gemm_stream_const_weights(ac_channel<data_T> &data_stream, ac_channel<res_T
                     a_row[k], gemm_weight_at<CONFIG_T>(weights, k, n));
             }
             accum += biases[n];
-            c_row[n] = cast<a_val_T, typename res_T::value_type, CONFIG_T>(accum);
-        }
-        res_stream.write(c_row);
-    }
-}
-
-// No-bias overload: same core, no bias port at all. Used whenever has_bias is
-// false (const-weights path with an all-zero/absent bias tensor) so the call
-// site and the config struct carry no bias plumbing.
-template <class data_T, class res_T, typename CONFIG_T>
-void gemm_stream_const_weights(ac_channel<data_T> &data_stream, ac_channel<res_T> &res_stream) {
-    static_assert(CONFIG_T::gemm_k % data_T::size == 0, "gemm_k must be a whole number of input beats.");
-    static_assert(res_T::size == CONFIG_T::gemm_n, "C row width must equal gemm_n.");
-    static_assert(CONFIG_T::gemm_m == CONFIG_T::n_patches, "gemm expects gemm_m == n_patches (no tiling).");
-
-    typedef typename data_T::value_type a_val_T;
-    static const unsigned PACKETS = CONFIG_T::gemm_k / data_T::size;
-
-    typename CONFIG_T::weight_beat_t *weights = CONFIG_T::gemm_weight_beats();
-    for (unsigned int m = 0; m < CONFIG_T::gemm_m; m++) {
-        a_val_T a_row[CONFIG_T::gemm_k];
-        for (unsigned int kp = 0; kp < PACKETS; kp++) {
-            data_T beat = data_stream.read();
-            for (unsigned int k = 0; k < data_T::size; k++) {
-                a_row[kp * data_T::size + k] = beat[k];
-            }
-        }
-        res_T c_row;
-        for (unsigned int n = 0; n < CONFIG_T::gemm_n; n++) {
-            typename CONFIG_T::accum_t accum = 0;
-            for (unsigned int k = 0; k < CONFIG_T::gemm_k; k++) {
-                accum += CONFIG_T::template product<a_val_T, typename CONFIG_T::weight_t>::product(
-                    a_row[k], gemm_weight_at<CONFIG_T>(weights, k, n));
-            }
             c_row[n] = cast<a_val_T, typename res_T::value_type, CONFIG_T>(accum);
         }
         res_stream.write(c_row);
@@ -113,40 +83,9 @@ void gemm_stream_const_weights(ac_channel<data_T> &data_stream, ac_channel<res_T
 // mandatory operand residency (B is reused across A's M rows) lives inside the IP
 // — modelled here by reading the B columns into local storage, which is the IP's
 // business, not a hls4ml-side buffer stage. No separate concurrent feed process.
+// Two-operand GEMM never has a real bias -- there is only ever this one
+// signature, no bias argument at all.
 // ---------------------------------------------------------------------------
-template <class data0_T, class data1_T, class res_T, typename CONFIG_T>
-void gemm_stream(ac_channel<data0_T> &a_stream, ac_channel<data1_T> &b_stream,
-                 ac_channel<res_T> &res_stream,
-                 typename CONFIG_T::bias_t biases[CONFIG_T::n_out]) {
-    static_assert(data0_T::size == CONFIG_T::gemm_k, "A row width must equal gemm_k.");
-    static_assert(data1_T::size == CONFIG_T::gemm_k, "B column height must equal gemm_k.");
-    static_assert(res_T::size == CONFIG_T::gemm_n, "C row width must equal gemm_n.");
-
-    data1_T b_cols[CONFIG_T::gemm_n];
-    for (unsigned int n = 0; n < CONFIG_T::gemm_n; n++) {
-        b_cols[n] = b_stream.read();
-    }
-    for (unsigned int m = 0; m < CONFIG_T::gemm_m; m++) {
-        data0_T a_row = a_stream.read();
-        res_T c_row;
-        for (unsigned int n = 0; n < CONFIG_T::gemm_n; n++) {
-            typename CONFIG_T::accum_t accum = 0;
-            for (unsigned int k = 0; k < CONFIG_T::gemm_k; k++) {
-                accum += CONFIG_T::template product<typename data0_T::value_type, typename data1_T::value_type>::product(
-                    a_row[k], b_cols[n][k]);
-            }
-            accum += biases[n];
-            c_row[n] = cast<typename data0_T::value_type, typename res_T::value_type, CONFIG_T>(accum);
-        }
-        res_stream.write(c_row);
-    }
-}
-
-// No-bias overload: emitted for n_inplace == 1 (the common attention-head case),
-// where the surrounding template no longer builds/passes a zero bias array. The
-// n_inplace > 1 caller keeps using the biased overload above unchanged; that path
-// runs the core inside an unrolled per-head loop and needs its own follow-up look
-// at whether it can drop the bias plumbing too (see plan.md — out of scope here).
 template <class data0_T, class data1_T, class res_T, typename CONFIG_T>
 void gemm_stream(ac_channel<data0_T> &a_stream, ac_channel<data1_T> &b_stream,
                  ac_channel<res_T> &res_stream) {
@@ -176,15 +115,7 @@ void gemm_stream(ac_channel<data0_T> &a_stream, ac_channel<data1_T> &b_stream,
 #else // __SYNTHESIS__ without a package: declaration only -> loud link failure.
 
 template <class data_T, class res_T, typename CONFIG_T>
-void gemm_stream_const_weights(ac_channel<data_T> &data_stream, ac_channel<res_T> &res_stream,
-                            typename CONFIG_T::bias_t biases[CONFIG_T::n_out]);
-
-template <class data_T, class res_T, typename CONFIG_T>
 void gemm_stream_const_weights(ac_channel<data_T> &data_stream, ac_channel<res_T> &res_stream);
-
-template <class data0_T, class data1_T, class res_T, typename CONFIG_T>
-void gemm_stream(ac_channel<data0_T> &a_stream, ac_channel<data1_T> &b_stream,
-                 ac_channel<res_T> &res_stream, typename CONFIG_T::bias_t biases[CONFIG_T::n_out]);
 
 template <class data0_T, class data1_T, class res_T, typename CONFIG_T>
 void gemm_stream(ac_channel<data0_T> &a_stream, ac_channel<data1_T> &b_stream,

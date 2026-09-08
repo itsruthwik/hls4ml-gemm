@@ -1313,7 +1313,6 @@ class CatapultWriter(Writer):
                         'transpose_weights': True,
                         # Einsum (QK^T / A.V) is two-operand with no bias tensor at all.
                         'has_bias': bool(node.get_attr('has_bias', False)),
-                        'bias_in_core': False,
                         'input_precision': str(node.get_input_variable(node.inputs[0]).type.precision),
                         'rhs_precision': str(node.get_input_variable(node.inputs[1]).type.precision),
                         'output_precision': str(node.get_output_variable().type.precision),
@@ -1338,16 +1337,26 @@ class CatapultWriter(Writer):
                         'n_contract': node.get_attr('n_contract'),
                         'n_inplace': node.get_attr('n_inplace'),
                         'transpose_weights': True,
-                        'has_bias': bool(node.get_attr('has_bias', False)),
-                        # Row-varying bias can't live on the per-column IP port; it is
-                        # added in the wrapper instead, so the IP omits it even when
-                        # has_bias is True. Non-row-varying: bias_in_core tracks has_bias.
-                        'bias_in_core': bool(node.get_attr('has_bias', False))
+                        # has_bias is the single source of truth for the external IP: the
+                        # bias tensor is non-all-zero AND it lives on the per-column
+                        # weight-stationary port (a row-varying EinsumDense bias can't be
+                        # expressed there -- hls4ml adds it in the generated wrapper
+                        # instead, so the IP sees no bias at all in that case).
+                        'has_bias': bool(node.get_attr('has_bias', False))
                         and not bool(node.get_attr('_row_varying_bias', False)),
                         'input_precision': str(node.get_input_variable().type.precision),
                         'output_precision': str(node.get_output_variable().type.precision),
                         'weight_precision': str(node.get_weights('weight').type.precision),
                         'bias_precision': str(node.get_weights('bias').type.precision) if node.get_weights('bias') else None,
+                        # Raw per-column bias values, baked as a compile-time constant by
+                        # the external IP generator (gemm-ip-gen) instead of a runtime port.
+                        # Only present when the collapsed 'has_bias' above is True.
+                        'bias': (
+                            [float(x) for x in np.asarray(node.get_weights('bias').data).reshape(-1)]
+                            if bool(node.get_attr('has_bias', False))
+                            and not bool(node.get_attr('_row_varying_bias', False))
+                            else None
+                        ),
                         'accum_precision': str(node.types['accum_t'].precision) if 'accum_t' in node.types else None,
                     }
                     gemm_info[node.name].update(self._gemm_ip_metadata(node))
@@ -1365,17 +1374,12 @@ class CatapultWriter(Writer):
                         # weights internally and hls4ml calls the const_weights signature.
                         'weights_in_core': bool(node.get_attr('weights_in_core', False)),
                         # has_bias is the single source of truth, derived from the node's
-                        # bias tensor (non-all-zero) in gemm_nodes.py.
-                        'has_bias': bool(node.get_attr('has_bias', False)),
-                        # Whether the IP itself should include the bias adder. True only
-                        # when a real bias exists AND it lives on the per-column
-                        # weight-stationary port. False when there's no bias at all, or
-                        # hls4ml feeds a zero and adds bias in the generated wrapper
-                        # instead: two-operand GEMM (QK^T / A.V, no bias) and row-varying
-                        # EinsumDense bias (per-element add the per-column port can't
-                        # express). gemm-ip-gen honors this to omit the bias adder/port.
-                        'bias_in_core': bool(node.get_attr('has_bias', False))
-                        and bool(node.get_attr('weights_in_core', False))
+                        # bias tensor (non-all-zero) in gemm_nodes.py, AND not row-varying
+                        # (a row-varying EinsumDense bias can't live on the per-column
+                        # weight-stationary port -- hls4ml adds it in the generated
+                        # wrapper instead, so the external IP sees no bias in that case).
+                        # Two-operand GEMM (QK^T / A.V) is always has_bias False.
+                        'has_bias': bool(node.get_attr('has_bias', False))
                         and not bool(node.get_attr('_row_varying_bias', False)),
                         'input_precision': str(node.get_input_variable().type.precision),
                         'output_precision': str(node.get_output_variable().type.precision),
@@ -1384,6 +1388,15 @@ class CatapultWriter(Writer):
                         if node.get_attr('weight') is not None else None,
                         'bias_precision': str(node.get_weights('bias').type.precision)
                         if node.get_attr('bias') is not None else None,
+                        # Raw per-column bias values, baked as a compile-time constant by
+                        # the external IP generator (gemm-ip-gen) instead of a runtime port.
+                        # Only present when the collapsed 'has_bias' above is True.
+                        'bias': (
+                            [float(x) for x in np.asarray(node.get_weights('bias').data).reshape(-1)]
+                            if bool(node.get_attr('has_bias', False))
+                            and not bool(node.get_attr('_row_varying_bias', False))
+                            else None
+                        ),
                         'accum_precision': str(node.types['accum_t'].precision) if 'accum_t' in node.types else None,
                     }
                     gemm_info[node.name].update(self._gemm_ip_metadata(node))

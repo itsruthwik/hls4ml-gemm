@@ -82,15 +82,15 @@ np.testing.assert_allclose(hls_prediction, keras_prediction, atol=0.1, rtol=0.0)
         # row-varying bias is added per-element in the wrapper around gemm_array_const_weights.
         assert 'nnet::gemm_array_const_weights<' in top, 'expected the lowered GEMM-IP path'
         assert 'nnet::einsum_dense_gemm_ip<' not in top
-        # bias_in_core contract (consumed by gemm-ip-gen): a row-varying bias is added
+        # has_bias contract (consumed by gemm-ip-gen): a row-varying bias is added
         # per-element in the wrapper, NOT on the IP's per-column bias port, so the IP
-        # must be told to leave its bias adder off even though weights are in-core.
+        # is told has_bias is False even though weights are in-core.
         with open(output_dir / 'gemm_config.json') as f:
             gemm_config = json.load(f)
         gemm_entries = [e for e in gemm_config.values() if e['type'] == 'Gemm']
         assert gemm_entries, 'expected a lowered Gemm node in gemm_config.json'
         assert all(e['weights_in_core'] for e in gemm_entries)
-        assert all(e['bias_in_core'] is False for e in gemm_entries)
+        assert all(e['has_bias'] is False for e in gemm_entries)
     else:
         # Vivado now unifies with Catapult: EinsumDense lowers to a const_weights Gemm
         # (LowerEinsumToGemm) and is materialized by the shared Gemm codegen. The einsum
@@ -99,9 +99,10 @@ np.testing.assert_allclose(hls_prediction, keras_prediction, atol=0.1, rtol=0.0)
         # argument) — the same name/shape as Catapult.
         assert 'nnet::einsum_dense_gemm_ip<' not in top, 'einsum template must no longer emit GEMM'
         assert 'nnet::gemm_array_const_weights<' in top, 'expected the lowered const_weights GEMM-IP array path'
-        # Row-varying bias: zero per-column bias into the core, full per-element bias
-        # added in the unpack loop (see gemm_array_row_bias_function_template).
-        assert '_zero_bias' in top, 'expected the row-varying per-element bias-add path'
+        # Row-varying bias: the core's per-column bias is a baked-zero compile-time
+        # constant (the config's gemm_bias() accessor, never a call argument), full
+        # per-element bias added in the unpack loop (see gemm_array_row_bias_function_template).
+        assert 'result_rows[row][col] +' in top, 'expected the row-varying per-element bias-add path'
         with open(output_dir / 'gemm_config.json') as f:
             gemm_config = json.load(f)
         gemm_entries = [e for e in gemm_config.values() if e['type'] == 'Gemm']
