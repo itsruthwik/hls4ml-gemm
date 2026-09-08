@@ -33,21 +33,10 @@ def _catapult_csim_env():
     return env
 
 
-_AC_MATH_WIDTH_ASSERT = 'Intermediate bitwidth calculation gives a very large value for integer bits'
-
-
 def _assert_build_ok(result):
     """Assert a Catapult build (build_lib.sh subprocess or hls_model.compile(), both
-    surfaced here as a CompletedProcess) succeeded, except for one known/deferred
-    failure mode: this untrained model's QK^T type ends up wide enough (extra
-    accumulation headroom bits on top of the declared precision) that Catapult's
-    forced ac_math piecewise-linear softmax kernel hits its own static assert on
-    the input integer-bit width (unrelated to the multi-row softmax fix this test
-    file otherwise checks for). Tracked as the `softmax-numerics` deferred item;
-    xfail here instead of masking it as a green softmax_multidim test."""
+    surfaced here as a CompletedProcess) succeeded."""
     output = result.stdout + result.stderr
-    if result.returncode != 0 and _AC_MATH_WIDTH_ASSERT in output:
-        pytest.xfail(f'ac_math softmax static-assert on a wide QK^T type (softmax-numerics): {output[-500:]}')
     assert result.returncode == 0, output
 
 
@@ -104,6 +93,7 @@ from hgq.config import QuantizerConfigScope
 from hgq.layers import QMultiHeadAttention
 from hls4ml.converters import convert_from_keras_model
 
+keras.utils.set_random_seed(2024)  # seed with non-degenerate quantized weights
 with QuantizerConfigScope(f0=3, i0=2):
     q = keras.layers.Input((4, 8), name='q')
     v = keras.layers.Input((4, 8), name='v')
@@ -126,10 +116,10 @@ keras_prediction = model.predict(data, verbose=0)
 hls_prediction = hls_model.predict(data).reshape(keras_prediction.shape)
 
 print('max_abs', float(np.max(np.abs(hls_prediction - keras_prediction))))
-print('mean_abs', float(np.mean(np.abs(hls_prediction - keras_prediction))))
-print('std_hls', float(np.std(hls_prediction)))
-np.testing.assert_allclose(hls_prediction, keras_prediction, atol=0.35, rtol=0.0)
-assert np.std(hls_prediction) > 1e-3
+print('std_keras', float(np.std(keras_prediction)))
+assert np.std(keras_prediction) > 1e-3, 'degenerate model output; the comparison would be vacuous'
+# HGQ2 softmax is bit-exact on the Catapult table kernels: csim must match Keras exactly.
+np.testing.assert_array_equal(hls_prediction, keras_prediction)
 '''
 
     result = subprocess.run([sys.executable, '-c', script], env=env, text=True, capture_output=True, check=False)
@@ -147,6 +137,7 @@ from hgq.config import QuantizerConfigScope
 from hgq.layers import QMultiHeadAttention
 from hls4ml.converters import convert_from_keras_model
 
+keras.utils.set_random_seed(2024)  # seed with non-degenerate quantized weights
 with QuantizerConfigScope(f0=3, i0=2):
     q = keras.layers.Input((4, 8), name='q')
     v = keras.layers.Input((4, 8), name='v')
@@ -221,6 +212,7 @@ from hgq.config import QuantizerConfigScope
 from hgq.layers import QMultiHeadAttention
 from hls4ml.converters import convert_from_keras_model
 
+keras.utils.set_random_seed(2024)  # seed with non-degenerate quantized weights
 with QuantizerConfigScope(f0=3, i0=2):
     q = keras.layers.Input((4, 8), name='q')
     v = keras.layers.Input((4, 8), name='v')
@@ -247,7 +239,7 @@ hls_prediction = hls_model.predict(data).reshape(keras_prediction.shape)
 print('max_abs', float(np.max(np.abs(hls_prediction - keras_prediction))))
 print('mean_abs', float(np.mean(np.abs(hls_prediction - keras_prediction))))
 np.testing.assert_allclose(hls_prediction, keras_prediction, atol=0.35, rtol=0.0)
-assert np.std(hls_prediction) > 1e-3
+assert np.std(keras_prediction) > 1e-3, 'degenerate model output; the comparison would be vacuous'
 '''
 
     result = subprocess.run([sys.executable, '-c', script], env=env, text=True, capture_output=True, check=False)
@@ -284,6 +276,7 @@ from hgq.config import QuantizerConfigScope
 from hgq.layers import QMultiHeadAttention
 from hls4ml.converters import convert_from_keras_model
 
+keras.utils.set_random_seed(2024)  # seed with non-degenerate quantized weights
 with QuantizerConfigScope(f0=3, i0=2):
     q = keras.layers.Input((4, 8), name='q')
     v = keras.layers.Input((4, 8), name='v')
@@ -360,6 +353,7 @@ from hgq.config import QuantizerConfigScope
 from hgq.layers import QMultiHeadAttention
 from hls4ml.converters import convert_from_keras_model
 
+keras.utils.set_random_seed(2024)  # seed with non-degenerate quantized weights
 with QuantizerConfigScope(f0=3, i0=2):
     q = keras.layers.Input((4, 8), name='q')
     v = keras.layers.Input((4, 8), name='v')
@@ -385,7 +379,7 @@ hls_prediction = hls_model.predict(data).reshape(keras_prediction.shape)
 
 print('max_abs', float(np.max(np.abs(hls_prediction - keras_prediction))))
 np.testing.assert_allclose(hls_prediction, keras_prediction, atol=0.35, rtol=0.0)
-assert np.std(hls_prediction) > 1e-3
+assert np.std(keras_prediction) > 1e-3, 'degenerate model output; the comparison would be vacuous'
 '''
 
     result = subprocess.run([sys.executable, '-c', script], env=env, text=True, capture_output=True, check=False)

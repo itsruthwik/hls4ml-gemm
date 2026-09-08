@@ -231,6 +231,7 @@ softmax_config_template = """struct {type}_config{index} : nnet::activ_config {{
     static const unsigned n_slice = {n_slice};
     static const unsigned n_inner = {n_inner};
     static const unsigned n_outer = {n_outer};
+    static const unsigned parallelization_factor = {parallelization_factor};
     static const unsigned table_size = {table_size};
     static const unsigned exp_table_size = {exp_table_size};
     static const unsigned inv_table_size = {inv_table_size};
@@ -247,6 +248,9 @@ softmax_config_template = """struct {type}_config{index} : nnet::activ_config {{
 }};\n"""
 
 activ_function_template = 'nnet::{activation}<{input_t}, {output_t}, {config}>({input}, {output});'
+softmax_table_function_template = (
+    'nnet::{activation}<{input_t}, {output_t}, {config}>({input}, {output}, {exp_table}, {inv_table});'
+)
 param_activ_function_template = (
     'nnet::{activation}<{input_t}, {param_t.name}, {output_t}, {config}>({input}, {param}, {output});'
 )
@@ -300,11 +304,13 @@ class SoftmaxConfigTemplate(ActivationConfigTemplate):
         params['type'] = node.get_attr('activation').lower()
         params.setdefault('exp_table_size', params['table_size'])
         params.setdefault('inv_table_size', params['table_size'])
-        params.setdefault('n_slice', params['n_in'])
         params.setdefault('n_inner', 1)
         params.setdefault('n_outer', 1)
         params.setdefault('exp_scale', 1.0)
-        n_slice = params['n_slice']
+        params.setdefault('parallelization_factor', -1)
+
+        n_slice = params['n_in'] // params['n_inner'] // params['n_outer']
+        params['n_slice'] = n_slice
 
         if params['accum_t'].name == 'model_default_t':
             scale = ceil(log2(n_slice))
@@ -346,6 +352,12 @@ class SoftmaxFunctionTemplate(FunctionCallTemplate):
         use_multidim = use_multidim and node.model.config.get_config_value('IOType') == 'io_parallel'
         params['activation'] = 'softmax_multidim' if use_multidim else 'softmax'
         params['config'] = f'softmax_config{node.index}'
+        if node.get_attr('implementation') in ('latency', 'stable'):
+            # Table kernels take the constant exp / 1/x tables materialized by
+            # catapult:softmax_const_tables (Catapult cannot synthesize the float init).
+            params['exp_table'] = node.get_weights('exp_table').name
+            params['inv_table'] = node.get_weights('inv_table').name
+            return softmax_table_function_template.format(**params)
         return self.template.format(**params)
 
 

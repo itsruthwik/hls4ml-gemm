@@ -31,7 +31,6 @@ from hls4ml.model.layers import (
     SeparableConv1D,
     SeparableConv2D,
     SimpleRNN,
-    Softmax,
 )
 from hls4ml.backends.catapult.passes import (
     TransposeWeightsForGemmIP,
@@ -215,6 +214,7 @@ class CatapultBackend(FPGABackend):
             'catapult:inplace_stream_flatten',
             'catapult:skip_softmax',
             'catapult:fix_softmax_table_size',
+            'catapult:softmax_const_tables',
             'catapult:process_fixed_point_quantizer_layer',
             'infer_precision_types',
         ]
@@ -740,22 +740,6 @@ class CatapultBackend(FPGABackend):
             return
         warn(f'Invalid strategy "{strategy}" for Einsum layer "{layer.name}". Using "latency" strategy instead.')
         layer.set_attr('strategy', 'latency')
-
-    @layer_optimizer(Softmax)
-    def init_softmax(self, layer):
-        # Calculate multidimensional softmax parameters
-        shape = layer.get_input_variable().shape
-        axis = layer.get_attr('axis')
-        if axis < 0:
-            axis += len(shape)
-
-        n_inner = np.prod(shape[axis + 1 :]) if axis < len(shape) - 1 else 1
-        n_outer = np.prod(shape[:axis]) if axis > 0 else 1
-        n_slice = shape[axis]
-
-        layer.set_attr('n_inner', int(n_inner))
-        layer.set_attr('n_outer', int(n_outer))
-        layer.set_attr('n_slice', int(n_slice))
 
     @layer_optimizer(Embedding)
     def init_embed(self, layer):
