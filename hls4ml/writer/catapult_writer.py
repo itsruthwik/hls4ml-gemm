@@ -1311,8 +1311,8 @@ class CatapultWriter(Writer):
                         'gemm_n': node.get_attr('gemm_n'),
                         'n_inplace': node.get_attr('n_inplace'),
                         'transpose_weights': True,
-                        # Einsum (QK^T / A.V) is two-operand with no bias; bias is never
-                        # in the IP here.
+                        # Einsum (QK^T / A.V) is two-operand with no bias tensor at all.
+                        'has_bias': bool(node.get_attr('has_bias', False)),
                         'bias_in_core': False,
                         'input_precision': str(node.get_input_variable(node.inputs[0]).type.precision),
                         'rhs_precision': str(node.get_input_variable(node.inputs[1]).type.precision),
@@ -1338,9 +1338,12 @@ class CatapultWriter(Writer):
                         'n_contract': node.get_attr('n_contract'),
                         'n_inplace': node.get_attr('n_inplace'),
                         'transpose_weights': True,
-                        # The einsum_dense GEMM path feeds the IP a zero bias and adds
-                        # the (possibly per-element) bias in the wrapper, so the IP omits it.
-                        'bias_in_core': False,
+                        'has_bias': bool(node.get_attr('has_bias', False)),
+                        # Row-varying bias can't live on the per-column IP port; it is
+                        # added in the wrapper instead, so the IP omits it even when
+                        # has_bias is True. Non-row-varying: bias_in_core tracks has_bias.
+                        'bias_in_core': bool(node.get_attr('has_bias', False))
+                        and not bool(node.get_attr('_row_varying_bias', False)),
                         'input_precision': str(node.get_input_variable().type.precision),
                         'output_precision': str(node.get_output_variable().type.precision),
                         'weight_precision': str(node.get_weights('weight').type.precision),
@@ -1361,14 +1364,18 @@ class CatapultWriter(Writer):
                         # Weight-stationary: the external GEMM IP holds the packed
                         # weights internally and hls4ml calls the const_weights signature.
                         'weights_in_core': bool(node.get_attr('weights_in_core', False)),
+                        # has_bias is the single source of truth, derived from the node's
+                        # bias tensor (non-all-zero) in gemm_nodes.py.
+                        'has_bias': bool(node.get_attr('has_bias', False)),
                         # Whether the IP itself should include the bias adder. True only
-                        # for the per-column weight-stationary case, where hls4ml feeds
-                        # the real bias to the IP's bias port. False when hls4ml feeds a
-                        # zero and adds bias in the generated wrapper instead: two-operand
-                        # GEMM (QK^T / A.V, no bias) and row-varying EinsumDense bias
-                        # (per-element add the per-column port can't express). gemm-ip-gen
-                        # honors this to omit the bias adder/port (a later gemm-ip-gen phase).
-                        'bias_in_core': bool(node.get_attr('weights_in_core', False))
+                        # when a real bias exists AND it lives on the per-column
+                        # weight-stationary port. False when there's no bias at all, or
+                        # hls4ml feeds a zero and adds bias in the generated wrapper
+                        # instead: two-operand GEMM (QK^T / A.V, no bias) and row-varying
+                        # EinsumDense bias (per-element add the per-column port can't
+                        # express). gemm-ip-gen honors this to omit the bias adder/port.
+                        'bias_in_core': bool(node.get_attr('has_bias', False))
+                        and bool(node.get_attr('weights_in_core', False))
                         and not bool(node.get_attr('_row_varying_bias', False)),
                         'input_precision': str(node.get_input_variable().type.precision),
                         'output_precision': str(node.get_output_variable().type.precision),

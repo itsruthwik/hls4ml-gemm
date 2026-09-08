@@ -102,6 +102,11 @@ gemm_stream_packed_function_template = (
     '({input}, {output}, {b});'
 )
 
+# has_bias is False (no bias tensor, or the tensor is all-zero): no bias port at all.
+gemm_stream_packed_no_bias_function_template = (
+    'nnet::gemm_stream_const_weights<{input_t}, {output_t}, {config}>({input}, {output});'
+)
+
 
 gemm_array_function_template = """
     {{
@@ -123,6 +128,40 @@ gemm_array_function_template = """
 
         nnet::gemm_array_const_weights<a_row_t, {bias_t}, res_row_t, config{index}>(
             a_rows, result_rows, {b}
+        );
+
+        UNPACK_C_ROWS_{index}: for (unsigned row = 0; row < config{index}::gemm_m; row++) {{
+            #pragma HLS UNROLL
+            for (unsigned col = 0; col < config{index}::gemm_n; col++) {{
+                #pragma HLS UNROLL
+                {output}[row * config{index}::gemm_n + col] = result_rows[row][col];
+            }}
+        }}
+    }}
+"""
+
+
+# has_bias is False (no bias tensor, or the tensor is all-zero): no bias port.
+gemm_array_no_bias_function_template = """
+    {{
+        typedef nnet::array<{input_t}, config{index}::gemm_k> a_row_t;
+        typedef nnet::array<{output_t}, config{index}::gemm_n> res_row_t;
+
+        a_row_t a_rows[config{index}::gemm_m];
+        res_row_t result_rows[config{index}::gemm_m];
+        #pragma HLS ARRAY_PARTITION variable=a_rows complete
+        #pragma HLS ARRAY_PARTITION variable=result_rows complete
+
+        PACK_A_ROWS_{index}: for (unsigned row = 0; row < config{index}::gemm_m; row++) {{
+            #pragma HLS UNROLL
+            for (unsigned kk = 0; kk < config{index}::gemm_k; kk++) {{
+                #pragma HLS UNROLL
+                a_rows[row][kk] = {input}[row * config{index}::gemm_k + kk];
+            }}
+        }}
+
+        nnet::gemm_array_const_weights<a_row_t, res_row_t, config{index}>(
+            a_rows, result_rows
         );
 
         UNPACK_C_ROWS_{index}: for (unsigned row = 0; row < config{index}::gemm_m; row++) {{
@@ -273,6 +312,14 @@ gemm_stream_two_op_function_template = """
     }}
 """
 
+# n_inplace == 1 (the common attention-head case): no bias array, no zero-fill
+# loop, no per-head loop around the single call -- a bare call. Two-operand GEMM
+# never has a real bias, so has_bias is always False here; this is what Vitis was
+# flagging as a non-canonical dataflow region (214-114 / 214-169 / 200-471).
+gemm_stream_two_op_single_function_template = (
+    'nnet::gemm_stream<{input0_t}, {input1_t}, {output_t}, config{index}>({input0}, {input1}, {output});'
+)
+
 
 def _format_two_operand(node):
     """Build the bare two-operand GEMM config (both operands activations, no weight
@@ -400,22 +447,33 @@ class GemmFunctionTemplate(FunctionCallTemplate):
             }
             if io_type == 'io_parallel':
                 return gemm_array_two_op_function_template.format(**two_op)
+            if node.get_attr('n_inplace', 1) == 1:
+                # Bare call: no bias array/port, no zero-fill, no per-head loop.
+                return gemm_stream_two_op_single_function_template.format(**two_op)
+            # n_inplace > 1: unchanged, needs its own follow-up look (plan.md).
             return gemm_stream_two_op_function_template.format(**two_op)
 
         params = self._default_function_params(node)
         params['w'] = node.get_weights('weight').name
-        params['b'] = node.get_weights('bias').name
         params['n_out'] = node.get_attr('n_out')
         params['weight_t'] = node.get_weights('weight').type.name
         params['weight_t_name'] = node.get_weights('weight').type.name
-        params['bias_t'] = node.get_weights('bias').type.name
+        has_bias = bool(node.get_attr('has_bias', False))
+        row_varying = bool(node.get_attr('_row_varying_bias', False))
+        # The row-varying wrapper always needs {b}/{bias_t} to add the per-element
+        # bias, regardless of has_bias (has_bias only gates the IP's own port).
+        if has_bias or row_varying:
+            params['b'] = node.get_weights('bias').name
+            params['bias_t'] = node.get_weights('bias').type.name
         if io_type == 'io_parallel':
-            if node.get_attr('_row_varying_bias', False):
+            if row_varying:
                 # EinsumDense bias that varies across the M rows: zero per-column
                 # bias into the core, full per-element bias added in the unpack loop.
                 return gemm_array_row_bias_function_template.format(**params)
+            if not has_bias:
+                return gemm_array_no_bias_function_template.format(**params)
             return gemm_array_function_template.format(**params)
-        if node.get_attr('_row_varying_bias', False):
+        if row_varying:
             # The per-element bias-add wrapper is only wired for io_parallel; the
             # io_stream packed path has no place to add a row-varying bias without
             # silently dropping the per-row component. EinsumDense GEMM-IP is
@@ -425,6 +483,8 @@ class GemmFunctionTemplate(FunctionCallTemplate):
                 f"Gemm '{node.name}': row-varying bias is not supported on the io_stream GEMM-IP "
                 "path. Use io_parallel for EinsumDense layers whose bias varies across rows."
             )
+        if not has_bias:
+            return gemm_stream_packed_no_bias_function_template.format(**params)
         return gemm_stream_packed_function_template.format(**params)
 
 

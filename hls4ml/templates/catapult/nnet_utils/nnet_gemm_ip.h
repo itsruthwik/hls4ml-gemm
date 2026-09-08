@@ -112,6 +112,29 @@ void gemm_array_const_weights(a_row_T a_rows[CONFIG_T::gemm_m],
     }
 }
 
+// No-bias overload: has_bias is False (no bias tensor, or it is all-zero).
+template <class a_row_T, class res_row_T, typename CONFIG_T>
+void gemm_array_const_weights(a_row_T a_rows[CONFIG_T::gemm_m],
+                           res_row_T results[CONFIG_T::gemm_m]) {
+    static_assert(a_row_T::size == CONFIG_T::gemm_k, "A row width must equal gemm_k.");
+    static_assert(res_row_T::size == CONFIG_T::gemm_n, "C row width must equal gemm_n.");
+
+    typename CONFIG_T::weight_beat_t *weights = CONFIG_T::gemm_weight_beats();
+    for (unsigned int m = 0; m < CONFIG_T::gemm_m; m++) {
+        res_row_T c_row;
+        for (unsigned int n = 0; n < CONFIG_T::gemm_n; n++) {
+            typename CONFIG_T::accum_t accum = 0;
+            for (unsigned int k = 0; k < CONFIG_T::gemm_k; k++) {
+                accum += CONFIG_T::template product<typename a_row_T::value_type,
+                                                    typename CONFIG_T::weight_t>::product(
+                    a_rows[m][k], gemm_weight_at<CONFIG_T>(weights, k, n));
+            }
+            c_row[n] = cast<typename a_row_T::value_type, typename res_row_T::value_type, CONFIG_T>(accum);
+        }
+        results[m] = c_row;
+    }
+}
+
 #else // __SYNTHESIS__ without a package: declaration only -> loud link failure.
 
 template <class a_row_T, class b_col_T, class bias_T, class res_row_T, typename CONFIG_T>
@@ -121,6 +144,9 @@ void gemm_array(a_row_T a_rows[CONFIG_T::gemm_m], b_col_T weight_cols[CONFIG_T::
 template <class a_row_T, class bias_T, class res_row_T, typename CONFIG_T>
 void gemm_array_const_weights(a_row_T a_rows[CONFIG_T::gemm_m], res_row_T results[CONFIG_T::gemm_m],
                            bias_T biases[CONFIG_T::gemm_n]);
+
+template <class a_row_T, class res_row_T, typename CONFIG_T>
+void gemm_array_const_weights(a_row_T a_rows[CONFIG_T::gemm_m], res_row_T results[CONFIG_T::gemm_m]);
 
 #endif // __SYNTHESIS__
 #endif // GEMM_IP_HEADER

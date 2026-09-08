@@ -190,9 +190,13 @@ np.testing.assert_allclose(hls_prediction, keras_prediction, atol=0.35, rtol=0.0
     assert len(const_weights) == 4
     assert len(two_operand) == 2
     # bias_in_core contract (consumed by gemm-ip-gen): the IP owns the bias adder
-    # only for the per-column weight-stationary projections; two-operand matmuls
-    # carry no bias, so the port is off.
-    assert all(e['bias_in_core'] is True for e in const_weights)
+    # only when a real bias exists AND it lives on the per-column weight-stationary
+    # port; two-operand matmuls carry no bias tensor at all, so the port is off.
+    # This model is never trained (Keras default zero bias initializer, no .fit()),
+    # so has_bias is False for the projections too -- has_bias is derived from the
+    # bias tensor itself (non-all-zero), not from whether a bias exists structurally.
+    assert all(e['has_bias'] is False for e in const_weights)
+    assert all(e['bias_in_core'] is False for e in const_weights)
     assert all(e['bias_in_core'] is False for e in two_operand)
 
 
@@ -259,10 +263,11 @@ assert np.std(keras_prediction) > 1e-3, 'degenerate model output; the comparison
     gemm_entries = [entry for entry in gemm_config.values() if entry['type'] == 'Gemm']
     assert len(gemm_entries) == 6  # 4 projections + QK^T + A.V
     assert {entry['interface'] for entry in gemm_entries} == {'stream'}
-    # bias_in_core contract is interface-independent: True for the per-column
-    # weight-stationary projections, False for the two-operand matmuls.
-    assert all(e['bias_in_core'] is True for e in gemm_entries if e['weights_in_core'])
-    assert all(e['bias_in_core'] is False for e in gemm_entries if not e['weights_in_core'])
+    # bias_in_core contract is interface-independent. This model is never trained
+    # (Keras default zero bias initializer, no .fit()), so has_bias is False
+    # everywhere and bias_in_core follows.
+    assert all(e['has_bias'] is False for e in gemm_entries if e['weights_in_core'])
+    assert all(e['bias_in_core'] is False for e in gemm_entries)
 
 
 def test_catapult_hgq2_attention_projection_gemm_ip_codegen_and_csim(tmp_path):

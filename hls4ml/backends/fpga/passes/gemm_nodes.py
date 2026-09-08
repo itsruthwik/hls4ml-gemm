@@ -129,6 +129,18 @@ def layer_has_const_operand(class_name):
     return class_name in _CONST_OPERAND_LAYERS
 
 
+def _bias_tensor_is_nonzero(bias_data):
+    """True when a bias tensor exists and is not all-zero.
+
+    has_bias is a fact derived from the IR (the bias tensor itself), not from any
+    attribute -- nothing sets a 'use_bias' attribute on the node, so reading it always
+    fell back to its True default and has_bias was a dead constant.
+    """
+    if bias_data is None:
+        return False
+    return bool(np.any(np.asarray(bias_data) != 0))
+
+
 # ---------------------------------------------------------------------------
 # Precision mirroring helper
 # ---------------------------------------------------------------------------
@@ -303,7 +315,7 @@ class SplitConvGemm(OptimizerPass):
             '_gemm_output_shape': original_output_shape,
             # Resolved config (resolve-then-store); see _resolve_gemm_config. Flows into
             # both the pointwise Gemm and the fused Im2ColGemm (via **gemm_attributes).
-            'has_bias': bool(node.get_attr('use_bias', True)),
+            'has_bias': _bias_tensor_is_nonzero(node.get_weights('bias').data),
             **_resolve_gemm_config(model, node),
         }
 
@@ -390,7 +402,7 @@ class ReplaceDenseGemm(OptimizerPass):
             '_original_type': 'Dense',
             '_gemm_output_shape': original_output_shape,
             # Resolved config (resolve-then-store); see _resolve_gemm_config.
-            'has_bias': bool(node.get_attr('use_bias', True)),
+            'has_bias': _bias_tensor_is_nonzero(node.get_weights('bias').data),
             **_resolve_gemm_config(model, node),
         }
 
@@ -496,7 +508,7 @@ class LowerEinsumToGemm(OptimizerPass):
             '_original_type': 'EinsumDense',
             '_gemm_output_shape': original_output_shape,
             # Resolved config (resolve-then-store); see _resolve_gemm_config.
-            'has_bias': bool(node.get_attr('use_bias', True)),
+            'has_bias': _bias_tensor_is_nonzero(bias_data),
             **_resolve_gemm_config(model, node),
         }
 
