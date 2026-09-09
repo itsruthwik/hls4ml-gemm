@@ -161,7 +161,7 @@ class SplitAttentionHeads(OptimizerPass):
             else:
                 qk_b = k_h
             qk_h = _two_op_gemm(
-                model, f'{qk.name}_h{h}', q_h, qk_b,
+                model, f'gemm_{qk.name}_h{h}', q_h, qk_b,
                 gemm_m=seq_q, gemm_k=key_dim, gemm_n=seq_k,
                 out_shape=[seq_q, seq_k], out_prec=qk_prec, extra=qk_cfg,
             )
@@ -199,7 +199,7 @@ class SplitAttentionHeads(OptimizerPass):
                 av_chain = [vt_h]
 
             av_h = _two_op_gemm(
-                model, f'{av.name}_h{h}', sm_out, av_b,
+                model, f'gemm_{av.name}_h{h}', sm_out, av_b,
                 gemm_m=seq_q, gemm_k=seq_k, gemm_n=key_dim,
                 out_shape=[seq_q, key_dim], out_prec=av_prec, extra=av_cfg,
             )

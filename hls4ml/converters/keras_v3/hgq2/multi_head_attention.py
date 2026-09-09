@@ -87,8 +87,8 @@ class QMultiHeadAttentionHandler(QLayerHandler):
         n_head = layer.num_heads
         score_batch_shape = (None, n_head, *Q_batch_shape[1:-2], *K_batch_shape[1:-2])
 
-        einsum_QK = QEinsum(layer._dot_product_equation, name=f'{layer.name}_QK', enable_iq=False, enable_oq=False)
-        einsum_sV = QEinsum(layer._combine_equation, name=f'{layer.name}_aV', enable_iq=False, enable_oq=False)
+        einsum_QK = QEinsum(layer._dot_product_equation, name='QK', enable_iq=False, enable_oq=False)
+        einsum_sV = QEinsum(layer._combine_equation, name='aV', enable_iq=False, enable_oq=False)
 
         tensor_Q = KerasTensor(name=f'{unique_name}_Q', shape=Q_batch_shape)
         tensor_K = KerasTensor(name=f'{unique_name}_K', shape=K_batch_shape)
