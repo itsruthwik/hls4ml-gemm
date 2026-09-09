@@ -62,9 +62,19 @@ class QEinsumDense(EinsumDense):
 class QMultiHeadAttention(MultiHeadAttention):
     """MultiHeadAttention with QKeras-quantized projections."""
 
-    def __init__(self, *args, weight_bits=8, act_bits=8, act_int=3, **kwargs):
+    def __init__(self, *args, weight_bits=8, weight_int=0, act_bits=8, act_int=3, **kwargs):
         super().__init__(*args, **kwargs)
         self.weight_bits = weight_bits
+        # Integer bits for the projection-kernel quantizer. Default 0 keeps the
+        # historical +/-1 range ([-1,1)); pass e.g. 7 for a full-range INT8
+        # (fixed<8,8>) weight, needed by callers that want large-magnitude
+        # integer weights instead of the usual sub-unity fake-quant range.
+        if not isinstance(weight_int, int) or not (0 <= weight_int < weight_bits):
+            raise ValueError(
+                f'weight_int must be an int with 0 <= weight_int < weight_bits '
+                f'(got weight_int={weight_int!r}, weight_bits={weight_bits!r})'
+            )
+        self.weight_int = weight_int
         self.act_bits = act_bits
         # Projection outputs (Q/K/V/context) routinely exceed [-1, 1); the activation
         # quantizer needs integer headroom or it saturates. act_int sets those integer
@@ -74,7 +84,7 @@ class QMultiHeadAttention(MultiHeadAttention):
 
     def _quantizers(self):
         return dict(
-            kernel_quantizer=quantized_bits(self.weight_bits, 0, alpha=1),
+            kernel_quantizer=quantized_bits(self.weight_bits, self.weight_int, alpha=1),
             output_quantizer=quantized_bits(self.act_bits, self.act_int, alpha=1),
         )
 
@@ -138,7 +148,8 @@ class QMultiHeadAttention(MultiHeadAttention):
 
     def get_config(self):
         config = super().get_config()
-        config.update(weight_bits=self.weight_bits, act_bits=self.act_bits, act_int=self.act_int)
+        config.update(weight_bits=self.weight_bits, weight_int=self.weight_int,
+                       act_bits=self.act_bits, act_int=self.act_int)
         return config
 
 

@@ -64,6 +64,12 @@ def parse_mha_layer(keras_layer, input_names, input_shapes, data_reader):
     # QMultiHeadAttention carries INT8 bit-widths; stock MultiHeadAttention does not
     # (None -> leave projection precision to the hls4ml config).
     weight_bits = cfg.get('weight_bits')
+    # Integer bits for the projection-weight quantizer (0 keeps the historical
+    # +/-1 range; a caller building large-magnitude INT8 weights sets weight_int
+    # on the layer, e.g. 7 for a full-range INT8). Must match what re-derives the
+    # HLS weight/bias precision below, or large weight values get re-clamped into
+    # [-1, 1) here even though the layer itself was built with headroom.
+    weight_int = cfg.get('weight_int', 0)
     act_bits = cfg.get('act_bits')
     act_int = cfg.get('act_int', 0)
 
@@ -230,9 +236,9 @@ def parse_mha_layer(keras_layer, input_names, input_shapes, data_reader):
     # represented without re-quant.
     if weight_bits is not None:
         for nd in (q_node, k_node, v_node, o_node):
-            nd['weight_quantizer'] = _bits_quantizer(weight_bits)
+            nd['weight_quantizer'] = _bits_quantizer(weight_bits, weight_int)
             if nd['bias_data'] is not None:
-                nd['bias_quantizer'] = _bits_quantizer(weight_bits)
+                nd['bias_quantizer'] = _bits_quantizer(weight_bits, weight_int)
         # Note: the query weights carry the folded 1/sqrt(key_dim) scale, so their
         # magnitude is < 1 and they use only part of the [-1, 1) grid -> a few bits
         # of effective resolution are wasted (they stay `weight_bits` WIDE, no growth).
