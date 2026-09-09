@@ -138,7 +138,10 @@ def _bias_tensor_is_nonzero(bias_data):
     """
     if bias_data is None:
         return False
-    return bool(np.any(np.asarray(bias_data) != 0))
+    try:
+        return bool(np.any(np.asarray(bias_data) != 0))
+    except (TypeError, ValueError):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +298,7 @@ class SplitConvGemm(OptimizerPass):
         original_output_shape = list(node.get_output_variable().shape)
 
         n_patches = node.get_attr('out_height', 1) * node.get_attr('out_width')
+        bias_data = node.get_weights('bias').data
 
         # Shared GEMM attributes. The GEMM path uses row/column GEMM: gemm_m = n_patches
         # (full M, no tiling).
@@ -310,12 +314,12 @@ class SplitConvGemm(OptimizerPass):
             'weight_quantizer': node.get_attr('weight_quantizer'),
             'bias_quantizer': node.get_attr('bias_quantizer'),
             'weight': node.get_weights('weight').data,
-            'bias': node.get_weights('bias').data,
+            'bias': bias_data,
             '_original_type': node.class_name,
             '_gemm_output_shape': original_output_shape,
             # Resolved config (resolve-then-store); see _resolve_gemm_config. Flows into
             # both the pointwise Gemm and the fused Im2ColGemm (via **gemm_attributes).
-            'has_bias': _bias_tensor_is_nonzero(node.get_weights('bias').data),
+            'has_bias': _bias_tensor_is_nonzero(bias_data),
             **_resolve_gemm_config(model, node),
         }
 
@@ -387,6 +391,7 @@ class ReplaceDenseGemm(OptimizerPass):
         # Dense's kernel is constant, so this is weight-stationary regardless of
         # IOType. IOType selects only the INTERFACE (stream vs array) in the template.
         weights_in_core = layer_has_const_operand(node.class_name)
+        bias_data = node.get_weights('bias').data
 
         # The GEMM path uses row/column streaming: gemm_m = n_patches (full M, no tiling).
         gemm_attributes = {
@@ -398,11 +403,11 @@ class ReplaceDenseGemm(OptimizerPass):
             'weight_quantizer': node.get_attr('weight_quantizer'),
             'bias_quantizer': node.get_attr('bias_quantizer'),
             'weight': node.get_weights('weight').data,
-            'bias': node.get_weights('bias').data,
+            'bias': bias_data,
             '_original_type': 'Dense',
             '_gemm_output_shape': original_output_shape,
             # Resolved config (resolve-then-store); see _resolve_gemm_config.
-            'has_bias': _bias_tensor_is_nonzero(node.get_weights('bias').data),
+            'has_bias': _bias_tensor_is_nonzero(bias_data),
             **_resolve_gemm_config(model, node),
         }
 
