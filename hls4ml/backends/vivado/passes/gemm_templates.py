@@ -506,6 +506,10 @@ im2col_gemm_stream_function_template = """
         // sources the constant kernel columns from the config ROM (no weight arg),
         // matching the Dense/EinsumDense const_weights path and Catapult's fused conv.
         nnet::im2col_{n_dim}d_gemm_rows<{input_t}, a_row_t, config{index}_im2col>({input}, activation_rows);
+        // Bias, like the weight ROM, is read through config{index}_gemm::gemm_bias()
+        // (injected by _inject_weight_rom_accessor) rather than a call argument --
+        // matching the two-arg gemm_stream_const_weights signature used by the
+        // Dense/EinsumDense const_weights path.
         nnet::gemm_stream_const_weights<a_row_t, {result_t}, config{index}_gemm>(
             activation_rows, {output}
         );
@@ -526,6 +530,8 @@ im2col_gemm_array_function_template = """
 
         nnet::im2col_{n_dim}d_gemm_rows_array<{input_t}, a_row_t, config{index}_im2col>({input}, a_rows);
 
+        // Bias is read through config{index}_gemm::gemm_bias(), same as the
+        // io_stream const_weights call above -- not a call argument.
         nnet::gemm_array_const_weights<a_row_t, res_row_t, config{index}_gemm>(
             a_rows, result_rows
         );
