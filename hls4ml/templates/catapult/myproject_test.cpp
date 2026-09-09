@@ -72,7 +72,7 @@ CCS_MAIN(int argc, char *argv[]) {
         }
     }
 
-#ifdef RTL_SIM
+#if defined(RTL_SIM) || defined(CCS_DUT_RTL)
     std::string RESULTS_LOG = "tb_data/rtl_cosim_results.log";
 #else
     std::string RESULTS_LOG = "tb_data/csim_results.log";
