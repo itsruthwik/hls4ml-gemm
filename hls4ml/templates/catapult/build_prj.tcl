@@ -105,7 +105,7 @@ options set Input/CompilerFlags -DRANDOM_FRAMES=$opt(ran_frame)
 options set Input/SearchPath {$MGC_HOME/shared/include/nnet_utils} -append
 options set ComponentLibs/SearchPath {$MGC_HOME/shared/pkgs/ccs_hls4ml} -append
 
-if {$opt(reset)} {
+if {$opt(reset) && [file exists CATAPULT_DIR.ccs]} {
   project load CATAPULT_DIR.ccs
   go new
 } else {

@@ -1289,6 +1289,10 @@ class CatapultWriter(Writer):
             # from the project clock so the wrapper schedule and the core
             # share one timing contract.
             'clock_period_ns': node.model.config.get_config_value('ClockPeriod'),
+            'part': node.model.config.get_config_value('Part'),
+            # HLSConfig.ReuseFactor resolved onto the node at GEMM lowering; the
+            # external generator legalizes it per target (see run_atlas_flow.py).
+            'reuse_factor': node.get_attr('reuse_factor', 1),
             # How the constant operand is packed (SecondOperandRowMajor): the ROM
             # header / .dat beat order; also mirrored in protocol.weight_layout.
             'weight_layout': gemm_ip_weight_layout(node),
