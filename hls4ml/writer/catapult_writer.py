@@ -18,7 +18,7 @@ from hls4ml.writer.gemm_ip_weights import (
 import yaml
 
 from hls4ml.backends import get_backend
-from hls4ml.backends.fpga.passes.gemm_nodes import Gemm, Im2ColGemm
+from hls4ml.backends.fpga.passes.gemm_nodes import Gemm
 from hls4ml.model.layers import EinsumDense, Einsum
 from hls4ml.writer.writers import Writer
 
@@ -1226,12 +1226,12 @@ class CatapultWriter(Writer):
     @staticmethod
     def _gemm_ip_interface(node):
         # Interface is DERIVED from IOType, never guessed: io_parallel -> array,
-        # io_stream -> stream, uniformly for the unified Gemm/Im2ColGemm nodes and
+        # io_stream -> stream, uniformly for the unified Gemm nodes and
         # the (Phase 1) Einsum/EinsumDense GEMM-IP layers. Because the same IOType
         # drives the instantiated call in the template, the declared interface can
         # never disagree with the core that is actually built.
         io_type = node.model.config.get_config_value('IOType')
-        is_gemm_ip = isinstance(node, (Gemm, Im2ColGemm, Einsum, EinsumDense)) and bool(
+        is_gemm_ip = isinstance(node, (Gemm, Einsum, EinsumDense)) and bool(
             node.get_attr('strategy') == 'gemm'
         )
         if is_gemm_ip and io_type == 'io_parallel':
@@ -1301,9 +1301,14 @@ class CatapultWriter(Writer):
     def write_gemm_config(self, model):
         """Write a JSON file containing details of GEMM templates used in the design."""
         import json
+        from hls4ml.model.layers import Im2Col
+
         gemm_info = {}
         for node in model.graph.values():
-            use_gemm_ip = bool(node.get_attr('strategy') == 'gemm')
+            # Im2Col carries strategy='gemm' too (it selects the im2col_*_gemm_rows
+            # emitter), but it is a reshaping node, not a GEMM-IP consumer -- it
+            # never gets a manifest entry.
+            use_gemm_ip = bool(node.get_attr('strategy') == 'gemm') and not isinstance(node, Im2Col)
             if use_gemm_ip:
                 if isinstance(node, Einsum):
                     gemm_info[node.name] = {

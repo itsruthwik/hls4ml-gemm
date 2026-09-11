@@ -1,7 +1,7 @@
 import numpy as np
 from hls4ml.model.layers import Dense, Conv1D, Conv2D, SeparableConv1D, SeparableConv2D
 from hls4ml.model.optimizer import OptimizerPass
-from hls4ml.backends.fpga.passes.gemm_nodes import Gemm, Im2ColGemm
+from hls4ml.backends.fpga.passes.gemm_nodes import Gemm
 
 class TransposeWeightsForGemmIP(OptimizerPass):
     """
@@ -15,13 +15,13 @@ class TransposeWeightsForGemmIP(OptimizerPass):
         is_gemm = node.get_attr('strategy') == 'gemm'
         already_transposed = node.get_attr('_weights_transposed_for_gemm', False)
 
-        # We only care about layers that have weights to transpose
-        # After node splitting/fusion this is the unified Gemm or the fused
-        # Im2ColGemm (whose _original_type 'Im2Col_Conv1D/2D' selects the conv
-        # branch below — without it, raw [W,C,F]/[H,W,C,F] kernels reached the
-        # writer and the packed weight columns came out scrambled).
+        # We only care about layers that have weights to transpose. After node
+        # splitting this is the unified Gemm (its _original_type carries the conv
+        # class name, e.g. 'Conv1D'/'Conv2D', for a conv-derived Gemm — without it,
+        # raw [W,C,F]/[H,W,C,F] kernels reached the writer and the packed weight
+        # columns came out scrambled). Im2Col itself carries no weights.
         has_weights = isinstance(
-            node, (Dense, Conv1D, Conv2D, SeparableConv1D, SeparableConv2D, Gemm, Im2ColGemm)
+            node, (Dense, Conv1D, Conv2D, SeparableConv1D, SeparableConv2D, Gemm)
         )
 
         return is_gemm and has_weights and not already_transposed

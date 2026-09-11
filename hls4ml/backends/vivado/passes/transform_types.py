@@ -5,6 +5,7 @@ from hls4ml.backends.vivado.vivado_types import (
     VivadoInplaceStreamVariableConverter,
     VivadoStreamVariableConverter,
 )
+from hls4ml.model.layers import Im2Col
 from hls4ml.model.optimizer import GlobalOptimizerPass
 from hls4ml.model.types import InplaceTensorVariable
 
@@ -25,6 +26,12 @@ class TransformTypes(GlobalOptimizerPass):
             if io_type == 'io_stream':
                 if isinstance(var, InplaceTensorVariable):
                     new_var = self.inplace_stream_var_converter.convert(var)
+                elif isinstance(node, Im2Col) and node.get_attr('strategy') == 'gemm':
+                    # Standalone Im2Col feeding a Gemm IP: Vivado/Vitis has no tile-row
+                    # knob (unlike Catapult), so keep the depth the fused node's inline
+                    # activation_rows stream used -- 2, not the converter's default
+                    # full-n_patches depth.
+                    new_var = self.stream_var_converter.convert(var, depth=2)
                 else:
                     new_var = self.stream_var_converter.convert(var)
             elif io_type == 'io_serial':

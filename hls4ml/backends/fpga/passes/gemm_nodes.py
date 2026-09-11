@@ -48,62 +48,7 @@ class Gemm(Layer):
         self.add_weights_variable(name='bias', data=bias_data, quantizer=self.get_attr('bias_quantizer'))
 
 
-class Im2ColGemm(Layer):
-    """Fused Im2Col + GEMM IP for strided/non-pointwise Conv.
-
-    Kept fused (im2col is streamed straight into the GEMM) and kept out of the
-    plain ``Gemm`` node — im2col is orthogonal to the stream/array and
-    weights_in_core axes. Like ``Gemm``, the interface is chosen from IOType in
-    the template, not by the class.
-    """
-    _expected_attributes = [
-        Attribute('n_in'),
-        Attribute('n_out'),
-        Attribute('n_patches'),
-        Attribute('n_inplace', default=1),
-        Attribute('in_height'),
-        Attribute('in_width'),
-        Attribute('n_chan'),
-        Attribute('filt_height'),
-        Attribute('filt_width'),
-        Attribute('stride_height'),
-        Attribute('stride_width'),
-        Attribute('pad_top'),
-        Attribute('pad_bottom'),
-        Attribute('pad_left'),
-        Attribute('pad_right'),
-        Attribute('out_height'),
-        Attribute('out_width'),
-        Attribute('data_format', value_type=str),
-        Attribute('gemm_m'),
-        Attribute('im2col_tile_rows'),
-        WeightAttribute('weight'),
-        WeightAttribute('bias'),
-        TypeAttribute('weight'),
-        TypeAttribute('bias'),
-        TypeAttribute('accum'),
-    ]
-
-    def initialize(self):
-        _shape_hint = self.attributes.get('_gemm_output_shape', None)
-        if _shape_hint is not None:
-            shape = list(_shape_hint)
-        else:
-            shape = [self.attributes['n_patches'], self.attributes['n_out']]
-        self.add_output_variable(shape)
-        
-        weight_data = self.get_attr('weight')
-        if hasattr(weight_data, 'data'):
-            weight_data = weight_data.data
-        bias_data = self.get_attr('bias')
-        if hasattr(bias_data, 'data'):
-            bias_data = bias_data.data
-
-        self.add_weights_variable(name='weight', data=weight_data, quantizer=self.get_attr('weight_quantizer'))
-        self.add_weights_variable(name='bias', data=bias_data, quantizer=self.get_attr('bias_quantizer'))
-
 register_layer('Gemm', Gemm)
-register_layer('Im2ColGemm', Im2ColGemm)
 
 
 # ---------------------------------------------------------------------------
@@ -315,8 +260,8 @@ class SplitConvGemm(OptimizerPass):
             'n_patches': n_patches,
             'gemm_m': n_patches,
             # Conv's kernel is constant, so this is always weight-stationary —
-            # independent of IOType, and true for both the pointwise GemmStream path
-            # and the fused Im2ColGemmStream path.
+            # independent of IOType, and true for both the pointwise Gemm path
+            # and the conv-derived Gemm fed by a standalone Im2Col node.
             'weights_in_core': layer_has_const_operand(node.class_name),
             'weight_quantizer': node.get_attr('weight_quantizer'),
             'bias_quantizer': node.get_attr('bias_quantizer'),
@@ -325,7 +270,7 @@ class SplitConvGemm(OptimizerPass):
             '_original_type': node.class_name,
             '_gemm_output_shape': original_output_shape,
             # Resolved config (resolve-then-store); see _resolve_gemm_config. Flows into
-            # both the pointwise Gemm and the fused Im2ColGemm (via **gemm_attributes).
+            # the Gemm node for both the pointwise and Im2Col-fed non-pointwise branches.
             'has_bias': _bias_tensor_is_nonzero(bias_data),
             **_resolve_gemm_config(model, node),
         }
@@ -364,12 +309,14 @@ class SplitConvGemm(OptimizerPass):
                     f'1 <= Im2ColTileRows <= n_patches ({n_patches}).'
                 )
             gemm_attributes['im2col_tile_rows'] = tile_rows
-            # Non-pointwise → build the fused Im2Col+GEMM node DIRECTLY (previously this
-            # was a Gemm+Im2Col pair immediately re-fused by FuseIm2ColGemm; the
-            # merge removes that create-then-replace churn). _original_type must contain
-            # the conv class name — gemm_transposition branches on it to pick the
-            # [W,C,F]/[H,W,C,F] → [F, W*C]/[F, H*W*C] weight layout.
-            fused_attributes = {
+            # Non-pointwise → standalone Im2Col node feeding a pure Gemm node. im2col is
+            # a reshaping node (like HeadSplit/HeadMerge) that owns the spatial attrs,
+            # gemm_m and the tile-row knob; the Gemm owns the weights, reuse factor and
+            # precision, exactly as the Dense/pointwise/attention Gemm nodes do.
+            # _original_type on the GEMM must contain the conv class name —
+            # gemm_transposition branches on it to pick the [W,C,F]/[H,W,C,F] ->
+            # [F, W*C]/[F, H*W*C] weight layout — NOT an 'Im2Col_' prefix.
+            im2col_attributes = {
                 'in_height': node.get_attr('in_height', 1),
                 'in_width': node.get_attr('in_width'),
                 'n_chan': node.get_attr('n_chan'),
@@ -384,12 +331,25 @@ class SplitConvGemm(OptimizerPass):
                 'out_height': node.get_attr('out_height', 1),
                 'out_width': node.get_attr('out_width'),
                 'data_format': node.get_attr('data_format'),
-                **gemm_attributes,
-                '_original_type': f'Im2Col_{node.class_name}',
+                'gemm_m': gemm_attributes['gemm_m'],
+                'im2col_tile_rows': tile_rows,
+                'strategy': 'gemm',
             }
+            im2col_name = f'im2col_{node.name}'
+            im2col_node = model.make_node(Im2Col, im2col_name, im2col_attributes, node.inputs.copy())
+            # Im2Col is pure reshaping: no backend infer-precision pass covers it, so set
+            # its output precision explicitly to the conv INPUT precision here.
+            im2col_node.get_output_variable().type.precision = node.get_input_variable().type.precision
+
+            gemm_attributes.pop('im2col_tile_rows', None)  # lives on the Im2Col node now
             gemm_node = model.make_node(
-                Im2ColGemm, gemm_name, fused_attributes, node.inputs.copy(), node.outputs.copy()
+                Gemm, gemm_name, gemm_attributes, im2col_node.outputs.copy(), node.outputs.copy()
             )
+            gemm_node.get_output_variable().type.precision = original_output_precision
+            gemm_node.get_weights('weight').type.precision = original_weight_precision
+
+            model.split_node(node, im2col_node, gemm_node)
+            return True
 
         gemm_node.get_output_variable().type.precision = original_output_precision
         gemm_node.get_weights('weight').type.precision = original_weight_precision

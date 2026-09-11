@@ -5,7 +5,7 @@ Regression tests for INT8 precision override support in the Catapult GEMM IP
 backend (Strategy: GEMM).
 
 Root cause (see local-docs/HGQ2_Mixed_Precision_Report.md):
-  When a Dense or Conv layer is transformed into a Gemm / Im2ColGemm
+  When a Dense or Conv layer is transformed into a Gemm (conv via a standalone Im2Col + Gemm)
   node, the new synthetic node previously could not find its LayerName precision
   entries in HLSConfig because its node name (e.g. 'gemm_dense_target') differed
   from the original source name ('dense_target').
@@ -30,7 +30,7 @@ Tests
 3. Dense GemmIP=False (baseline) — Dense node not replaced, weight_t is INT8 on
    the original Dense node (regression guard that baseline path is unaffected)
 4. Precision isolation — INT8 override on one Dense does NOT leak to sibling
-5. Conv1D INT8 GemmIP — fused Im2ColGemm has weight_t = ac_int<8, true>
+5. Conv1D INT8 GemmIP — conv-derived Gemm has weight_t = ac_int<8, true>
 """
 
 import os
@@ -296,11 +296,11 @@ def test_precision_isolation_between_dense_layers(tmp_path):
 
 def test_conv1d_int8_gemm_ip_weight_type(tmp_path):
     """
-    For Conv1D with GemmIP=True and an INT8 LayerName override, the fused
-    Im2ColGemm node must have weight_t = ac_int<8, true>.
+    For Conv1D with GemmIP=True and an INT8 LayerName override, the conv-derived
+    Gemm node (fed by a standalone Im2Col node) must have weight_t = ac_int<8, true>.
     """
     import hls4ml
-    from hls4ml.backends.fpga.passes.gemm_nodes import Im2ColGemm
+    from hls4ml.backends.fpga.passes.gemm_nodes import Gemm
 
     model = _make_conv1d_model()
     config = hls4ml.utils.config_from_keras_model(model, backend='Catapult', granularity='name')
@@ -318,10 +318,10 @@ def test_conv1d_int8_gemm_ip_weight_type(tmp_path):
         io_type='io_stream',
     )
 
-    # The SplitConvGemm + FuseIm2ColGemm passes produce an Im2ColGemm node.
+    # SplitConvGemm produces a standalone Im2Col node feeding a Gemm node.
     fused_node = next(
         (n for n in hls_model.get_layers()
-         if isinstance(n, Im2ColGemm) and 'conv_target' in n.name),
+         if isinstance(n, Gemm) and 'conv_target' in n.name),
         None,
     )
     if fused_node is None:
@@ -334,7 +334,7 @@ def test_conv1d_int8_gemm_ip_weight_type(tmp_path):
         )
 
     assert fused_node is not None, \
-        "Expected a fused Im2ColGemm node for 'conv_target' but none found."
+        "Expected a conv-derived Gemm node for 'conv_target' but none found."
 
     w_cpp = _precision_cpp(fused_node, 'weight')
     b_cpp = _precision_cpp(fused_node, 'bias')
@@ -405,10 +405,10 @@ def test_dense_gemm_ip_accum_override(tmp_path):
 
 def test_conv1d_gemm_ip_accum_override(tmp_path):
     """
-    Conv1D GEMM-IP fused path emits distinct accumulator precision.
+    Conv1D GEMM-IP path (Im2Col + Gemm) emits distinct accumulator precision.
     """
     import hls4ml
-    from hls4ml.backends.fpga.passes.gemm_nodes import Im2ColGemm
+    from hls4ml.backends.fpga.passes.gemm_nodes import Gemm
 
     model = _make_conv1d_model()
     config = hls4ml.utils.config_from_keras_model(model, backend='Catapult', granularity='name')
@@ -430,7 +430,7 @@ def test_conv1d_gemm_ip_accum_override(tmp_path):
 
     fused_node = next(
         (n for n in hls_model.get_layers()
-         if isinstance(n, Im2ColGemm) and 'conv_target' in n.name),
+         if isinstance(n, Gemm) and 'conv_target' in n.name),
         None,
     )
     if fused_node is None:
@@ -441,7 +441,7 @@ def test_conv1d_gemm_ip_accum_override(tmp_path):
             None,
         )
 
-    assert fused_node is not None, "Expected a fused Im2ColGemm node."
+    assert fused_node is not None, "Expected a conv-derived Gemm node."
 
     accum_t = fused_node.types.get('accum_t')
     assert accum_t is not None, "accum_t not found in node.types"

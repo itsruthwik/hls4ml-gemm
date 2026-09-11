@@ -3,9 +3,9 @@
 These are unit tests that verify:
 1. The GEMM optimizer passes are correctly registered for the Vivado backend.
 2. ReplaceDenseGemm transforms a Dense layer into a Gemm node.
-3. SplitConvGemm + FuseIm2ColGemm transform Conv2D into Im2ColGemm.
+3. SplitConvGemm transforms non-pointwise Conv2D into a standalone Im2Col node feeding a Gemm node.
 4. TransposeWeightsForGemmIP correctly transposes weight data.
-5. Gemm and Im2ColGemm config/function templates generate valid C++.
+5. Gemm and Im2Col config/function templates generate valid C++.
 
 Note: These tests do NOT require Vivado HLS to be installed. They only
 verify the Python-side graph transformation and template generation.
@@ -17,11 +17,11 @@ import pytest
 import hls4ml
 from hls4ml.backends.vivado.passes.gemm_nodes import (
     Gemm,
-    Im2ColGemm,
     ReplaceDenseGemm,
     SplitConvGemm,
     TransposeWeightsForGemmIP,
 )
+from hls4ml.model.layers import Im2Col
 
 
 # ---------------------------------------------------------------------------
@@ -71,8 +71,8 @@ class TestGemmPassRegistration:
         passes = opt_mod.get_backend_passes('vivado')
         assert 'vivado:gemm_config_template' in passes
         assert 'vivado:gemm_function_template' in passes
-        assert 'vivado:im2colgemm_config_template' in passes
-        assert 'vivado:im2colgemm_function_template' in passes
+        assert 'vivado:im2col_config_template' in passes
+        assert 'vivado:im2col_function_template' in passes
 
     def test_vitis_backend_has_gemm_templates(self):
         from hls4ml.model import optimizer as opt_mod
@@ -143,7 +143,7 @@ class TestReplaceDenseGemm:
 
 
 # ---------------------------------------------------------------------------
-# 3. Conv2D → Im2ColGemm transformation
+# 3. Conv2D -> Im2Col + Gemm transformation
 # ---------------------------------------------------------------------------
 
 class TestSplitFuseConvGemm:
@@ -159,33 +159,42 @@ class TestSplitFuseConvGemm:
         )
         return hls_model
 
-    def test_conv2d_replaced_by_im2colgemmstream(self):
+    def test_conv2d_replaced_by_im2col_and_gemm(self):
         hls_model = self._build_hls_model()
-        has_fused = any(isinstance(n, Im2ColGemm) for n in hls_model.graph.values())
-        assert has_fused, 'Expected Im2ColGemm in graph'
+        has_im2col = any(isinstance(n, Im2Col) for n in hls_model.graph.values())
+        has_gemm = any(isinstance(n, Gemm) for n in hls_model.graph.values())
+        assert has_im2col and has_gemm, 'Expected Im2Col + Gemm in graph'
 
-    def test_im2colgemmstream_config_cpp_generated(self):
+    def test_im2col_config_cpp_generated(self):
         hls_model = self._build_hls_model()
         for node in hls_model.graph.values():
-            if isinstance(node, Im2ColGemm):
+            if isinstance(node, Im2Col):
                 config_cpp = node.get_attr('config_cpp', '')
                 assert 'gemm_m' in config_cpp
-                assert 'gemm_k' in config_cpp
                 assert 'filt_height' in config_cpp
                 break
         else:
-            pytest.fail('No Im2ColGemm found')
-
-    def test_im2colgemmstream_function_cpp_uses_hls_stream(self):
-        hls_model = self._build_hls_model()
+            pytest.fail('No Im2Col found')
         for node in hls_model.graph.values():
-            if isinstance(node, Im2ColGemm):
-                fn_cpp = node.get_attr('function_cpp', '')
-                assert 'hls::stream' in fn_cpp, f'Expected hls::stream in function_cpp; got: {fn_cpp!r}'
-                assert 'im2col_2d_gemm_rows' in fn_cpp
+            if isinstance(node, Gemm):
+                config_cpp = node.get_attr('config_cpp', '')
+                assert 'gemm_k' in config_cpp
                 break
         else:
-            pytest.fail('No Im2ColGemm found')
+            pytest.fail('No Gemm found')
+
+    def test_im2col_function_cpp_calls_gemm_rows(self):
+        # The standalone Im2Col node's call site is a bare function call; the inter-node
+        # channel it writes into (an hls::stream) is declared where the writer declares
+        # every inter-layer variable, not inline in this call's own function_cpp.
+        hls_model = self._build_hls_model()
+        for node in hls_model.graph.values():
+            if isinstance(node, Im2Col):
+                fn_cpp = node.get_attr('function_cpp', '')
+                assert 'im2col_2d_gemm_rows' in fn_cpp, f'Expected im2col_2d_gemm_rows in function_cpp; got: {fn_cpp!r}'
+                break
+        else:
+            pytest.fail('No Im2Col found')
 
 
 # ---------------------------------------------------------------------------
@@ -397,14 +406,11 @@ class TestPointwiseConvGemm:
             model, hls_config=config, backend='Vivado', io_type='io_stream',
             output_dir=str(self.tmp_path / 'test_pw_conv1d')
         )
-        # Should have Gemm but NOT Im2ColGemm and NOT Im2Col
+        # Should have Gemm but NOT Im2Col (pointwise conv is a plain GEMM).
         has_gemm = False
         for node in hls_model.graph.values():
-            if isinstance(node, Im2ColGemm):
-                pytest.fail('Pointwise Conv should NOT produce Im2ColGemm')
             if isinstance(node, Gemm):
                 has_gemm = True
-            from hls4ml.model.layers import Im2Col
             if isinstance(node, Im2Col):
                 pytest.fail('Pointwise Conv should NOT produce Im2Col')
         assert has_gemm, 'Expected Gemm for pointwise Conv'
@@ -424,13 +430,13 @@ class TestPointwiseConvGemm:
             output_dir=str(self.tmp_path / 'test_pw_conv2d')
         )
         for node in hls_model.graph.values():
-            if isinstance(node, Im2ColGemm):
-                pytest.fail('Pointwise Conv2D should NOT produce Im2ColGemm')
+            if isinstance(node, Im2Col):
+                pytest.fail('Pointwise Conv2D should NOT produce Im2Col')
         has_gemm = any(isinstance(n, Gemm) for n in hls_model.graph.values())
         assert has_gemm, 'Expected Gemm for pointwise Conv2D'
 
-    def test_non_pointwise_conv2d_produces_im2colgemmstream(self):
-        """Non-pointwise Conv2D (3×3) still produces Im2ColGemm."""
+    def test_non_pointwise_conv2d_produces_im2col_and_gemm(self):
+        """Non-pointwise Conv2D (3×3) still produces an Im2Col + Gemm pair."""
         import tensorflow as tf
         model = tf.keras.Sequential([
             tf.keras.layers.Conv2D(4, 3, padding='valid', input_shape=(8, 8, 2), use_bias=True)
@@ -443,8 +449,9 @@ class TestPointwiseConvGemm:
             model, hls_config=config, backend='Vivado', io_type='io_stream',
             output_dir=str(self.tmp_path / 'test_nonpw_conv2d')
         )
-        has_fused = any(isinstance(n, Im2ColGemm) for n in hls_model.graph.values())
-        assert has_fused, 'Non-pointwise Conv2D should produce Im2ColGemm'
+        has_im2col = any(isinstance(n, Im2Col) for n in hls_model.graph.values())
+        has_gemm = any(isinstance(n, Gemm) for n in hls_model.graph.values())
+        assert has_im2col and has_gemm, 'Non-pointwise Conv2D should produce Im2Col + Gemm'
 
 
 # ---------------------------------------------------------------------------
@@ -493,13 +500,13 @@ class TestGemmM:
             output_dir=str(self.tmp_path / 'test_gemm_m_conv')
         )
         for node in hls_model.graph.values():
-            if isinstance(node, Im2ColGemm):
+            if isinstance(node, Gemm) and 'conv' in node.name:
                 # padding='valid', 8x8 in, 3x3 kernel → 6x6 out → n_patches=36
                 assert node.get_attr('gemm_m') == 36
                 assert node.get_attr('gemm_m') == node.get_attr('n_patches')
                 break
         else:
-            pytest.fail('No Im2ColGemm found')
+            pytest.fail('No conv-derived Gemm found')
 
 
 # ---------------------------------------------------------------------------
@@ -514,8 +521,8 @@ class TestConvOutputShape:
         pytest.importorskip('tensorflow')
         self.tmp_path = tmp_path
 
-    def test_conv2d_im2colgemmstream_preserves_output_shape(self):
-        """Im2ColGemm keeps [out_h, out_w, n_filt] not [n_patches, n_out]."""
+    def test_conv2d_im2col_gemm_preserves_output_shape(self):
+        """The conv-derived Gemm keeps [out_h, out_w, n_filt] not [n_patches, n_out]."""
         import tensorflow as tf
         model = tf.keras.Sequential([
             tf.keras.layers.Conv2D(4, 3, padding='valid',
@@ -530,7 +537,7 @@ class TestConvOutputShape:
             output_dir=str(self.tmp_path / 'test_conv_shape')
         )
         for node in hls_model.graph.values():
-            if isinstance(node, Im2ColGemm):
+            if isinstance(node, Gemm) and 'conv' in node.name:
                 shape = list(node.get_output_variable().shape)
                 assert len(shape) == 3, (
                     f'Expected rank-3 Conv output, got {len(shape)}-d: {shape}'
@@ -539,7 +546,7 @@ class TestConvOutputShape:
                 assert shape == [6, 6, 4], f'Expected [6, 6, 4] got {shape}'
                 break
         else:
-            pytest.fail('No Im2ColGemm found')
+            pytest.fail('No conv-derived Gemm found')
 
 
 # ---------------------------------------------------------------------------
@@ -575,8 +582,8 @@ class TestVitisAcceptance:
         vitis_passes = opt_mod.get_backend_passes('vitis')
         assert 'vitis:gemm_config_template' in vitis_passes
         assert 'vitis:gemm_function_template' in vitis_passes
-        assert 'vitis:im2colgemm_config_template' in vitis_passes
-        assert 'vitis:im2colgemm_function_template' in vitis_passes
+        assert 'vitis:im2col_config_template' in vitis_passes
+        assert 'vitis:im2col_function_template' in vitis_passes
 
     def test_vitis_gemm_passes(self):
         """Vitis backend has the GEMM pass transformations under the vivado namespace."""
@@ -850,8 +857,9 @@ class TestEinsumDenseLowering:
 @pytest.mark.parametrize('backend', ['Vivado', 'Vitis'])
 @pytest.mark.parametrize('dim', [1, 2])
 def test_conv_gemm_ip_io_parallel_csim(backend, dim, tmp_path):
-    """General Conv1D/2D GEMM-IP fuses to Im2ColGemm and csim-matches keras on io_parallel
-    (array im2col + gemm_array_const_weights), at parity with the io_stream fused-conv path."""
+    """General Conv1D/2D GEMM-IP lowers to a standalone Im2Col node feeding a Gemm node
+    and csim-matches keras on io_parallel (array im2col + gemm_array_const_weights), at
+    parity with the io_stream Im2Col+Gemm path."""
     import keras
 
     rng = np.random.default_rng(1)
@@ -875,7 +883,8 @@ def test_conv_gemm_ip_io_parallel_csim(backend, dim, tmp_path):
             'LayerType': {'Conv1D': {'Strategy': 'GEMM'}, 'Conv2D': {'Strategy': 'GEMM'}},
         },
     )
-    assert any('Im2ColGemm' in type(n).__name__ for n in hls_model.graph.values()), 'expected a fused Im2ColGemm'
+    assert any('Im2Col' in type(n).__name__ for n in hls_model.graph.values()), 'expected a standalone Im2Col node'
+    assert any(type(n).__name__.endswith('Gemm') for n in hls_model.graph.values()), 'expected a Gemm node'
     hls_model.compile()
     x = rng.standard_normal((4,) + inp.shape[1:]).astype(np.float32) * 0.5
     y_hls = hls_model.predict(x).reshape(4, -1)

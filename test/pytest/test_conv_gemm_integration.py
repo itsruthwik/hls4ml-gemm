@@ -48,20 +48,22 @@ class TestConv1DIm2colIntegration:
                 backend='Catapult',
             )
 
-            # Guard against silently falling back to the traditional conv path.
+            # Guard against silently falling back to the traditional conv path: a
+            # standalone Im2Col node feeding a pure Gemm node.
             node_types = [type(n).__name__ for n in hls_model.graph.values()]
-            assert any('Im2ColGemm' in t for t in node_types), \
+            assert any('Im2Col' in t for t in node_types) and any(t.endswith('Gemm') for t in node_types), \
                 f"GEMM IP path not taken; graph is {node_types}"
 
             hls_model.write()
 
-            # General conv routes through the fused im2col + GEMM stage wrapper, which
-            # holds the im2col call; myproject.cpp defines and invokes it.
+            # Non-pointwise conv lowers to two stage wrappers: im2col_conv1d
+            # (the im2col call) feeding gemm_conv1d (the GEMM IP call).
             myproject_cpp = os.path.join(tmpdir, 'firmware/myproject.cpp')
             assert os.path.exists(myproject_cpp), "myproject.cpp should exist"
 
             with open(myproject_cpp, 'r') as f:
                 content = f.read()
+                assert 'void im2col_conv1d_stage(' in content, "Should define the Im2Col stage wrapper"
                 assert 'void gemm_conv1d_stage(' in content, "Should define the GEMM stage wrapper"
                 assert 'nnet::im2col_1d_gemm_rows<' in content, "Stage should perform im2col"
                 assert 'conv_1d_cl' not in content, "GEMM path must not fall back to conv_1d_cl"
@@ -126,20 +128,22 @@ class TestConv2DIm2colIntegration:
                 backend='Catapult',
             )
 
-            # Guard against silently falling back to the traditional conv path.
+            # Guard against silently falling back to the traditional conv path: a
+            # standalone Im2Col node feeding a pure Gemm node.
             node_types = [type(n).__name__ for n in hls_model.graph.values()]
-            assert any('Im2ColGemm' in t for t in node_types), \
+            assert any('Im2Col' in t for t in node_types) and any(t.endswith('Gemm') for t in node_types), \
                 f"GEMM IP path not taken; graph is {node_types}"
 
             hls_model.write()
 
-            # General conv routes through the fused im2col + GEMM stage wrapper, which
-            # holds the im2col call; myproject.cpp defines and invokes it.
+            # Non-pointwise conv lowers to two stage wrappers: im2col_conv2d
+            # (the im2col call) feeding gemm_conv2d (the GEMM IP call).
             myproject_cpp = os.path.join(tmpdir, 'firmware/myproject.cpp')
             assert os.path.exists(myproject_cpp), "myproject.cpp should exist"
 
             with open(myproject_cpp, 'r') as f:
                 content = f.read()
+                assert 'void im2col_conv2d_stage(' in content, "Should define the Im2Col stage wrapper"
                 assert 'void gemm_conv2d_stage(' in content, "Should define the GEMM stage wrapper"
                 assert 'nnet::im2col_2d_gemm_rows<' in content, "Stage should perform im2col"
                 assert 'conv_2d_cl' not in content, "GEMM path must not fall back to conv_2d_cl"

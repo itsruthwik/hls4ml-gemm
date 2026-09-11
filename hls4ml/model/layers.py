@@ -726,6 +726,15 @@ class Im2Col(Layer):
         Attribute('out_height'),
         Attribute('out_width'),
         Attribute('data_format', value_type=str),
+        # GEMM-IP-feeding split (see hls4ml.backends.fpga.passes.gemm_nodes.SplitConvGemm):
+        # 'gemm_m' mirrors the downstream Gemm's row count (n_patches) so backend templates
+        # can size the tile buffer without recomputing it; 'im2col_tile_rows' is the tile
+        # depth honored by the Catapult template and the inter-node channel's FIFO pragma.
+        # 'strategy' selects the im2col_{n}d_gemm_rows[_array] emitter (vs the plain
+        # baseline im2col codegen) for non-GEMM Im2Col uses.
+        Attribute('gemm_m', default=None),
+        Attribute('im2col_tile_rows', default=None),
+        Attribute('strategy', value_type=str, default='latency'),
     ]
 
     def initialize(self):

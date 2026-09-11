@@ -3,7 +3,6 @@ from hls4ml.backends.template import FunctionCallTemplate, LayerConfigTemplate
 from hls4ml.backends.fpga.passes.gemm_nodes import (
     Im2Col,
     Gemm,
-    Im2ColGemm,
 )
 
 # ---------------------------------------------------------------------------
@@ -25,12 +24,34 @@ im2col_config_template = """struct config{index} : nnet::im2col_config {{
     static const unsigned pad_left = {pad_left};
     static const unsigned pad_right = {pad_right};
     static const unsigned gemm_m = {gemm_m};
+    static const unsigned tile_rows = {im2col_tile_rows};
 }};\n"""
 
 im2col_function_template = 'nnet::im2col_{n_dim}d_stream<{input_t}, {output_t}, {config}>({input}, {output});'
 im2col_gemm_rows_function_template = (
     'nnet::im2col_{n_dim}d_gemm_rows<{input_t}, {output_t}, {config}>({input}, {output});'
 )
+
+# io_parallel, Strategy:GEMM: the emitter writes a_row_T a_rows[gemm_m] (one packed
+# K-wide row per patch), but the standalone node's output variable is the flat
+# [n_patches, patch_size] array the downstream Gemm array template reads
+# ({input}[row*gemm_k+kk]) — unpack into that flat layout here rather than
+# widening the emitter (kept frozen; see plan.md).
+im2col_gemm_rows_array_function_template = """
+    {{
+        typedef nnet::array<{output_scalar_t}, config{index}::filt_height * config{index}::filt_width \
+* config{index}::n_chan> a_row_t;
+        a_row_t a_rows[config{index}::gemm_m];
+        nnet::im2col_{n_dim}d_gemm_rows_array<{input_t}, a_row_t, config{index}>({input}, a_rows);
+        UNPACK_IM2COL_{index}: for (unsigned row = 0; row < config{index}::gemm_m; row++) {{
+            #pragma hls_unroll
+            for (unsigned kk = 0; kk < a_row_t::size; kk++) {{
+                #pragma hls_unroll
+                {output}[row * a_row_t::size + kk] = a_rows[row][kk];
+            }}
+        }}
+    }}
+"""
 
 
 class Im2ColConfigTemplate(LayerConfigTemplate):
@@ -40,7 +61,8 @@ class Im2ColConfigTemplate(LayerConfigTemplate):
 
     def format(self, node):
         params = self._default_config_params(node)
-        params['gemm_m'] = node.get_attr('gemm_m', 1)
+        params['gemm_m'] = node.get_attr('gemm_m', None) or 1
+        params['im2col_tile_rows'] = node.get_attr('im2col_tile_rows', None) or 1
         return self.template.format(**params)
 
 
@@ -53,6 +75,10 @@ class Im2ColFunctionTemplate(FunctionCallTemplate):
         params = self._default_function_params(node)
         params['n_dim'] = 2 if node.get_attr('in_height', 1) > 1 or node.get_attr('filt_height', 1) > 1 else 1
         if node.get_attr('strategy') == 'gemm':
+            io_type = node.model.config.get_config_value('IOType')
+            if io_type == 'io_parallel':
+                params['output_scalar_t'] = node.get_output_variable().type.precision.definition_cpp()
+                return im2col_gemm_rows_array_function_template.format(**params)
             return im2col_gemm_rows_function_template.format(**params)
         return self.template.format(**params)
 
@@ -404,132 +430,3 @@ gemm_array_row_bias_function_template = """
 """
 
 
-# ---------------------------------------------------------------------------
-# Im2ColGemm templates (fused Conv im2col + GEMM IP)
-# ---------------------------------------------------------------------------
-
-im2col_gemm_stream_config_template = """struct config{index}_im2col : nnet::im2col_config {{
-    static const unsigned in_height = {in_height};
-    static const unsigned in_width = {in_width};
-    static const unsigned n_chan = {n_chan};
-    static const unsigned filt_height = {filt_height};
-    static const unsigned filt_width = {filt_width};
-    static const unsigned stride_height = {stride_height};
-    static const unsigned stride_width = {stride_width};
-    static const unsigned out_height = {out_height};
-    static const unsigned out_width = {out_width};
-    static const unsigned pad_top = {pad_top};
-    static const unsigned pad_bottom = {pad_bottom};
-    static const unsigned pad_left = {pad_left};
-    static const unsigned pad_right = {pad_right};
-    static const unsigned gemm_m = {gemm_m};
-    static const unsigned tile_rows = {im2col_tile_rows};
-}};
-
-struct config{index}_gemm : nnet::gemm_config {{
-    static const unsigned n_in = {n_in};
-    static const unsigned n_out = {n_out};
-    static const unsigned n_patches = {n_patches};
-    static const unsigned gemm_m = {gemm_m};
-    static const unsigned gemm_k = {n_in};
-    static const unsigned gemm_n = {n_out};
-    static const unsigned gemm_ip_id = {index};
-    typedef {weight_t.name} weight_t;
-    typedef {bias_t.name} bias_t;
-    typedef {accum_t.name} accum_t;
-    template<class x_T, class y_T>
-    using product = nnet::product::{product_type}<x_T, y_T>;
-}};\n"""
-
-# Row/column streaming for Catapult.
-# Simulation path: direct array computation or generated const-weight GEMM IP.
-# Synthesis path: im2col producer plus GEMM IP with static packed weights.
-im2col_gemm_stream_function_template = """
-    {{
-        typedef nnet::array<{input_scalar_t}, config{index}_gemm::gemm_k> a_row_t;
-
-        #pragma hls_fifo_depth {im2col_tile_rows}
-        static ac_channel<a_row_t> activation_rows;
-        nnet::im2col_{n_dim}d_gemm_rows<{input_t}, a_row_t, config{index}_im2col>({input}, activation_rows);
-        nnet::gemm_stream_const_weights<a_row_t, {result_t}, config{index}_gemm>(
-            activation_rows, {output}
-        );
-    }}
-"""
-
-
-class Im2ColGemmConfigTemplate(GemmIPConfigTemplateBase):
-    # One config for the fused node, interface-agnostic (config{index}_im2col +
-    # config{index}_gemm, the latter inheriting nnet::gemm_config). Embeds the
-    # weight-ROM accessor so the const_weights csim model can source the constant kernel.
-    backend_name = 'catapult'
-
-    def __init__(self):
-        super().__init__(Im2ColGemm)
-        self.template = im2col_gemm_stream_config_template
-
-    def format(self, node):
-        return _inject_weight_rom_accessor(super().format(node), node)
-
-
-# ---------------------------------------------------------------------------
-# io_parallel counterpart of the streaming fused template: the input is a flat
-# array, so an array-interface im2col materialises a_rows[gemm_m] (no ac_channel),
-# then the const_weights ARRAY entry is called.
-im2col_gemm_array_function_template = """
-    {{
-        typedef nnet::array<{input_t}, config{index}_gemm::gemm_k> a_row_t;
-        typedef nnet::array<{output_t}, config{index}_gemm::gemm_n> res_row_t;
-
-        a_row_t a_rows[config{index}_gemm::gemm_m];
-        res_row_t result_rows[config{index}_gemm::gemm_m];
-
-        nnet::im2col_{n_dim}d_gemm_rows_array<{input_t}, a_row_t, config{index}_im2col>({input}, a_rows);
-
-        nnet::gemm_array_const_weights<a_row_t, res_row_t, config{index}_gemm>(
-            a_rows, result_rows
-        );
-
-        UNPACK_C_ROWS_{index}: for (unsigned row = 0; row < config{index}_gemm::gemm_m; row++) {{
-            #pragma hls_unroll
-            for (unsigned col = 0; col < config{index}_gemm::gemm_n; col++) {{
-                #pragma hls_unroll
-                {output}[row * config{index}_gemm::gemm_n + col] = result_rows[row][col];
-            }}
-        }}
-    }}
-"""
-
-
-class Im2ColGemmFunctionTemplate(FunctionCallTemplate):
-    """One function template for the fused node — dispatches on IOType.
-
-    Conv's kernel is always constant (weights_in_core=True), so only the const_weights
-    column is reached; IOType picks the streaming (ac_channel im2col rows) vs the
-    array (materialised a_rows) fused path.
-    """
-
-    def __init__(self):
-        super().__init__(
-            Im2ColGemm,
-            include_header=[
-                'nnet_utils/nnet_im2col.h',
-                'nnet_utils/nnet_gemm_stream.h',
-                'nnet_utils/nnet_gemm_ip.h',
-            ],
-        )
-        self.template = im2col_gemm_stream_function_template
-
-    def format(self, node):
-        params = self._default_function_params(node)
-        params['n_dim'] = 2 if node.get_attr('in_height', 1) > 1 or node.get_attr('filt_height', 1) > 1 else 1
-        params['w'] = node.get_weights('weight').name
-        params['b'] = node.get_weights('bias').name
-        params['weight_t'] = node.get_weights('weight').type.name
-        params['bias_t'] = node.get_weights('bias').type.name
-        params['input_scalar_t'] = node.get_input_variable().type.precision.definition_cpp()
-        params['result_t'] = node.get_output_variable(node.outputs[0]).type.name
-
-        if node.model.config.get_config_value('IOType') == 'io_parallel':
-            return im2col_gemm_array_function_template.format(**params)
-        return im2col_gemm_stream_function_template.format(**params)

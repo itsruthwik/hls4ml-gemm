@@ -16,7 +16,7 @@ from hls4ml.writer.gemm_ip_weights import (
 )
 import yaml
 
-from hls4ml.backends.fpga.passes.gemm_nodes import Gemm, Im2ColGemm
+from hls4ml.backends.fpga.passes.gemm_nodes import Gemm
 from hls4ml.model.layers import Einsum, EinsumDense
 from hls4ml.writer.writers import Writer
 
@@ -69,7 +69,7 @@ class VivadoWriter(Writer):
     @staticmethod
     def _gemm_ip_interface(node):
         io_type = node.model.config.get_config_value('IOType')
-        if isinstance(node, (Gemm, Im2ColGemm, Einsum, EinsumDense)) and io_type == 'io_parallel' and bool(
+        if isinstance(node, (Gemm, Einsum, EinsumDense)) and io_type == 'io_parallel' and bool(
             node.get_attr('strategy') == 'gemm'
         ):
             return 'array'
@@ -108,9 +108,14 @@ class VivadoWriter(Writer):
 
     def write_gemm_config(self, model):
         """Write a JSON file containing details of GEMM IP templates used in the design."""
+        from hls4ml.model.layers import Im2Col
+
         gemm_info = {}
         for node in model.graph.values():
-            use_gemm_ip = bool(node.get_attr('strategy') == 'gemm')
+            # Im2Col carries strategy='gemm' too (it selects the im2col_*_gemm_rows
+            # emitter), but it is a reshaping node, not a GEMM-IP consumer -- it
+            # never gets a manifest entry.
+            use_gemm_ip = bool(node.get_attr('strategy') == 'gemm') and not isinstance(node, Im2Col)
             if not use_gemm_ip:
                 continue
 

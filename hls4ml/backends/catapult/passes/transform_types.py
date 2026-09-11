@@ -5,6 +5,7 @@ from hls4ml.backends.catapult.catapult_types import (
     CatapultStreamVariableConverter,
 )
 from hls4ml.backends.fpga.fpga_types import ACTypeConverter, HLSTypeConverter, StaticWeightVariableConverter
+from hls4ml.model.layers import Im2Col
 from hls4ml.model.optimizer import GlobalOptimizerPass
 from hls4ml.model.types import InplaceTensorVariable
 
@@ -25,6 +26,14 @@ class TransformTypes(GlobalOptimizerPass):
             if io_type == 'io_stream':
                 if isinstance(var, InplaceTensorVariable):
                     new_var = self.inplace_stream_var_converter.convert(var)
+                elif isinstance(node, Im2Col) and node.get_attr('strategy') == 'gemm' and node.get_attr(
+                    'im2col_tile_rows'
+                ):
+                    # Standalone Im2Col feeding a Gemm IP: the tile depth (rows written
+                    # before the GEMM IP may backpressure) belongs on THIS channel's FIFO
+                    # pragma, not the default full-n_patches depth the converter would
+                    # otherwise compute from the output shape.
+                    new_var = self.stream_var_converter.convert(var, depth=node.get_attr('im2col_tile_rows'))
                 else:
                     new_var = self.stream_var_converter.convert(var)
             elif io_type == 'io_serial':

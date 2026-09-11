@@ -420,12 +420,15 @@ def test_catapult_general_conv1d_gemm_ip_codegen(test_case_id):
     gemm_ip_text = (output_dir / 'firmware' / 'nnet_utils' / 'nnet_gemm_ip.h').read_text()
     parameters_text = (output_dir / 'firmware' / 'parameters.h').read_text()
 
-    # General conv routes through the fused im2col + GEMM stage (SplitConvGemm now
-    # builds the Im2ColGemm node directly). Assert the node kind, not its name.
-    from hls4ml.backends.fpga.passes.gemm_nodes import Im2ColGemm
+    # General conv routes through a standalone Im2Col node feeding a pure Gemm node
+    # (SplitConvGemm splits, no fusion). Assert the node kinds, not their names.
+    from hls4ml.backends.fpga.passes.gemm_nodes import Gemm
+    from hls4ml.model.layers import Im2Col
 
-    assert any(isinstance(layer, Im2ColGemm) for layer in hls_model.get_layers()), \
-        'General conv should produce a fused Im2ColGemm node'
+    assert any(isinstance(layer, Im2Col) for layer in hls_model.get_layers()), \
+        'General conv should produce a standalone Im2Col node'
+    assert any(isinstance(layer, Gemm) for layer in hls_model.get_layers()), \
+        'General conv should produce a Gemm node'
     assert 'nnet::im2col_1d_gemm_rows<' in myproject_text
     assert 'nnet::gemm_stream_const_weights<' in myproject_text
     # Four-name GEMM layer: the old weight-column feed / wrapper helpers are gone.
