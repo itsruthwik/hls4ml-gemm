@@ -76,6 +76,7 @@ class Im2ColGemm(Layer):
         Attribute('out_width'),
         Attribute('data_format', value_type=str),
         Attribute('gemm_m'),
+        Attribute('im2col_tile_rows'),
         WeightAttribute('weight'),
         WeightAttribute('bias'),
         TypeAttribute('weight'),
@@ -280,6 +281,12 @@ def _resolve_gemm_config(model, source_node):
         'second_operand_row_major': bool(
             _safe(lambda: _resolve_config_key(cfg, source_node, 'SecondOperandRowMajor', False), False)
         ),
+        # Im2Col-only knob (see SplitConvGemm): number of im2col rows written per
+        # tile before the downstream GEMM IP is allowed to backpressure. Resolved
+        # here for both branches; the Pointwise Gemm branch drops it (no im2col).
+        'im2col_tile_rows': _safe(
+            lambda: _resolve_config_key(cfg, source_node, 'Im2ColTileRows', None), None
+        ),
     }
 
 
@@ -340,11 +347,23 @@ class SplitConvGemm(OptimizerPass):
         # template reads it from IOType. The node carries only the layer facts.
         # Orthogonal to weights_in_core — see the two-axes note above.
         if is_pointwise:
-            # Pointwise conv is a plain GEMM (no im2col), like Dense → Gemm.
+            # Pointwise conv is a plain GEMM (no im2col) — drop the im2col-only knob.
+            gemm_attributes.pop('im2col_tile_rows', None)
             gemm_node = model.make_node(
                 Gemm, gemm_name, gemm_attributes, node.inputs.copy(), node.outputs.copy()
             )
         else:
+            # Resolve/validate the im2col tile-row knob: default = out_width (one
+            # output row, the natural gapless burst), else must fit 1..n_patches.
+            tile_rows = gemm_attributes.get('im2col_tile_rows')
+            if not tile_rows:
+                tile_rows = node.get_attr('out_width')
+            elif not (1 <= tile_rows <= n_patches):
+                raise ValueError(
+                    f"Layer '{node.name}': Im2ColTileRows={tile_rows} must satisfy "
+                    f'1 <= Im2ColTileRows <= n_patches ({n_patches}).'
+                )
+            gemm_attributes['im2col_tile_rows'] = tile_rows
             # Non-pointwise → build the fused Im2Col+GEMM node DIRECTLY (previously this
             # was a Gemm+Im2Col pair immediately re-fused by FuseIm2ColGemm; the
             # merge removes that create-then-replace churn). _original_type must contain

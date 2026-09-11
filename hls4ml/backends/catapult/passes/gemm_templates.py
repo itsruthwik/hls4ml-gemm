@@ -423,6 +423,7 @@ im2col_gemm_stream_config_template = """struct config{index}_im2col : nnet::im2c
     static const unsigned pad_left = {pad_left};
     static const unsigned pad_right = {pad_right};
     static const unsigned gemm_m = {gemm_m};
+    static const unsigned tile_rows = {im2col_tile_rows};
 }};
 
 struct config{index}_gemm : nnet::gemm_config {{
@@ -447,7 +448,7 @@ im2col_gemm_stream_function_template = """
     {{
         typedef nnet::array<{input_scalar_t}, config{index}_gemm::gemm_k> a_row_t;
 
-        #pragma hls_fifo_depth 2
+        #pragma hls_fifo_depth {im2col_tile_rows}
         static ac_channel<a_row_t> activation_rows;
         nnet::im2col_{n_dim}d_gemm_rows<{input_t}, a_row_t, config{index}_im2col>({input}, activation_rows);
         nnet::gemm_stream_const_weights<a_row_t, {result_t}, config{index}_gemm>(

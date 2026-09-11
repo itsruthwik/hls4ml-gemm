@@ -23,6 +23,7 @@ struct im2col_config {
     static const unsigned pad_left = 0;
     static const unsigned pad_right = 0;
     static const unsigned gemm_m = 1;
+    static const unsigned tile_rows = 1;
 };
 
 template <class a_row_T, class data_T, unsigned N>
@@ -52,9 +53,17 @@ void im2col_1d_gemm_rows(ac_channel<data_T> &data, ac_channel<a_row_T> &a_rows) 
     typedef typename data_T::value_type data_element_t;
     int pX = 0;
     int sX = 0;
+    unsigned tile_row = 0;
     data_element_t kernel_data[CONFIG_T::filt_width * CONFIG_T::n_chan] = {};
     const static int lShiftX = CONFIG_T::filt_width - 1;
 
+    static_assert(CONFIG_T::tile_rows >= 1 && CONFIG_T::tile_rows <= CONFIG_T::gemm_m,
+                  "tile_rows must satisfy 1 <= tile_rows <= gemm_m");
+
+    // Tile semantics: within a tile (tile_rows consecutive emitted a_rows) this pixel
+    // loop is gapless (II=1, no stalls) — the downstream activation_rows channel is
+    // sized to tile_rows deep so a full tile always drains without backpressure.
+    // GEMM-IP backpressure is only expected/allowed to be visible at tile boundaries.
 ReadInputWidth:
     // Pipeline the spatial driver loop (Catapult does not auto-flatten the nest the way Vivado does,
     // so pipelining only the inner ReadInputPack leaves this loop rolled). Unroll the inner pack loop.
@@ -74,6 +83,7 @@ ReadInputWidth:
 
             if ((sX - lShiftX) == 0 && pX > lShiftX - 1) {
                 write_im2col_row<a_row_T, data_element_t, CONFIG_T::filt_width * CONFIG_T::n_chan>(kernel_data, a_rows);
+                tile_row = (tile_row + 1 == CONFIG_T::tile_rows) ? 0 : tile_row + 1;
             }
 
             if (pX + 1 == CONFIG_T::in_width) {
@@ -140,56 +150,63 @@ void im2col_2d_gemm_rows(ac_channel<data_T> &data, ac_channel<a_row_T> &a_rows) 
     typedef typename data_T::value_type data_element_t;
     // GEMM-only register line buffer (replaces ap_shift_reg to break the RecII~=5
     // recurrence). Fully partitioned: MAX(filt_height-1,1) delay rows x n_chan x
-    // in_width registers.
+    // in_width registers, no mux needed (each element has a single source, unlike an
+    // ap_shift_reg-backed line buffer which needs a read-address mux per tap).
     static data_element_t line_buffer[MAX(CONFIG_T::filt_height - 1, 1)][CONFIG_T::n_chan]
                                      [CONFIG_T::in_width];
     int pX = 0;
     int pY = 0;
     int sX = 0;
     int sY = 0;
+    unsigned tile_row = 0;
     data_element_t kernel_data[CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan] = {};
     const static int lShiftX = CONFIG_T::filt_width - 1;
     const static int lShiftY = CONFIG_T::filt_height - 1;
 
-ReadInputHeight:
-    for (unsigned i_ih = 0; i_ih < CONFIG_T::in_height; i_ih++) {
-    ReadInputWidth:
-        // Pipeline the spatial driver loop (Catapult does not auto-flatten; pipelining only the inner
-        // ReadInputPack leaves this rolled). Unroll the inner pack loop.
-        #pragma hls_pipeline_init_interval 1
-        for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width / (data_T::size / CONFIG_T::n_chan); i_iw++) {
-            data_T data_pack = data.read();
-        ReadInputPack:
+    static_assert(CONFIG_T::tile_rows >= 1 && CONFIG_T::tile_rows <= CONFIG_T::gemm_m,
+                  "tile_rows must satisfy 1 <= tile_rows <= gemm_m");
+
+    // Tile semantics: within a tile (tile_rows consecutive emitted a_rows) the pixel
+    // loop below is gapless (II=1, no stalls) — the downstream activation_rows
+    // channel is sized to tile_rows deep so a full tile always drains without
+    // backpressure. GEMM-IP backpressure is only expected/allowed to be visible at
+    // tile boundaries, between tiles.
+ReadInputPixels:
+    #pragma hls_pipeline_init_interval 1
+    for (unsigned i_beat = 0; i_beat < CONFIG_T::in_height * CONFIG_T::in_width / (data_T::size / CONFIG_T::n_chan);
+         i_beat++) {
+        data_T data_pack = data.read();
+    ReadInputPack:
+        #pragma hls_unroll
+        for (unsigned p = 0; p < data_T::size / CONFIG_T::n_chan; p++) {
+            nnet::array<data_element_t, CONFIG_T::n_chan> pixel_pack;
+        PackChannels:
             #pragma hls_unroll
-            for (unsigned p = 0; p < data_T::size / CONFIG_T::n_chan; p++) {
-                nnet::array<data_element_t, CONFIG_T::n_chan> pixel_pack;
-            PackChannels:
-                #pragma hls_unroll
-                for (unsigned c = 0; c < CONFIG_T::n_chan; c++) {
-                    pixel_pack[c] = data_pack[p * CONFIG_T::n_chan + c];
-                }
-                gemm_shift_line_buffer_reg<decltype(pixel_pack), CONFIG_T>(pixel_pack, line_buffer, kernel_data);
+            for (unsigned c = 0; c < CONFIG_T::n_chan; c++) {
+                pixel_pack[c] = data_pack[p * CONFIG_T::n_chan + c];
+            }
+            gemm_shift_line_buffer_reg<decltype(pixel_pack), CONFIG_T>(pixel_pack, line_buffer, kernel_data);
 
-                if ((sX - lShiftX) == 0 && (sY - lShiftY) == 0 && pY > lShiftY - 1 && pX > lShiftX - 1) {
-                    write_im2col_row<a_row_T, data_element_t,
-                                      CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan>(
-                        kernel_data, a_rows);
-                }
+            if ((sX - lShiftX) == 0 && (sY - lShiftY) == 0 && pY > lShiftY - 1 && pX > lShiftX - 1) {
+                write_im2col_row<a_row_T, data_element_t,
+                                  CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan>(
+                    kernel_data, a_rows);
+                tile_row = (tile_row + 1 == CONFIG_T::tile_rows) ? 0 : tile_row + 1;
+            }
 
-                if (pX + 1 == CONFIG_T::in_width) {
-                    pX = 0;
-                    sX = 0;
-                    if (pY + 1 == CONFIG_T::in_height) {
-                        pY = 0;
-                        sY = 0;
-                    } else {
-                        pY = pY + 1;
-                        sY = ((sY - lShiftY) == 0) ? sY - CONFIG_T::stride_height + 1 : sY + 1;
-                    }
+            if (pX + 1 == CONFIG_T::in_width) {
+                pX = 0;
+                sX = 0;
+                if (pY + 1 == CONFIG_T::in_height) {
+                    pY = 0;
+                    sY = 0;
                 } else {
-                    pX = pX + 1;
-                    sX = ((sX - lShiftX) == 0) ? sX - CONFIG_T::stride_width + 1 : sX + 1;
+                    pY = pY + 1;
+                    sY = ((sY - lShiftY) == 0) ? sY - CONFIG_T::stride_height + 1 : sY + 1;
                 }
+            } else {
+                pX = pX + 1;
+                sX = ((sX - lShiftX) == 0) ? sX - CONFIG_T::stride_width + 1 : sX + 1;
             }
         }
     }

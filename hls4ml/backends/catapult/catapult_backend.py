@@ -106,37 +106,16 @@ class CatapultBackend(FPGABackend):
         # Add ConvImplementation to Convolution+Pooling layers
         cnn_layers = [Conv1D, Conv2D, SeparableConv1D, SeparableConv2D, DepthwiseConv2D, Pooling1D, Pooling2D]
 
-        # "LineBuffer_reg" is a Conv2D-only variant holding the per-row delay lines in
-        # register arrays instead of ap_shift_reg, at the cost of
-        # in_width*n_chan*(filt_height-1) registers + a shift mux. Only the Conv2D
-        # line-buffer path (conv_2d_cl) dispatches it; the default stays "LineBuffer".
-        conv2d_impl_desc = (
-            '"LineBuffer" (ap_shift_reg, default) is preferred for FPGA targets where the rolled shift '
-            'infers an SRL. "LineBuffer_reg" uses a fully-unrolled register line buffer (RecII=1 feed, '
-            'no SRL dependence) — useful on Catapult/ASIC flows where ap_shift_reg serializes. '
-            '"Encoded" is the alternative streaming scheme. This attribute only applies to io_stream.'
-        )
-
         for layer in cnn_layers:
             attrs = self.attribute_map.get(layer, [])
-            if layer is Conv2D:
-                attrs.append(
-                    ChoiceAttribute(
-                        'conv_implementation',
-                        choices=['LineBuffer', 'LineBuffer_reg', 'Encoded'],
-                        default='LineBuffer',
-                        description=conv2d_impl_desc,
-                    )
+            attrs.append(
+                ChoiceAttribute(
+                    'conv_implementation',
+                    choices=['LineBuffer', 'Encoded'],
+                    default='LineBuffer',
+                    description=descriptions.conv_implementation,
                 )
-            else:
-                attrs.append(
-                    ChoiceAttribute(
-                        'conv_implementation',
-                        choices=['LineBuffer', 'Encoded'],
-                        default='LineBuffer',
-                        description=descriptions.conv_implementation,
-                    )
-                )
+            )
             self.attribute_map[layer] = attrs
 
         sep_conv_layers = [SeparableConv1D, SeparableConv2D]
