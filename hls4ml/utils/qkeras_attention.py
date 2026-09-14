@@ -18,6 +18,8 @@ opaque one from deep inside keras/qkeras.
 """
 
 try:
+    import math
+
     import tensorflow as tf
     from keras.layers import EinsumDense, MultiHeadAttention
     from keras.src.layers.attention.multi_head_attention import (
@@ -62,7 +64,8 @@ class QEinsumDense(EinsumDense):
 class QMultiHeadAttention(MultiHeadAttention):
     """MultiHeadAttention with QKeras-quantized projections."""
 
-    def __init__(self, *args, weight_bits=8, weight_int=0, act_bits=8, act_int=3, **kwargs):
+    def __init__(self, *args, weight_bits=8, weight_int=0, act_bits=8, act_int=3,
+                 quantize_interior=False, score_int=3, prob_int=0, ctx_int=3, **kwargs):
         super().__init__(*args, **kwargs)
         self.weight_bits = weight_bits
         # Integer bits for the projection-kernel quantizer. Default 0 keeps the
@@ -81,6 +84,35 @@ class QMultiHeadAttention(MultiHeadAttention):
         # bits (range +/- 2**act_int). A production layer would calibrate/learn this
         # per tensor (what HGQ2 does); this is a sane, non-saturating default.
         self.act_int = act_int
+        # Interior fake-quant. The base QMultiHeadAttention leaves the attention
+        # math (Q.K^T, softmax, A.V) in float and lets the hls4ml config set the
+        # mha_qk / mha_softmax / mha_av result precisions -- so the QKeras
+        # reference and the lowered hardware disagree on those boundaries. With
+        # quantize_interior=True the layer also quantizes the three interior
+        # tensors, so model.predict *is* the fully-quantized reference and matches
+        # hardware when the config result types are set to the same fixed<8,I>:
+        #   scores  (=mha_qk.result)      -> fixed<8, score_int + 1>
+        #   softmax (=mha_softmax.result) -> fixed<8, prob_int + 1>  (probabilities, I=0 -> +/-1)
+        #   context (=mha_av.result)      -> fixed<8, ctx_int + 1>
+        # Softmax itself stays the plain float keras softmax (no LUT).
+        self.quantize_interior = quantize_interior
+        self.score_int = score_int
+        self.prob_int = prob_int
+        self.ctx_int = ctx_int
+
+    def _compute_attention(self, query, key, value, attention_mask=None, training=None):
+        if not self.quantize_interior:
+            return super()._compute_attention(query, key, value, attention_mask, training)
+        qb = lambda i: quantized_bits(self.act_bits, i, alpha=1)
+        query = tf.multiply(query, 1.0 / math.sqrt(float(self._key_dim)))
+        attention_scores = tf.einsum(self._dot_product_equation, key, query)
+        attention_scores = qb(self.score_int)(attention_scores)          # mha_qk.result
+        attention_scores = self._masked_softmax(attention_scores, attention_mask)
+        attention_scores = qb(self.prob_int)(attention_scores)           # mha_softmax.result
+        attention_scores_dropout = self._dropout_layer(attention_scores, training=training)
+        attention_output = tf.einsum(self._combine_equation, attention_scores_dropout, value)
+        attention_output = qb(self.ctx_int)(attention_output)            # mha_av.result
+        return attention_output, attention_scores
 
     def _quantizers(self):
         return dict(
@@ -149,7 +181,10 @@ class QMultiHeadAttention(MultiHeadAttention):
     def get_config(self):
         config = super().get_config()
         config.update(weight_bits=self.weight_bits, weight_int=self.weight_int,
-                       act_bits=self.act_bits, act_int=self.act_int)
+                       act_bits=self.act_bits, act_int=self.act_int,
+                       quantize_interior=self.quantize_interior,
+                       score_int=self.score_int, prob_int=self.prob_int,
+                       ctx_int=self.ctx_int)
         return config
 
 

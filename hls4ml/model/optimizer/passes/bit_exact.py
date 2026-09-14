@@ -927,6 +927,23 @@ def requested_by_non_saturating_quantizer(layer: Layer) -> bool:
     return False
 
 
+def _explicit_precision(layer: Layer, var: str):
+    """The precision the user pinned for `<layer>.<var>` in HLSConfig.LayerName, or None.
+    Only per-layer explicit entries count, never the Model default."""
+    cfg = getattr(layer.model, 'config', None)
+    if cfg is None:
+        return None
+    p = cfg.layer_name_precision.get(f'{layer.name.lower()}_{var}')
+    if p is None:
+        return None
+    if isinstance(p, str):
+        from hls4ml.backends.fpga.fpga_backend import FPGABackend
+
+        p = FPGABackend.convert_precision_string(p)
+    # 'auto' and friends resolve to an unspecified type: not a pin.
+    return p if isinstance(p, FixedPrecisionType) else None
+
+
 def default_register_precision(layer: Layer):
     if layer.attributes.get('trusted', False):
         # Trusted layers have their precision already set
@@ -944,6 +961,26 @@ def default_register_precision(layer: Layer):
     ok, oi, of = kif_arrs_to_ints((_ok, _oi, _of))
 
     result_t = to_hls4ml_fixed(ok, oi, of, f'{layer.name}_t')
+    # The backend resolves the per-layer strategy later; read it from the config here.
+    try:
+        _strategy = str(layer.model.config.get_strategy(layer)).lower()
+    except Exception:
+        _strategy = str(layer.get_attr('strategy', '')).lower()
+    # hls4ml stores 'GEMM' as 'g_e_m_m' (its camel-to-snake normalisation); compare without underscores.
+    pinned_result = _explicit_precision(layer, 'result') if _strategy.replace('_', '') == 'gemm' else None
+    if pinned_result is not None:
+        # A GEMM-strategy layer is an IP boundary: the external GEMM core requantizes its
+        # output to the manifest's output_precision (e.g. a 16-bit tensor_slice lane), so an
+        # explicit `result` pin there is the requant the design asks for, not a derivation
+        # error. Honour it and make the downstream flow see it (the forward kif cache too).
+        result_t = NamedType(f'{layer.name}_t', copy(pinned_result))
+        pk = int(pinned_result.signed)
+        pi = pinned_result.integer - pk
+        pf = pinned_result.fractional
+        shape = np.shape(_pk)
+        layer.attributes['_produce_kif'] = (
+            np.full(shape, pk, dtype=np.int16), np.full(shape, pi, dtype=np.int16), np.full(shape, pf, dtype=np.int16)
+        )
     layer.attributes['result_t'] = result_t
     layer.get_output_variable().type = result_t
 
@@ -953,6 +990,18 @@ def default_register_precision(layer: Layer):
     if 'accum_t' in layer.attributes:
         accum_kif = kif_arrs_to_ints((_pk, _pi, _pf))
         accum_t = to_hls4ml_fixed(*accum_kif, f'{layer.name}_accum_t')
+        pinned = _explicit_precision(layer, 'accum')
+        if pinned is not None:
+            # An accum precision the user pinned in HLSConfig.LayerName wins over the derived
+            # one. The derived width is a conservative interval bound; a narrower pin is the
+            # user's claim that the true range fits (to be verified by their own range check).
+            if pinned.width < accum_t.precision.width or pinned.integer < accum_t.precision.integer:
+                warn(
+                    f'{layer.name}: HLSConfig pins accum to {pinned}, narrower than the bit-exact '
+                    f'derived {accum_t.precision}; keeping the pin, bit-exactness is on the user.',
+                    stacklevel=1,
+                )
+            accum_t = NamedType(f'{layer.name}_accum_t', copy(pinned))
         overrides['accum_t'] = accum_t
 
     # Set precision for fixed array (weight_t, bias_t, table_t, etc.)
@@ -1146,6 +1195,17 @@ class BitExact(ModelOptimizerPass):
                 if isinstance(v, Activation) and v.attributes.get('activation') == 'linear':
                     if len(get_output_layers(get_input_layers(v)[0])) == 1:
                         model.remove_node(v)
+
+        # An Input whose result precision is pinned in HLSConfig.LayerName is trusted: its
+        # values are known to be on that grid, so downstream quantizers need no guard bit
+        # and accumulators are sized from the pinned range, not from an unbounded input.
+        for node in model.graph.values():
+            if isinstance(node, Input) and not node.attributes.get('trusted', False):
+                pinned = _explicit_precision(node, 'result')
+                if pinned is not None:
+                    node.get_output_variable().type.precision = copy(pinned)
+                    node.attributes['result_t'] = node.get_output_variable().type
+                    node.attributes['trusted'] = True
 
         for node in model.graph.values():
             if node.attributes.get('bit_exact_transformed'):

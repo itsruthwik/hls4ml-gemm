@@ -48,7 +48,7 @@ from collections import OrderedDict
 from hls4ml.model.layers import Einsum, EinsumDense, Softmax
 from hls4ml.model.optimizer import OptimizerPass
 
-from hls4ml.backends.fpga.passes.gemm_nodes import Gemm, _resolve_gemm_config
+from hls4ml.backends.fpga.passes.gemm_nodes import Gemm, _mirror_precision_to_gemm_node, _resolve_gemm_config
 from hls4ml.backends.fpga.passes.split_merge_nodes import HeadSplit, HeadMerge
 
 # Softmax attributes that fully describe the (head-invariant) bit-exact tables and
@@ -164,6 +164,7 @@ class SplitAttentionHeads(OptimizerPass):
                 model, f'gemm_{qk.name}_h{h}', q_h, qk_b,
                 gemm_m=seq_q, gemm_k=key_dim, gemm_n=seq_k,
                 out_shape=[seq_q, seq_k], out_prec=qk_prec, extra=qk_cfg,
+                source_name=qk.name,
             )
             chain.append(qk_h)
 
@@ -202,14 +203,17 @@ class SplitAttentionHeads(OptimizerPass):
                 model, f'gemm_{av.name}_h{h}', sm_out, av_b,
                 gemm_m=seq_q, gemm_k=seq_k, gemm_n=key_dim,
                 out_shape=[seq_q, key_dim], out_prec=av_prec, extra=av_cfg,
+                source_name=av.name,
             )
             chain += av_chain + [av_h]
             # The A.V output quantizer feeds the output projection; clone per head, then merge.
             out_t = av_h.outputs[0]
+            merge_in_prec = av_h.get_output_variable().type.precision
             if out_iq is not None:
                 qn = _clone_quantizer_head(model, out_iq, h, av_h.outputs[0], H)
                 chain.append(qn)
                 out_t = qn.outputs[0]
+                merge_in_prec = qn.get_output_variable().type.precision
             av_head_out.append(out_t)
 
         # --- 4. HeadMerge: H x [seq, key_dim] -> [seq, d_model], before the output projection.
@@ -219,7 +223,11 @@ class SplitAttentionHeads(OptimizerPass):
             {'n_heads': H, 'key_dim': key_dim, 'seq': seq_q, 'd_model': d_model},
             av_head_out,
         )
-        hm.get_output_variable().type.precision = (out_iq or av).get_output_variable().type.precision
+        # Inherit from the (head-invariant) per-head clone's real precision, not the
+        # pre-clone out_iq node -- that node's own name is rarely in HLSConfig (the
+        # per-head clone name is what users configure) and would otherwise leak
+        # Model.Precision.default onto the merge output and the output projection's input.
+        hm.get_output_variable().type.precision = merge_in_prec
         # The output projection now reads the merged 2D context (same flat data the
         # 3D [seq, head, key_dim] carried; O_proj contracts head*key_dim = d_model).
         o_in = out_iq.outputs[0] if out_iq is not None else av.outputs[0]
@@ -255,7 +263,8 @@ def _rewire_input(node, old_tensor, new_tensor):
     node.inputs = [new_tensor if i == old_tensor else i for i in node.inputs]
 
 
-def _two_op_gemm(model, name, in0, in1, gemm_m, gemm_k, gemm_n, out_shape, out_prec, extra=None):
+def _two_op_gemm(model, name, in0, in1, gemm_m, gemm_k, gemm_n, out_shape, out_prec, extra=None,
+                 source_name=None):
     """Build a plain two-operand Gemm (both operands activations, no constant weight).
 
     ``extra`` carries the resolved GEMM config (strategy/reuse_factor/... and
@@ -277,6 +286,13 @@ def _two_op_gemm(model, name, in0, in1, gemm_m, gemm_k, gemm_n, out_shape, out_p
     }
     if extra:
         attrs.update(extra)
+    if source_name is not None:
+        # The per-head clone's name (gemm_<einsum>_h<i>) is not in HLSConfig, so its
+        # accum/result/... would fall to the model default. Materialize the source
+        # einsum's effective pins under the clone's name first, exactly as the generic
+        # Dense/Conv/EinsumDense lowering does (the accum pin matters for targets that
+        # size their requant from it, e.g. tensor_slice).
+        _mirror_precision_to_gemm_node(model, source_name, name)
     g = model.make_node(Gemm, name, attrs, [in0, in1])
     g.get_output_variable().type.precision = out_prec
     return g
@@ -383,7 +399,7 @@ def _clone_quantizer_head(model, orig, h, in_tensor, H):
     """
     import numpy as np
 
-    from hls4ml.model.optimizer.passes.hgq_proxy_model import FixedPointQuantizer
+    from hls4ml.model.optimizer.passes.hgq_proxy_model import FixedPointQuantizer, userconf_ifdef
 
     ha = _head_axis(orig.mask_kbi, H)
     sliced = tuple(np.ascontiguousarray(np.take(np.asarray(x), h, axis=ha)) for x in orig.mask_kbi)
@@ -397,5 +413,14 @@ def _clone_quantizer_head(model, orig, h, in_tensor, H):
         'mask_kbi': sliced,
     }
     q = model.make_node(FixedPointQuantizer, name, attrs, [in_tensor])
-    q.get_output_variable().type.precision = orig.get_output_variable().type.precision
+    # The clone's numeric type must come from the source node, not re-resolve to
+    # Model.Precision.default: at construction, add_output_variable() looked up
+    # result_t by *this clone's own name*, which is almost never present in the
+    # user's HLSConfig (the model was authored against the pre-split node names),
+    # so it silently fell back to the model default. Only trust that lookup when
+    # the user actually wrote an explicit per-head override for this clone's name;
+    # otherwise copy the source's real (user-configured or bit-exact-derived) type
+    # verbatim, exactly as SAT/RND/mask_kbi already are above.
+    if not userconf_ifdef('result_t', name, model):
+        q.get_output_variable().type.precision = orig.get_output_variable().type.precision
     return q
