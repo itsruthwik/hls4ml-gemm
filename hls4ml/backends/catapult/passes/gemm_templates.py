@@ -95,6 +95,11 @@ gemm_const_weights_config_template = """struct config{index} : nnet::gemm_config
     static const unsigned gemm_k = {n_in};
     static const unsigned gemm_n = {n_out};
     static const unsigned gemm_ip_id = {index};
+    // Microarchitecture knobs consumed by the generic (behavioral-HLS) GEMM core:
+    // the reuse loop trip count and the multiplier ALLOCATION cap (mirrors the
+    // Vivado writer's own gemm_const_weights_config_template).
+    static const unsigned reuse_factor = {reuse_factor};
+    static const unsigned multiplier_limit = {multiplier_limit};
     typedef {weight_t.name} weight_t;
     typedef {bias_t.name} bias_t;
     typedef {accum_t.name} accum_t;
@@ -133,6 +138,10 @@ gemm_two_operand_config_template = """struct config{index} {{
     // and asserts CONFIG_T::transpose_weights. This bare struct does not inherit
     // nnet::gemm_config, so declare it explicitly (true for the QK^T / A.V cores).
     static const bool transpose_weights = true;
+    // Microarchitecture knobs consumed by the generic (behavioral-HLS) GEMM core
+    // (mirrors the Vivado writer's own gemm_two_operand_config_template).
+    static const unsigned reuse_factor = {reuse_factor};
+    static const unsigned multiplier_limit = {multiplier_limit};
     typedef {input1_t} weight_t;
     typedef {accum_t.name} accum_t;
     // Two-operand GEMM (QK^T / A.V) carries no bias; the cell still takes a bias
@@ -277,12 +286,17 @@ class GemmConfigTemplate(GemmIPConfigTemplateBase):
 
         inp0 = node.get_input_variable(node.inputs[0])
         inp1 = node.get_input_variable(node.inputs[1])
+        rf = max(1, int(node.get_attr('reuse_factor', 1) or 1))
+        gk = int(node.get_attr('gemm_k'))
+        gn = int(node.get_attr('gemm_n'))
         params = {
             'index': node.index,
             'gemm_m': node.get_attr('gemm_m'),
-            'gemm_k': node.get_attr('gemm_k'),
-            'gemm_n': node.get_attr('gemm_n'),
+            'gemm_k': gk,
+            'gemm_n': gn,
             'n_inplace': node.get_attr('n_inplace', 1),
+            'reuse_factor': rf,
+            'multiplier_limit': -(-(gk * gn) // rf),
             'input1_t': inp1.type.name,
             'accum_t': node.types['accum_t'],
             'product_type': get_backend('catapult').product_type(inp0.type.precision, inp1.type.precision),

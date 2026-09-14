@@ -941,6 +941,14 @@ class CatapultWriter(Writer):
                     line = indent + f'flow package option set /SCVerify/INVOKE_ARGS "{invoke_args}"\n'
                 elif 'set hls_clock_period 5' in line:
                     line = indent + 'set hls_clock_period {}\n'.format(model.config.get_config_value('ClockPeriod'))
+                elif 'directive set -RESET_CLEARS_ALL_REGS' in line:
+                    # HLSConfig.Model.ResetClearsAllRegs (bool, default False = Catapult's 'no').
+                    # The streaming conv templates keep their pixel counters and kernel window
+                    # in `static` variables; without a reset those power up undefined in RTL and
+                    # the first output of the first frame is X (SCVerify compare error), so conv
+                    # designs should set it. Costs the reset fan-out on every register.
+                    clr = model.config.get_config_value('HLSConfig', {}).get('Model', {}).get('ResetClearsAllRegs', False)
+                    line = indent + 'directive set -RESET_CLEARS_ALL_REGS {}\n'.format('yes' if clr else 'no')
                 elif 'options set Input/CompilerFlags' in line:
                     # Presence-driven const softmax LUTs: when the two-pass header has been
                     # generated next to the streaming activations, compile the exp/invert
@@ -1392,9 +1400,21 @@ class CatapultWriter(Writer):
                         and not bool(node.get_attr('_row_varying_bias', False)),
                         'input_precision': str(node.get_input_variable().type.precision),
                         'output_precision': str(node.get_output_variable().type.precision),
-                        # Two-operand Gemm (attention QK^T / A.V) has no constant weight/bias.
-                        'weight_precision': str(node.get_weights('weight').type.precision)
-                        if node.get_attr('weight') is not None else None,
+                        # Weight precision: the static weight tensor for a weight-stationary
+                        # GEMM; for a two-operand GEMM (QK^T / A.V, no static weight) the
+                        # "weight" is the second runtime operand B = inputs[1], so take its
+                        # precision -- gemm-ip-gen sizes the core and the requant scale
+                        # (product fraction bits) from it. Mirrors the Vivado writer.
+                        'weight_precision': (
+                            str(node.get_weights('weight').type.precision)
+                            if node.get_attr('weight') is not None
+                            else str(node.get_input_variable(node.inputs[1]).type.precision)
+                            if len(node.inputs) > 1 else None
+                        ),
+                        'rhs_precision': (
+                            str(node.get_input_variable(node.inputs[1]).type.precision)
+                            if node.get_attr('weight') is None and len(node.inputs) > 1 else None
+                        ),
                         'bias_precision': str(node.get_weights('bias').type.precision)
                         if node.get_attr('bias') is not None else None,
                         # Raw per-column bias values, baked as a compile-time constant by
