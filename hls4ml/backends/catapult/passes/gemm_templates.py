@@ -1,6 +1,6 @@
 from hls4ml.backends.gemm_ip_config import GemmIPConfigTemplateBase
 from hls4ml.backends.template import FunctionCallTemplate, LayerConfigTemplate
-from hls4ml.backends.fpga.passes.gemm_nodes import (
+from hls4ml.backends.fpga.gemm.gemm_nodes import (
     Im2Col,
     Gemm,
 )

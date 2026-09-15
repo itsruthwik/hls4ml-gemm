@@ -38,6 +38,7 @@ from hls4ml.backends.catapult.passes import (
     ReplaceDenseGemm,
     LowerEinsumToGemm,
     ValidateGemm,
+    SplitAttentionHeads,
 )
 from hls4ml.model.optimizer import get_backend_passes, layer_optimizer
 from hls4ml.model.types import (
@@ -67,6 +68,7 @@ class CatapultBackend(FPGABackend):
             ('replace_dense_gemm', ReplaceDenseGemm),
             ('lower_einsum_to_gemm', LowerEinsumToGemm),
             ('validate_gemm', ValidateGemm),
+            ('split_attention_heads', SplitAttentionHeads),
         ]:
             try:
                 self.register_pass(name, cls)

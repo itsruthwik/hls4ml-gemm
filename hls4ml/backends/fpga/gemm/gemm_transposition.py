@@ -1,7 +1,7 @@
 import numpy as np
 from hls4ml.model.layers import Dense, Conv1D, Conv2D, SeparableConv1D, SeparableConv2D
 from hls4ml.model.optimizer import OptimizerPass
-from hls4ml.backends.fpga.passes.gemm_nodes import Gemm
+from hls4ml.backends.fpga.gemm.gemm_nodes import Gemm
 
 class TransposeWeightsForGemmIP(OptimizerPass):
     """
@@ -9,6 +9,8 @@ class TransposeWeightsForGemmIP(OptimizerPass):
     This ensures that the weights are stored in a format suitable for the GEMM IP
     (typically [N, K] where N is the number of filters/outputs and K is the number of inputs).
     """
+
+    name = 'transpose_weights_for_gemm'
 
     def match(self, node):
         # Match layers on the GEMM path (Strategy: GEMM) that haven't been transposed yet

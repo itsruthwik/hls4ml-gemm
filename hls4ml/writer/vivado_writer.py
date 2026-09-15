@@ -16,7 +16,7 @@ from hls4ml.writer.gemm_ip_weights import (
 )
 import yaml
 
-from hls4ml.backends.fpga.passes.gemm_nodes import Gemm
+from hls4ml.backends.fpga.gemm.gemm_nodes import Gemm
 from hls4ml.model.layers import Einsum, EinsumDense
 from hls4ml.writer.writers import Writer
 

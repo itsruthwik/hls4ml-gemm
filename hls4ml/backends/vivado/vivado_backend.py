@@ -39,6 +39,7 @@ from hls4ml.backends.vivado.passes.gemm_nodes import (
     ReplaceDenseGemm,
     TransposeWeightsForGemmIP,
     ValidateGemm,
+    SplitAttentionHeads,
 )
 from hls4ml.model.optimizer import get_backend_passes, layer_optimizer
 from hls4ml.model.types import FixedPrecisionType, IntegerPrecisionType, NamedType, PackedType, RoundingMode, SaturationMode
@@ -69,6 +70,10 @@ class VivadoBackend(FPGABackend):
             pass
         try:
             self.register_pass('validate_gemm', ValidateGemm)
+        except Exception:
+            pass
+        try:
+            self.register_pass('split_attention_heads', SplitAttentionHeads)
         except Exception:
             pass
         self._register_flows()

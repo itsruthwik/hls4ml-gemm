@@ -20,7 +20,7 @@ Key differences from Catapult:
 
 from hls4ml.backends.gemm_ip_config import GemmIPConfigTemplateBase
 from hls4ml.backends.template import FunctionCallTemplate, LayerConfigTemplate
-from hls4ml.backends.fpga.passes.gemm_nodes import Im2Col, Gemm
+from hls4ml.backends.fpga.gemm.gemm_nodes import Im2Col, Gemm
 
 # ---------------------------------------------------------------------------
 # Im2Col templates

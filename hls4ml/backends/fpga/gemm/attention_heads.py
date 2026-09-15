@@ -48,7 +48,7 @@ from collections import OrderedDict
 from hls4ml.model.layers import Einsum, EinsumDense, Softmax
 from hls4ml.model.optimizer import OptimizerPass
 
-from hls4ml.backends.fpga.passes.gemm_nodes import Gemm, _mirror_precision_to_gemm_node, _resolve_gemm_config
+from hls4ml.backends.fpga.gemm.gemm_nodes import Gemm, _mirror_precision_to_gemm_node, _resolve_gemm_config
 from hls4ml.backends.fpga.passes.split_merge_nodes import HeadSplit, HeadMerge
 
 # Softmax attributes that fully describe the (head-invariant) bit-exact tables and
