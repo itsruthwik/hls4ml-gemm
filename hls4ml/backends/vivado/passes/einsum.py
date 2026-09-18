@@ -39,6 +39,10 @@ struct config{index} {{
     static const unsigned reuse_factor = {reuse_factor};
     static const unsigned multiplier_limit = {multiplier_limit};
     static const bool store_weights_in_bram = false; // NOT USED
+    // io_stream + Resource: stream operand 0 one row at a time against a buffered operand 1
+    // (see nnet_einsum_stream.h). True only when operand-0 and output transposes are identity.
+    static const bool row_stream = {row_stream};
+    static const unsigned row_stream_operand = {row_stream_operand};
 
     template <class x_T, class y_T>
     using product = nnet::product::{product_type}<x_T, y_T>;
@@ -47,7 +51,7 @@ struct config{index} {{
 
 einsum_function_template = 'nnet::einsum<{input0_t}, {input1_t}, {output_t}, {config}>({input0}, {input1}, {output});'
 
-einsum_include_list = ['nnet_utils/nnet_einsum.h']
+einsum_include_list = ['nnet_utils/nnet_einsum.h', 'nnet_utils/nnet_einsum_stream.h']
 
 
 class EinsumConfigTemplate(LayerConfigTemplate):
@@ -61,8 +65,14 @@ class EinsumConfigTemplate(LayerConfigTemplate):
         strategy = node.attributes['strategy']
         io_type = node.model.config.get_config_value('IOType')
 
-        assert io_type == 'io_parallel', 'EinsumDense layer only supports io_parallel for now'
-        assert strategy.lower() == 'latency', 'EinsumDense layer only supports Latency strategy for now'
+        assert io_type in (
+            'io_parallel',
+            'io_stream',
+        ), f'Einsum layer does not support io_type {io_type}'
+        assert strategy.lower() in (
+            'latency',
+            'resource',
+        ), f'Einsum layer does not support strategy {strategy}'
 
         # EinsumDense config
         params = default_params.copy()
@@ -84,6 +94,43 @@ class EinsumConfigTemplate(LayerConfigTemplate):
 
         total_mults = params['n_free0'] * params['n_free1'] * params['n_contract'] * params['n_inplace']
         params['multiplier_limit'] = ceil(total_mults / params['reuse_factor'])
+
+        # Row streaming: which operand can be streamed one row at a time against the other,
+        # buffered. Size-1 axes carry no layout, so they are ignored when judging order.
+        def effective_perm(shape, idxs):
+            kept = [i for i in idxs if shape[i] != 1]
+            rank = {ax: r for r, ax in enumerate(sorted(kept))}
+            return [rank[ax] for ax in kept]
+
+        inp0_shape = node.attributes['inp0_shape']
+        inp1_shape = node.attributes['inp1_shape']
+        out_shape = node.attributes['out_interpert_shape']
+        eff_in0 = effective_perm(inp0_shape, node.attributes['inp0_tpose_idxs'])
+        eff_in1 = effective_perm(inp1_shape, node.attributes['inp1_tpose_idxs'])
+        eff_out = effective_perm(out_shape, node.attributes['out_tpose_idxs'])
+        in0_rows_ok = eff_in0 == list(range(len(eff_in0)))  # operand 0 arrives as (L0, C), C fastest
+        in1_rows_ok = eff_in1 == list(range(len(eff_in1)))  # operand 1 arrives as (L1, C), C fastest
+        # Stream beats carry the last tensor dimension; the streamed operand's beat must tile a
+        # row of n_contract and the output beat must tile an output row.
+        in0_pack = int(node.get_input_variable(node.inputs[0]).shape[-1])
+        in1_pack = int(node.get_input_variable(node.inputs[1]).shape[-1])
+        out_pack = int(node.get_output_variable().shape[-1])
+        n_contract = int(node.attributes['n_contract'])
+        row_stream_operand = None
+        if eff_out == list(range(len(eff_out))) and in0_rows_ok:
+            if n_contract % in0_pack == 0 and int(node.attributes['n_free1']) % out_pack == 0:
+                row_stream_operand = 0  # output is (L0, L1): rows of operand 0
+        elif eff_out == [1, 0] and in1_rows_ok:
+            if n_contract % in1_pack == 0 and int(node.attributes['n_free0']) % out_pack == 0:
+                row_stream_operand = 1  # output is (L1, L0): rows of operand 1
+        row_stream = (
+            io_type == 'io_stream'
+            and strategy.lower() == 'resource'
+            and node.attributes['n_inplace'] == 1
+            and row_stream_operand is not None
+        )
+        params['row_stream'] = 'true' if row_stream else 'false'
+        params['row_stream_operand'] = row_stream_operand if row_stream else 0
 
         einsum_conf = self.template.format(**params)
 

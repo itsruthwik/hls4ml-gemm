@@ -72,7 +72,11 @@ einsum_dense_da_function_template = 'nnet::einsum_dense<{input_t}, {output_t}, {
 # GEMM-IP EinsumDense no longer emits from this template — it is lowered to a Gemm
 # node (see LowerEinsumToGemm) and materialized by the shared Gemm codegen.
 
-einsum_dense_include_list = ['nnet_utils/nnet_einsum_dense.h', 'nnet_utils/nnet_dense.h']
+einsum_dense_include_list = [
+    'nnet_utils/nnet_einsum_dense.h',
+    'nnet_utils/nnet_dense.h',
+    'nnet_utils/nnet_einsum_dense_stream.h',
+]
 
 
 class EinsumDenseConfigTemplate(LayerConfigTemplate):
@@ -98,7 +102,15 @@ class EinsumDenseConfigTemplate(LayerConfigTemplate):
             node.get_input_variable().type.precision,
             node.get_weights('weight').type.precision,  # type: ignore
         )
-        dense_params['dense_function'] = 'DenseLatency'  # Latency only for now
+        if strategy.lower() == 'latency':
+            dense_params['dense_function'] = 'DenseLatency'
+        elif strategy.lower() == 'resource':
+            if int(dense_params['reuse']) <= int(dense_params['n_in']):
+                dense_params['dense_function'] = 'DenseResource_rf_leq_nin'
+            else:
+                dense_params['dense_function'] = 'DenseResource_rf_gt_nin_rem0'
+        else:
+            dense_params['dense_function'] = 'DenseLatency'
 
         dense_config = self.dense_template.format(**dense_params)
         return dense_config
@@ -109,7 +121,10 @@ class EinsumDenseConfigTemplate(LayerConfigTemplate):
         strategy = node.attributes['strategy']
         io_type = node.model.config.get_config_value('IOType')
 
-        assert io_type == 'io_parallel', 'EinsumDense layer only supports io_parallel and distributed_arithmetic'
+        assert io_type in (
+            'io_parallel',
+            'io_stream',
+        ), f'EinsumDense layer does not support io_type {io_type}'
 
         # EinsumDense config
         params = default_params.copy()
@@ -131,10 +146,12 @@ class EinsumDenseConfigTemplate(LayerConfigTemplate):
             params['nzeros'] = node.get_weights('weight').nzeros
         else:
             params['nzeros'] = '-1'
-        if strategy.lower() == 'latency':
+        if strategy.lower() in ('latency', 'resource'):
             params['kernel_config'] = f'typedef config{node.index}_dense dense_conf'
         else:
-            assert strategy.lower() == 'distributed_arithmetic', 'EinsumDense layer only supports Latency strategy for now'
+            assert (
+                strategy.lower() == 'distributed_arithmetic'
+            ), 'EinsumDense layer only supports Latency, Resource, and Distributed Arithmetic strategies'
             inp_t = node.get_input_variable().type.name
             index = node.index
             conf = f'constexpr static auto da_kernel = nnet::einsum_dense{index}_da_kernel<{inp_t}, accum_t>'

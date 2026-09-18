@@ -17,8 +17,8 @@ from keras.layers import Input
 test_root_path = Path(__file__).parent
 
 
-@pytest.mark.parametrize('strategy', ['latency'])
-@pytest.mark.parametrize('io_type', ['io_parallel'])
+@pytest.mark.parametrize('strategy', ['latency', 'resource'])
+@pytest.mark.parametrize('io_type', ['io_parallel', 'io_stream'])
 @pytest.mark.parametrize('backend', ['Vivado', 'Vitis', 'oneAPI'])
 @pytest.mark.parametrize(
     'operation',
@@ -32,6 +32,9 @@ test_root_path = Path(__file__).parent
     ids=['xbi_xj_xbij', 'xbi_xio_xbo', 'xi_xoi_xo', 'xabcd_xbcde_xaeb'],
 )
 def test_einsum_dense(test_case_id, backend, io_type, strategy, operation):
+    if backend == 'oneAPI' and (strategy != 'latency' or io_type != 'io_parallel'):
+        pytest.skip('oneAPI only covers strategy=latency, io_type=io_parallel')
+
     eq, inp0_shape, inp1_shape = operation
     inp0 = Input(inp0_shape)
     inp1 = Input(inp1_shape)
@@ -40,9 +43,13 @@ def test_einsum_dense(test_case_id, backend, io_type, strategy, operation):
 
     data = np.random.randn(1000, *inp0_shape).astype(np.float32), np.random.randn(1000, *inp1_shape).astype(np.float32)
     output_dir = str(test_root_path / test_case_id)
+    reuse_factor = 2 if strategy == 'resource' else 1
     hls_config = {
-        'Model': {'Precision': 'ap_fixed<1,0>' if backend != 'oneAPI' else 'ac_fixed<2,0>', 'ReuseFactor': 1},
-        'Strategy': strategy,
+        'Model': {
+            'Precision': 'ap_fixed<1,0>' if backend != 'oneAPI' else 'ac_fixed<2,0>',
+            'ReuseFactor': reuse_factor,
+            'Strategy': strategy,
+        },
     }
 
     r_keras = trace_minmax(model, data, batch_size=8192, verbose=0, return_results=True)  # type: ignore

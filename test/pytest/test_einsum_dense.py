@@ -14,8 +14,8 @@ from keras.layers import EinsumDense, Input
 test_root_path = Path(__file__).parent
 
 
-@pytest.mark.parametrize('strategy', ['latency'])
-@pytest.mark.parametrize('io_type', ['io_parallel'])
+@pytest.mark.parametrize('strategy', ['latency', 'resource'])
+@pytest.mark.parametrize('io_type', ['io_parallel', 'io_stream'])
 @pytest.mark.parametrize('backend', ['Vivado', 'Vitis'])
 @pytest.mark.parametrize(
     'operation',
@@ -30,6 +30,7 @@ test_root_path = Path(__file__).parent
         ('...abcd,bcde->...aeb', (5, 4, 3, 2), (5, 6, 4), 'aeb'),
         ('...abcd,bcde->...aeb', (5, 4, 3, 2), (5, 6, 4), 'ab'),
         ('...abcd,bcde->...aeb', (5, 4, 3, 2), (5, 6, 4), 'a'),
+        ('bqd,dk->bqk', (8, 4), (8, 5), None),
     ],
 )
 def test_einsum_dense(test_case_id, backend, io_type, strategy, operation):
@@ -44,7 +45,8 @@ def test_einsum_dense(test_case_id, backend, io_type, strategy, operation):
 
     data = np.random.rand(1000, *inp_shape)
     output_dir = str(test_root_path / test_case_id)
-    hls_config = {'Model': {'Precision': 'ap_fixed<32,8>', 'ReuseFactor': 1}, 'Strategy': strategy}
+    reuse_factor = 4 if strategy == 'resource' else 1
+    hls_config = {'Model': {'Precision': 'ap_fixed<32,8>', 'ReuseFactor': reuse_factor, 'Strategy': strategy}}
     model_hls = convert_from_keras_model(
         model, backend=backend, output_dir=output_dir, hls_config=hls_config, io_type=io_type
     )

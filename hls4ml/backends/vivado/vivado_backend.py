@@ -114,6 +114,8 @@ class VivadoBackend(FPGABackend):
         pf_layers = [
             Conv1D,
             Conv2D,
+            EinsumDense,
+            Einsum,
         ]
 
         for layer in pf_layers:
@@ -948,25 +950,37 @@ class VivadoBackend(FPGABackend):
         layer.attributes['gemm_m'] = recipe['L0']
         layer.attributes['gemm_k'] = recipe['C']
         layer.attributes['gemm_n'] = recipe['L1']
-        pf = layer.attributes.get('parallelization_factor', recipe['L0'])
-        layer.attributes['parallelization_factor'] = pf
-
         layer.add_weights(compression=layer.model.config.get_compression(layer))
         layer.add_bias()
 
         if is_gemm_strategy(layer):
             layer.set_attr('strategy', 'gemm')
-            return
-        strategy: str | None = layer.model.config.get_strategy(layer)
-        strategy = strategy.lower() if strategy else strategy
-        if not strategy:
-            layer.set_attr('strategy', 'latency')
-            return
-        if strategy in ('latency', 'resource', 'distributed_arithmetic'):
+        else:
+            strategy: str | None = layer.model.config.get_strategy(layer)
+            strategy = strategy.lower() if strategy else strategy
+            if not strategy:
+                strategy = 'latency'
+            elif strategy not in ('latency', 'resource', 'distributed_arithmetic'):
+                warn(
+                    f'Invalid strategy "{strategy}" for EinsumDense layer "{layer.name}". '
+                    'Using "latency" strategy instead.'
+                )
+                strategy = 'latency'
             layer.set_attr('strategy', strategy)
-            return
-        warn(f'Invalid strategy "{strategy}" for EinsumDense layer "{layer.name}". Using "latency" strategy instead.')
-        layer.set_attr('strategy', 'latency')
+
+        # Free-index parallelism. Latency keeps the historical full unroll (the array core is written
+        # for that); Resource defaults to 1 (Conv-style sequential) so a single dense_resource instance
+        # is time-shared across free-index positions. A user ParallelizationFactor overrides both.
+        # The attribute is seeded with default 1, so an explicit user PF=1 on Latency is not
+        # distinguishable from "unset" and maps to full unroll (the pre-existing Latency behavior).
+        pf = layer.attributes.get('parallelization_factor', 1)
+        if layer.get_attr('strategy') != 'resource' and pf == 1:
+            pf = recipe['L0']
+        layer.attributes['parallelization_factor'] = pf
+
+        if layer.get_attr('strategy') == 'resource':
+            # Same legality check Dense performs; dense_resource asserts at runtime otherwise.
+            self.set_closest_reuse_factor(layer, recipe['C'], recipe['L1'])
 
     @layer_optimizer(Einsum)
     def init_einsum(self, layer: Einsum) -> None:
@@ -1003,7 +1017,7 @@ class VivadoBackend(FPGABackend):
         layer.attributes['inp1_tpose_idxs'] = inp1_tpose_idxs
         layer.attributes['out_tpose_idxs'] = out_tpose_idxs
 
-        pf = layer.attributes.get('parallelization_factor', recipe['L0'])
+        pf = layer.attributes.get('parallelization_factor', 1)
         layer.attributes['parallelization_factor'] = pf
 
         if is_gemm_strategy(layer):
@@ -1016,6 +1030,18 @@ class VivadoBackend(FPGABackend):
             return
         if strategy == 'resource':
             layer.set_attr('strategy', 'resource')
+            # einsum_resource gives each multiplier lane a fixed partial sum and walks the
+            # contraction axis with the reuse counter, so RF must divide n_contract.
+            n_contract = int(recipe['C'])
+            valid_rf = [d for d in range(1, n_contract + 1) if n_contract % d == 0]
+            chosen_rf = layer.get_attr('reuse_factor')
+            if chosen_rf not in valid_rf:
+                closest_rf = self.get_closest_reuse_factor(valid_rf, chosen_rf)
+                print(
+                    f'WARNING: Invalid ReuseFactor={chosen_rf} in layer "{layer.name}". '
+                    f'Using ReuseFactor={closest_rf} instead. Valid ReuseFactor(s): {",".join(map(str, valid_rf))}.'
+                )
+                layer.set_attr('reuse_factor', closest_rf)
             return
         if strategy in ('latency', 'distributed_arithmetic'):
             layer.set_attr('strategy', 'latency')
