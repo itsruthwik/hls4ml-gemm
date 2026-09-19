@@ -659,8 +659,15 @@ class CatapultBackend(FPGABackend):
         if not strategy:
             layer.set_attr('strategy', 'latency')
             return
-        if strategy.lower() in ('latency',):
-            layer.set_attr('strategy', strategy)
+        if strategy.lower() in ('latency', 'resource'):
+            layer.set_attr('strategy', strategy.lower())
+            if strategy.lower() == 'resource':
+                # Same legality check Dense performs; dense_resource asserts at runtime otherwise.
+                self.set_closest_reuse_factor(layer, recipe['C'], recipe['L1'])
+                # Resource time-shares one dense_resource across the free-index rows (as Vivado does);
+                # Latency keeps the full unroll set above. A user ParallelizationFactor overrides.
+                user_pf = layer.model.config.get_layer_config_value(layer, 'ParallelizationFactor', None)
+                layer.attributes['parallelization_factor'] = user_pf if user_pf is not None else 1
             return
         warn(f'Invalid strategy "{strategy}" for EinsumDense layer "{layer.name}". Using "latency" strategy instead.')
         layer.set_attr('strategy', 'latency')
@@ -716,8 +723,24 @@ class CatapultBackend(FPGABackend):
         if not strategy:
             layer.set_attr('strategy', 'latency')
             return
-        if strategy.lower() in ('latency',):
+        if strategy.lower() == 'latency':
             layer.set_attr('strategy', 'latency')
+            return
+        if strategy.lower() == 'resource':
+            layer.set_attr('strategy', 'resource')
+            # einsum_resource (array core) and the row-streaming path both give each multiplier
+            # lane a fixed partial sum and walk the contraction axis with the reuse counter, so
+            # RF must divide n_contract (same rule as the Vivado backend).
+            n_contract = int(recipe['C'])
+            valid_rf = [d for d in range(1, n_contract + 1) if n_contract % d == 0]
+            chosen_rf = layer.get_attr('reuse_factor')
+            if chosen_rf not in valid_rf:
+                closest_rf = self.get_closest_reuse_factor(valid_rf, chosen_rf)
+                warn(
+                    f'Invalid ReuseFactor={chosen_rf} in layer "{layer.name}". '
+                    f'Using ReuseFactor={closest_rf} instead. Valid ReuseFactor(s): {",".join(map(str, valid_rf))}.'
+                )
+                layer.set_attr('reuse_factor', closest_rf)
             return
         warn(f'Invalid strategy "{strategy}" for Einsum layer "{layer.name}". Using "latency" strategy instead.')
         layer.set_attr('strategy', 'latency')

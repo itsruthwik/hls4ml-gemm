@@ -20,11 +20,14 @@ Two residual within-head orientations are handled here, not as head-moves:
 * **QK^T output** — a per-head orientation (``S`` vs ``S^T``). Chosen away by operand
   role assignment: emit ``A=Q, B=K`` so the canonical output is already
   ``[seq_q, seq_k]`` (softmax reduces ``seq_k`` = the last axis). No node.
-* **A.V's V** — V's contract axis ``seq_k`` must be the column height, so V is fed
-  as ``[key_dim, seq_k]``. Realised as one small per-head 2D ``Transpose`` on the V
-  lane (the csim-correct fallback). Folding it into the GEMM IP's V-residency buffer
-  write-order — so even this disappears in io_stream — is the gemm-ip-gen contract
-  tracked separately; keeping the physical transpose here means nothing mis-lowers.
+* **QK^T's K / A.V's V** — each matmul's second operand is independently oriented by
+  its OWN resolved ``second_operand_row_major`` (col-major feeds it directly,
+  row-major needs a small per-head 2D ``Transpose``, the csim-correct fallback). The
+  two matmuls' settings are unrelated, so the transpose-free choice can differ per
+  matmul (and both, one, or neither may need a transpose). Folding a needed transpose
+  into the GEMM IP's B-residency buffer write-order — so even that disappears in
+  io_stream — is the gemm-ip-gen contract tracked separately; keeping the physical
+  transpose here means nothing mis-lowers.
 
 Runs BEFORE ``LowerEinsumToGemm``: it consumes the QK^T/A.V Einsum and the Softmax
 directly (creating Gemm + per-head Softmax nodes), and leaves the now-2D EinsumDense
@@ -106,13 +109,15 @@ class SplitAttentionHeads(OptimizerPass):
         av_prec = av.get_output_variable().type.precision
 
         # Resolved GEMM config (strategy/reuse_factor/... + SecondOperandRowMajor) mirrored
-        # onto the per-head two-operand Gemms. row_major flips where the one per-block B
-        # transpose lands: col-major feeds QK^T's B (K, already [seq_k, key_dim]) directly and
-        # transposes V for A.V; row-major transposes K for QK^T and feeds V ([seq_k, key_dim])
-        # directly -- one transpose either way (see the per-lane build below).
+        # onto the per-head two-operand Gemms. Each matmul's row_major is resolved from
+        # its OWN config -- they are independent knobs, not a single shared flip: col-major
+        # feeds a matmul's B directly when its natural layout is already K-inner (contract
+        # axis contiguous); row-major does when it's already N-inner (output axis
+        # contiguous). Whichever doesn't match gets a per-lane Transpose (see below).
         qk_cfg = _resolve_gemm_config(model, qk)
         av_cfg = _resolve_gemm_config(model, av)
-        row_major = bool(qk_cfg.get('second_operand_row_major', False))
+        qk_row_major = bool(qk_cfg.get('second_operand_row_major', False))
+        av_row_major = bool(av_cfg.get('second_operand_row_major', False))
 
         # --- 1. Projections stay 2D [seq, d_model]: head becomes a within-beat lane
         #        (beat = d_model), not a stream-order axis. The reshape moves no data.
@@ -154,7 +159,7 @@ class SplitAttentionHeads(OptimizerPass):
             # B beat layout: col-major feeds K_h ([seq_k, key_dim]) directly (K-inner beats,
             # gemm_k-wide); row-major transposes K_h to [key_dim, seq_k] (N-inner beats,
             # gemm_n-wide) for the mvau IP.
-            if row_major:
+            if qk_row_major:
                 kt_h = model.make_node('Transpose', f'{qk.name}_kt_h{h}', {'perm': [1, 0]}, [k_h])
                 chain.append(kt_h)
                 qk_b = kt_h.outputs[0]
@@ -189,9 +194,9 @@ class SplitAttentionHeads(OptimizerPass):
 
             # A.V: contract = seq_k, output = key_dim. B beat layout: col-major needs B as
             # [key_dim, seq_k] (K-inner), so transpose the V lane ([seq_k, key_dim]); row-major
-            # needs B as [seq_k, key_dim] (N-inner) = V directly, so no transpose. One transpose
-            # per block either way -- row-major just moves it from A.V to QK^T.
-            if row_major:
+            # needs B as [seq_k, key_dim] (N-inner) = V directly, so no transpose. Gated on
+            # A.V's OWN row-major setting -- independent of QK^T's.
+            if av_row_major:
                 av_b = v_h
                 av_chain = []
             else:

@@ -1,6 +1,6 @@
 import numpy as np
 
-from hls4ml.model.layers import GRU, LSTM, Conv1D, Conv2D, Dense, SeparableConv1D, SeparableConv2D
+from hls4ml.model.layers import GRU, LSTM, Conv1D, Conv2D, Dense, EinsumDense, SeparableConv1D, SeparableConv2D
 from hls4ml.model.optimizer import OptimizerPass
 
 
@@ -8,7 +8,7 @@ class ApplyResourceStrategy(OptimizerPass):
     """Transposes the weights to use the dense_resource matrix multiply routine"""
 
     def match(self, node):
-        node_matches = isinstance(node, (Dense, Conv1D, SeparableConv1D, Conv2D, SeparableConv2D, LSTM, GRU))
+        node_matches = isinstance(node, (Dense, EinsumDense, Conv1D, SeparableConv1D, Conv2D, SeparableConv2D, LSTM, GRU))
         is_resource_strategy = node.get_attr('strategy', '').lower() == 'resource'
         already_transformed = node.get_attr('_weights_transposed', False) is True
 
@@ -17,6 +17,12 @@ class ApplyResourceStrategy(OptimizerPass):
     def transform(self, model, node):
         if isinstance(node, Dense):
             node.weights['weight'].data = np.transpose(node.weights['weight'].data)
+        elif isinstance(node, EinsumDense):
+            # init_einsum_dense stores the kernel as (n_inplace, n_contract, n_free_kernel), i.e. one
+            # (n_in, n_out) latency-layout matrix per in-place slice. dense_resource reads (n_out, n_in).
+            w = node.weights['weight'].data
+            assert w.ndim == 3, f'EinsumDense weight expected 3-D (I, C, L1), got shape {w.shape}'
+            node.weights['weight'].data = np.transpose(w, axes=[0, 2, 1])
         elif isinstance(node, Conv1D):
             node.weights['weight'].data = np.transpose(node.weights['weight'].data, axes=[2, 0, 1])  # (W,C,F) => (F,W,C)
         elif isinstance(node, SeparableConv1D):

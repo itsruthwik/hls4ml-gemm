@@ -1,7 +1,7 @@
-import warnings
 from math import ceil
 
 from hls4ml.backends.backend import get_backend
+from hls4ml.backends.fpga.einsum_utils import select_row_stream_operand
 from hls4ml.backends.template import FunctionCallTemplate, LayerConfigTemplate
 from hls4ml.model.layers import Einsum
 
@@ -36,6 +36,11 @@ struct config{index} {{
     static const unsigned strategy = nnet::{strategy};
     static const unsigned reuse_factor = {reuse_factor};
     static const unsigned multiplier_limit = {multiplier_limit};
+    // io_stream + Resource: stream one operand one row at a time against the other,
+    // buffered (see nnet_einsum_stream.h). True only when the streamed operand's and the
+    // output's transposes are identity (ignoring size-1 axes).
+    static const bool row_stream = {row_stream};
+    static const unsigned row_stream_operand = {row_stream_operand};
 
     template <class x_T, class y_T>
     using product = nnet::product::{product_type}<x_T, y_T>;
@@ -62,9 +67,13 @@ class EinsumConfigTemplate(LayerConfigTemplate):
         io_type = node.model.config.get_config_value('IOType')
 
         # Catapult backend supports io_parallel (array) and io_stream (streaming einsum,
-        # the attention 2-operand matmul case); both use the Latency strategy.
+        # the attention 2-operand matmul case); Latency everywhere, and Resource under
+        # io_stream (row-streaming one operand against the other, Dense-style).
         assert io_type in ('io_parallel', 'io_stream'), 'Einsum layer supports io_parallel and io_stream'
-        assert strategy.lower() == 'latency', 'Einsum layer only supports Latency strategy for now'
+        assert strategy.lower() in ('latency', 'resource'), 'Einsum layer supports Latency and Resource strategy'
+        assert strategy.lower() == 'latency' or io_type == 'io_stream', (
+            'Einsum layer only supports Resource strategy under io_stream for now'
+        )
 
         # Einsum config
         params = default_params.copy()
@@ -86,13 +95,39 @@ class EinsumConfigTemplate(LayerConfigTemplate):
 
         total_mults = params['n_free0'] * params['n_free1'] * params['n_contract'] * params['n_inplace']
         params['multiplier_limit'] = ceil(total_mults / params['reuse_factor'])
-        if params['reuse_factor'] > 1:
+        if strategy.lower() == 'latency' and params['reuse_factor'] > 1:
+            import warnings
+
             warnings.warn(
                 f"Einsum layer '{node.name}': ReuseFactor={params['reuse_factor']} is ignored on the "
-                'Catapult backend — pragmas cannot take template-dependent II values and the einsum '
-                'loops are fully unrolled. Use Catapult TCL directives to constrain resources instead.',
+                'Catapult backend for the Latency strategy — the einsum loops are fully unrolled. '
+                'Use Strategy=Resource for a reuse-shared kernel, or Catapult TCL directives to '
+                'constrain resources instead.',
                 stacklevel=2,
             )
+
+        # Row streaming: which operand can be streamed one row at a time against the other,
+        # buffered. Shared with the Vivado/Vitis backend (hls4ml.backends.fpga.einsum_utils) so
+        # the selection logic and its semantics are defined once.
+        row_stream, row_stream_operand = select_row_stream_operand(
+            io_type=io_type,
+            strategy=strategy,
+            n_inplace=node.attributes['n_inplace'],
+            n_contract=int(node.attributes['n_contract']),
+            n_free0=int(node.attributes['n_free0']),
+            n_free1=int(node.attributes['n_free1']),
+            inp0_shape=node.attributes['inp0_shape'],
+            inp1_shape=node.attributes['inp1_shape'],
+            out_shape=node.attributes['out_interpert_shape'],
+            inp0_tpose_idxs=node.attributes['inp0_tpose_idxs'],
+            inp1_tpose_idxs=node.attributes['inp1_tpose_idxs'],
+            out_tpose_idxs=node.attributes['out_tpose_idxs'],
+            in0_pack=int(node.get_input_variable(node.inputs[0]).shape[-1]),
+            in1_pack=int(node.get_input_variable(node.inputs[1]).shape[-1]),
+            out_pack=int(node.get_output_variable().shape[-1]),
+        )
+        params['row_stream'] = 'true' if row_stream else 'false'
+        params['row_stream_operand'] = row_stream_operand
 
         einsum_conf = self.template.format(**params)
 

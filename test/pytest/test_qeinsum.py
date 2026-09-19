@@ -19,7 +19,7 @@ test_root_path = Path(__file__).parent
 
 @pytest.mark.parametrize('strategy', ['latency', 'resource'])
 @pytest.mark.parametrize('io_type', ['io_parallel', 'io_stream'])
-@pytest.mark.parametrize('backend', ['Vivado', 'Vitis', 'oneAPI'])
+@pytest.mark.parametrize('backend', ['Vivado', 'Vitis', 'oneAPI', 'Catapult'])
 @pytest.mark.parametrize(
     'operation',
     [
@@ -28,12 +28,15 @@ test_root_path = Path(__file__).parent
         ('xbi,xio->xbo', (7, 8), (8, 9)),
         ('xi,xoi->xo', (16,), (20, 16)),
         ('xabcd,xbcde->xaeb', (2, 4, 8, 16), (4, 8, 16, 3)),
+        ('xqd,xkd->xkq', (4, 8), (6, 8)),
     ],
-    ids=['xbi_xj_xbij', 'xbi_xio_xbo', 'xi_xoi_xo', 'xabcd_xbcde_xaeb'],
+    ids=['xbi_xj_xbij', 'xbi_xio_xbo', 'xi_xoi_xo', 'xabcd_xbcde_xaeb', 'xqd_xkd_xkq'],
 )
 def test_einsum_dense(test_case_id, backend, io_type, strategy, operation):
     if backend == 'oneAPI' and (strategy != 'latency' or io_type != 'io_parallel'):
         pytest.skip('oneAPI only covers strategy=latency, io_type=io_parallel')
+    if backend == 'Catapult' and (strategy != 'resource' or io_type != 'io_stream'):
+        pytest.skip('Catapult only covers strategy=resource, io_type=io_stream')
 
     eq, inp0_shape, inp1_shape = operation
     inp0 = Input(inp0_shape)

@@ -48,6 +48,7 @@ void clone_stream(ac_channel<data_T> &data, ac_channel<res_T> &res1, ac_channel<
         data_T in_data = data.read();
         res_T out_data;
 
+    #pragma hls_unroll
     ClonePack:
         for (int j = 0; j < data_T::size; j++) {
             out_data[j] = in_data[j];
@@ -69,6 +70,7 @@ void clone_stream(ac_channel<data_T> &data, ac_channel<res_T> &res1, ac_channel<
         data_T in_data = data.read();
         res_T out_data;
 
+    #pragma hls_unroll
     ClonePack:
         for (int j = 0; j < data_T::size; j++) {
             out_data[j] = in_data[j];
@@ -91,6 +93,7 @@ void clone_stream(ac_channel<data_T> &data, ac_channel<res_T> &res1, ac_channel<
         data_T in_data = data.read();
         res_T out_data;
 
+    #pragma hls_unroll
     ClonePack:
         for (int j = 0; j < data_T::size; j++) {
             out_data[j] = in_data[j];
@@ -114,6 +117,7 @@ void clone_stream(ac_channel<data_T> &data, ac_channel<res_T> &res1, ac_channel<
         data_T in_data = data.read();
         res_T out_data;
 
+    #pragma hls_unroll
     ClonePack:
         for (int j = 0; j < data_T::size; j++) {
             out_data[j] = in_data[j];
@@ -138,6 +142,7 @@ void clone_stream(ac_channel<data_T> &data, ac_channel<res_T> &res1, ac_channel<
         data_T in_data = data.read();
         res_T out_data;
 
+    #pragma hls_unroll
     ClonePack:
         for (int j = 0; j < data_T::size; j++) {
             out_data[j] = in_data[j];

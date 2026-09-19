@@ -64,7 +64,11 @@ dense_config_template = """struct config{index}_dense : nnet::dense_config {{
 
 einsum_dense_function_template = 'nnet::einsum_dense<{input_t}, {output_t}, {config}>({input}, {output}, {w}, {b});'
 
-einsum_dense_include_list = ['nnet_utils/nnet_einsum_dense.h', 'nnet_utils/nnet_dense.h']
+einsum_dense_include_list = [
+    'nnet_utils/nnet_einsum_dense.h',
+    'nnet_utils/nnet_dense.h',
+    'nnet_utils/nnet_einsum_dense_stream.h',
+]
 
 
 class EinsumDenseConfigTemplate(LayerConfigTemplate):
@@ -103,12 +107,17 @@ class EinsumDenseConfigTemplate(LayerConfigTemplate):
 
         # Only the baseline (non-GEMM) EinsumDense reaches this template — the GEMM
         # strategy lowers EinsumDense to a Gemm node in LowerEinsumToGemm before
-        # templating. Baseline einsum_dense is a flat-array kernel with no streaming
-        # variant, so it stays io_parallel-only; io_stream MHA goes through the GEMM path.
-        assert io_type == 'io_parallel', (
-            'Baseline EinsumDense supports io_parallel only; set Strategy: GEMM for io_stream'
+        # templating. Baseline einsum_dense under io_stream is a drain -> array-core ->
+        # restream shell (nnet_einsum_dense_stream.h) and is only wired up for the
+        # Resource strategy; io_stream Latency and any other combination should go
+        # through the GEMM path instead.
+        assert io_type == 'io_parallel' or (io_type == 'io_stream' and strategy.lower() == 'resource'), (
+            'Baseline EinsumDense supports io_parallel (Latency/Resource) or io_stream with the Resource '
+            'strategy only; set Strategy: GEMM for other io_stream combinations'
         )
-        assert strategy.lower() == 'latency', 'EinsumDense layer only supports Latency strategy for now'
+        assert strategy.lower() in ('latency', 'resource'), (
+            'EinsumDense layer only supports Latency and Resource strategies for now'
+        )
 
         # EinsumDense config
         params = default_params.copy()
@@ -131,7 +140,7 @@ class EinsumDenseConfigTemplate(LayerConfigTemplate):
         else:
             params['nzeros'] = '-1'
         
-        if params.get('reuse_factor', 1) > 1:
+        if strategy.lower() == 'latency' and params.get('reuse_factor', 1) > 1:
             warnings.warn(
                 f"EinsumDense layer '{node.name}': ReuseFactor={params['reuse_factor']} is ignored on the "
                 'Catapult backend — pragmas cannot take template-dependent II values and the einsum '
@@ -145,14 +154,6 @@ class EinsumDenseConfigTemplate(LayerConfigTemplate):
         if pf < 0:
             pf = params['n_inplace']
         params['parallelization_factor'] = pf
-        if pf not in (params['n_inplace'], 1000):
-            warnings.warn(
-                f"EinsumDense layer '{node.name}': ParallelizationFactor={pf} is ignored on the "
-                'Catapult backend — the template fully unrolls the in-place loop (pragmas cannot '
-                'take template-dependent unroll factors).',
-                stacklevel=2,
-            )
-
         einsum_conf = self.template.format(**params)
 
         # inp/out transpose config
@@ -182,7 +183,10 @@ class EinsumDenseFunctionTemplate(FunctionCallTemplate):
         params['b'] = node.get_weights('bias').name
         params['w'] = node.get_weights('weight').name
         # A gemm_ip EinsumDense never reaches this template — LowerEinsumToGemm
-        # lowers it to a Gemm node. Only the baseline io_parallel kernel remains.
+        # lowers it to a Gemm node. Only the baseline kernel remains, and the call
+        # site is identical for io_parallel and io_stream: overload resolution on
+        # {input_t}/{output_t} (array vs ac_channel) picks the array core in
+        # nnet_einsum_dense.h or the stream shell in nnet_einsum_dense_stream.h.
         return self.template.format(**params)
 
 

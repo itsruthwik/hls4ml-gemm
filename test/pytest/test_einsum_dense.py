@@ -16,7 +16,7 @@ test_root_path = Path(__file__).parent
 
 @pytest.mark.parametrize('strategy', ['latency', 'resource'])
 @pytest.mark.parametrize('io_type', ['io_parallel', 'io_stream'])
-@pytest.mark.parametrize('backend', ['Vivado', 'Vitis'])
+@pytest.mark.parametrize('backend', ['Vivado', 'Vitis', 'Catapult'])
 @pytest.mark.parametrize(
     'operation',
     [
@@ -34,6 +34,9 @@ test_root_path = Path(__file__).parent
     ],
 )
 def test_einsum_dense(test_case_id, backend, io_type, strategy, operation):
+    if backend == 'Catapult' and (strategy != 'resource' or io_type != 'io_stream'):
+        pytest.skip('Catapult only covers strategy=resource, io_type=io_stream')
+
     eq, inp_shape, out_shape, bias_axes = operation
     model = keras.Sequential(
         [Input(inp_shape), EinsumDense(eq, output_shape=out_shape, bias_axes=bias_axes, name='einsum_dense')]

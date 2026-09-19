@@ -149,38 +149,57 @@ template <class data_T, class res_T, typename CONFIG_T>
 void softmax_latency(ac_channel<data_T> &data, ac_channel<res_T> &res,
                      typename CONFIG_T::exp_table_t exp_table[CONFIG_T::exp_table_size],
                      typename CONFIG_T::inv_table_t invert_table[CONFIG_T::inv_table_size]) {
-    // Vitis treats PIPELINE II=reuse_factor as a target it may beat; Catapult pipelines at
-    // exactly the requested II, so the stream driver runs at 1.
+    // Reuse factor folds the normalisation multipliers (Vivado's rule: size / multiplier_limit
+    // steps per row). Catapult does not share unrolled multipliers just because the II allows
+    // it, so the sharing is explicit: one flat II 1 loop over (row, reuse step) with
+    // size / steps multiplier lanes, reading a row on its first step and writing it on its last.
+    constexpr unsigned multiplier_limit = DIV_ROUNDUP(data_T::size, CONFIG_T::reuse_factor);
+    constexpr unsigned rufactor = data_T::size / multiplier_limit;
+    constexpr unsigned multscale = DIV_ROUNDUP(data_T::size, rufactor); // multiplier lanes
+
+    typename CONFIG_T::accum_t exp_res[data_T::size];
+    typename CONFIG_T::inv_table_t inv_exp_sum = 0;
+    res_T out_pack;
+    unsigned ir = 0;
     #pragma hls_pipeline_init_interval 1
 SoftmaxExpLoop:
-    for (unsigned i = 0; i < CONFIG_T::n_in / data_T::size; i++) {
-        data_T in_pack = data.read();
+    for (unsigned t = 0; t < (CONFIG_T::n_in / data_T::size) * rufactor; t++) {
+        if (ir == 0) {
+            data_T in_pack = data.read();
 
-        // Calculate all the e^x's
-        typename CONFIG_T::accum_t exp_res[data_T::size];
-        typename CONFIG_T::inv_inp_t exp_sum(0);
-        #pragma hls_unroll
-    SoftmaxExpPackLoop:
-        for (unsigned j = 0; j < data_T::size; j++) {
-            unsigned x = softmax_idx_from_real_val<typename data_T::value_type, CONFIG_T::exp_table_size>(in_pack[j]);
-            exp_res[j] = exp_table[x];
+            // Calculate all the e^x's
+            typename CONFIG_T::inv_inp_t exp_sum(0);
+            #pragma hls_unroll
+        SoftmaxExpPackLoop:
+            for (unsigned j = 0; j < data_T::size; j++) {
+                unsigned x = softmax_idx_from_real_val<typename data_T::value_type, CONFIG_T::exp_table_size>(in_pack[j]);
+                exp_res[j] = exp_table[x];
+            }
+
+            // Explicitly sum the results with an adder tree.
+            // Rounding & Saturation mode, which improve accuracy, prevent Vivado from expression balancing
+            Op_add<typename CONFIG_T::accum_t> op_add;
+            exp_sum = reduce<typename CONFIG_T::accum_t, data_T::size, Op_add<typename CONFIG_T::accum_t>>(exp_res, op_add);
+
+            inv_exp_sum =
+                invert_table[softmax_idx_from_real_val<typename CONFIG_T::inv_inp_t, CONFIG_T::inv_table_size>(exp_sum)];
         }
 
-        // Explicitly sum the results with an adder tree.
-        // Rounding & Saturation mode, which improve accuracy, prevent Vivado from expression balancing
-        Op_add<typename CONFIG_T::accum_t> op_add;
-        exp_sum = reduce<typename CONFIG_T::accum_t, data_T::size, Op_add<typename CONFIG_T::accum_t>>(exp_res, op_add);
-
-        typename CONFIG_T::inv_table_t inv_exp_sum =
-            invert_table[softmax_idx_from_real_val<typename CONFIG_T::inv_inp_t, CONFIG_T::inv_table_size>(exp_sum)];
-
-        res_T out_pack;
         #pragma hls_unroll
     SoftmaxInvPackLoop:
-        for (unsigned j = 0; j < res_T::size; j++) {
-            out_pack[j] = exp_res[j] * inv_exp_sum;
+        for (unsigned k = 0; k < multscale; k++) {
+            const unsigned j = ir * multscale + k; // lane k serves one output per reuse step
+            if (j < res_T::size) {
+                out_pack[j] = exp_res[j] * inv_exp_sum;
+            }
         }
-        res.write(out_pack);
+
+        if (ir == rufactor - 1) {
+            res.write(out_pack);
+            ir = 0;
+        } else {
+            ir++;
+        }
     }
 }
 
@@ -188,53 +207,74 @@ template <class data_T, class res_T, typename CONFIG_T>
 void softmax_stable(ac_channel<data_T> &data, ac_channel<res_T> &res,
                     typename CONFIG_T::exp_table_t exp_table[CONFIG_T::exp_table_size],
                     typename CONFIG_T::inv_table_t invert_table[CONFIG_T::inv_table_size]) {
+    // Reuse factor folds the normalisation multipliers (Vivado's rule: size / multiplier_limit
+    // steps per row). Catapult does not share unrolled multipliers just because the II allows
+    // it, so the sharing is explicit: one flat II 1 loop over (row, reuse step) with
+    // size / steps multiplier lanes, reading a row on its first step and writing it on its last.
+    constexpr unsigned multiplier_limit = DIV_ROUNDUP(data_T::size, CONFIG_T::reuse_factor);
+    constexpr unsigned rufactor = data_T::size / multiplier_limit;
+    constexpr unsigned multscale = DIV_ROUNDUP(data_T::size, rufactor); // multiplier lanes
+
+    typename CONFIG_T::accum_t exp_res[data_T::size];
+    typename CONFIG_T::inv_table_t inv_exp_sum = 0;
+    res_T out_pack;
+    unsigned ir = 0;
     #pragma hls_pipeline_init_interval 1
 SoftmaxArrayLoop:
-    for (unsigned i = 0; i < CONFIG_T::n_in / data_T::size; i++) {
-        data_T in_pack = data.read();
+    for (unsigned t = 0; t < (CONFIG_T::n_in / data_T::size) * rufactor; t++) {
+        if (ir == 0) {
+            data_T in_pack = data.read();
 
-        typename data_T::value_type data_array[data_T::size];
-        #pragma hls_unroll
-    SoftmaxArrayPackLoop:
-        for (unsigned j = 0; j < data_T::size; j++) {
-            data_array[j] = in_pack[j];
+            typename data_T::value_type data_array[data_T::size];
+            #pragma hls_unroll
+        SoftmaxArrayPackLoop:
+            for (unsigned j = 0; j < data_T::size; j++) {
+                data_array[j] = in_pack[j];
+            }
+
+            // Find the max and compute all delta(x_i, x_max)
+            Op_max<typename data_T::value_type> op_max;
+            typename data_T::value_type x_max =
+                reduce<typename data_T::value_type, data_T::size, Op_max<typename data_T::value_type>>(data_array, op_max);
+
+            typename CONFIG_T::inp_norm_t d_xi_xmax[data_T::size];
+            #pragma hls_unroll
+            for (unsigned j = 0; j < data_T::size; j++) {
+                d_xi_xmax[j] = x_max - data_array[j];
+            }
+
+            // Calculate all the e^x's
+            typename CONFIG_T::inv_inp_t exp_sum(0);
+            #pragma hls_unroll
+            for (unsigned j = 0; j < data_T::size; j++) {
+                unsigned x = softmax_idx_from_real_val<typename CONFIG_T::inp_norm_t, CONFIG_T::exp_table_size>(d_xi_xmax[j]);
+                exp_res[j] = exp_table[x];
+            }
+
+            // Explicitly sum the results with an adder tree.
+            // Rounding & Saturation mode, which improve accuracy, prevent Vivado from expression balancing
+            Op_add<typename CONFIG_T::accum_t> op_add;
+            exp_sum = reduce<typename CONFIG_T::accum_t, data_T::size, Op_add<typename CONFIG_T::accum_t>>(exp_res, op_add);
+
+            inv_exp_sum =
+                invert_table[softmax_idx_from_real_val<typename CONFIG_T::inv_inp_t, CONFIG_T::inv_table_size>(exp_sum)];
         }
 
-        // Find the max and compute all delta(x_i, x_max)
-        Op_max<typename data_T::value_type> op_max;
-        typename data_T::value_type x_max =
-            reduce<typename data_T::value_type, data_T::size, Op_max<typename data_T::value_type>>(data_array, op_max);
-
-        typename CONFIG_T::inp_norm_t d_xi_xmax[data_T::size];
-        #pragma hls_unroll
-        for (unsigned j = 0; j < data_T::size; j++) {
-            d_xi_xmax[j] = x_max - data_array[j];
-        }
-
-        // Calculate all the e^x's
-        typename CONFIG_T::accum_t exp_res[data_T::size];
-        typename CONFIG_T::inv_inp_t exp_sum(0);
-        #pragma hls_unroll
-        for (unsigned j = 0; j < data_T::size; j++) {
-            unsigned x = softmax_idx_from_real_val<typename CONFIG_T::inp_norm_t, CONFIG_T::exp_table_size>(d_xi_xmax[j]);
-            exp_res[j] = exp_table[x];
-        }
-
-        // Explicitly sum the results with an adder tree.
-        // Rounding & Saturation mode, which improve accuracy, prevent Vivado from expression balancing
-        Op_add<typename CONFIG_T::accum_t> op_add;
-        exp_sum = reduce<typename CONFIG_T::accum_t, data_T::size, Op_add<typename CONFIG_T::accum_t>>(exp_res, op_add);
-
-        typename CONFIG_T::inv_table_t inv_exp_sum =
-            invert_table[softmax_idx_from_real_val<typename CONFIG_T::inv_inp_t, CONFIG_T::inv_table_size>(exp_sum)];
-
-        res_T out_pack;
         #pragma hls_unroll
     SoftmaxInvPackLoop:
-        for (unsigned j = 0; j < res_T::size; j++) {
-            out_pack[j] = exp_res[j] * inv_exp_sum;
+        for (unsigned k = 0; k < multscale; k++) {
+            const unsigned j = ir * multscale + k; // lane k serves one output per reuse step
+            if (j < res_T::size) {
+                out_pack[j] = exp_res[j] * inv_exp_sum;
+            }
         }
-        res.write(out_pack);
+
+        if (ir == rufactor - 1) {
+            res.write(out_pack);
+            ir = 0;
+        } else {
+            ir++;
+        }
     }
 }
 

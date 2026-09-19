@@ -1,6 +1,7 @@
 from math import ceil
 
 from hls4ml.backends.backend import get_backend
+from hls4ml.backends.fpga.einsum_utils import select_row_stream_operand
 from hls4ml.backends.template import FunctionCallTemplate, LayerConfigTemplate
 from hls4ml.model.layers import Einsum
 from hls4ml.utils.transpose_utils import transpose_config_gen
@@ -96,41 +97,27 @@ class EinsumConfigTemplate(LayerConfigTemplate):
         params['multiplier_limit'] = ceil(total_mults / params['reuse_factor'])
 
         # Row streaming: which operand can be streamed one row at a time against the other,
-        # buffered. Size-1 axes carry no layout, so they are ignored when judging order.
-        def effective_perm(shape, idxs):
-            kept = [i for i in idxs if shape[i] != 1]
-            rank = {ax: r for r, ax in enumerate(sorted(kept))}
-            return [rank[ax] for ax in kept]
-
-        inp0_shape = node.attributes['inp0_shape']
-        inp1_shape = node.attributes['inp1_shape']
-        out_shape = node.attributes['out_interpert_shape']
-        eff_in0 = effective_perm(inp0_shape, node.attributes['inp0_tpose_idxs'])
-        eff_in1 = effective_perm(inp1_shape, node.attributes['inp1_tpose_idxs'])
-        eff_out = effective_perm(out_shape, node.attributes['out_tpose_idxs'])
-        in0_rows_ok = eff_in0 == list(range(len(eff_in0)))  # operand 0 arrives as (L0, C), C fastest
-        in1_rows_ok = eff_in1 == list(range(len(eff_in1)))  # operand 1 arrives as (L1, C), C fastest
-        # Stream beats carry the last tensor dimension; the streamed operand's beat must tile a
-        # row of n_contract and the output beat must tile an output row.
-        in0_pack = int(node.get_input_variable(node.inputs[0]).shape[-1])
-        in1_pack = int(node.get_input_variable(node.inputs[1]).shape[-1])
-        out_pack = int(node.get_output_variable().shape[-1])
-        n_contract = int(node.attributes['n_contract'])
-        row_stream_operand = None
-        if eff_out == list(range(len(eff_out))) and in0_rows_ok:
-            if n_contract % in0_pack == 0 and int(node.attributes['n_free1']) % out_pack == 0:
-                row_stream_operand = 0  # output is (L0, L1): rows of operand 0
-        elif eff_out == [1, 0] and in1_rows_ok:
-            if n_contract % in1_pack == 0 and int(node.attributes['n_free0']) % out_pack == 0:
-                row_stream_operand = 1  # output is (L1, L0): rows of operand 1
-        row_stream = (
-            io_type == 'io_stream'
-            and strategy.lower() == 'resource'
-            and node.attributes['n_inplace'] == 1
-            and row_stream_operand is not None
+        # buffered. Shared with the Catapult backend (hls4ml.backends.fpga.einsum_utils) so the
+        # selection logic and its semantics are defined once.
+        row_stream, row_stream_operand = select_row_stream_operand(
+            io_type=io_type,
+            strategy=strategy,
+            n_inplace=node.attributes['n_inplace'],
+            n_contract=int(node.attributes['n_contract']),
+            n_free0=int(node.attributes['n_free0']),
+            n_free1=int(node.attributes['n_free1']),
+            inp0_shape=node.attributes['inp0_shape'],
+            inp1_shape=node.attributes['inp1_shape'],
+            out_shape=node.attributes['out_interpert_shape'],
+            inp0_tpose_idxs=node.attributes['inp0_tpose_idxs'],
+            inp1_tpose_idxs=node.attributes['inp1_tpose_idxs'],
+            out_tpose_idxs=node.attributes['out_tpose_idxs'],
+            in0_pack=int(node.get_input_variable(node.inputs[0]).shape[-1]),
+            in1_pack=int(node.get_input_variable(node.inputs[1]).shape[-1]),
+            out_pack=int(node.get_output_variable().shape[-1]),
         )
         params['row_stream'] = 'true' if row_stream else 'false'
-        params['row_stream_operand'] = row_stream_operand if row_stream else 0
+        params['row_stream_operand'] = row_stream_operand
 
         einsum_conf = self.template.format(**params)
 
