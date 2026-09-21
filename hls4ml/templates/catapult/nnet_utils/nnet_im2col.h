@@ -68,8 +68,9 @@ void im2col_1d_gemm_rows(ac_channel<data_T> &data, ac_channel<a_row_T> &a_rows) 
 ReadInputWidth:
     // Pipeline the spatial driver loop (Catapult does not auto-flatten the nest the way Vivado does,
     // so pipelining only the inner ReadInputPack leaves this loop rolled). Unroll the inner pack loop.
-    // II is CONFIG_T::reuse_factor (default 1, i.e. gapless): see the Im2Col ReuseFactor knob.
-    #pragma hls_pipeline_init_interval CONFIG_T::reuse_factor
+    // II is a literal 1 (gapless): Catapult rejects a symbolic pragma argument such as
+    // CONFIG_T::reuse_factor (CIN-93) and then leaves the loop rolled.
+    #pragma hls_pipeline_init_interval 1
     for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width / (data_T::size / CONFIG_T::n_chan); i_iw++) {
         data_T data_pack = data.read();
     ReadInputPack:
@@ -175,7 +176,8 @@ void im2col_2d_gemm_rows(ac_channel<data_T> &data, ac_channel<a_row_T> &a_rows) 
     // backpressure. GEMM-IP backpressure is only expected/allowed to be visible at
     // tile boundaries, between tiles.
 ReadInputPixels:
-    #pragma hls_pipeline_init_interval CONFIG_T::reuse_factor
+    // Literal II, as in im2col_1d_gemm_rows: Catapult rejects a symbolic pragma argument.
+    #pragma hls_pipeline_init_interval 1
     for (unsigned i_beat = 0; i_beat < CONFIG_T::in_height * CONFIG_T::in_width / (data_T::size / CONFIG_T::n_chan);
          i_beat++) {
         data_T data_pack = data.read();
