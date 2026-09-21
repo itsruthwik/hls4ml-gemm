@@ -986,6 +986,7 @@ class CatapultWriter(Writer):
                             + indent + '  exit 1\n'
                             + indent + '}\n'
                             + indent + 'if { $_gemm_has_pkg } {\n'
+                            + indent + '  source $_gemm_pkg_dir/gemm_ip_sources.tcl\n'
                             + indent + '  logfile message "GEMM IP package resolved at $_gemm_pkg_dir through GEMM_IP_HEADER and ac_blackbox bindings." info\n'
                             + indent + '} else {\n'
                             + indent + '  logfile message "No GEMM IP package found; csim uses the behavioral model (synth/cosim require the package)." info\n'
