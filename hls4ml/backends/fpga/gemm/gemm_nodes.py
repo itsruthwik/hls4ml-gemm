@@ -334,6 +334,13 @@ class SplitConvGemm(OptimizerPass):
                 'gemm_m': gemm_attributes['gemm_m'],
                 'im2col_tile_rows': tile_rows,
                 'strategy': 'gemm',
+                # Default: inherit the parent conv's resolved reuse factor. An
+                # explicit LayerName['im2col_<conv>']['ReuseFactor'] HLSConfig
+                # override still wins — Layer.__init__ applies get_layer_config()
+                # (LayerType/LayerName only, no Model-wide fallback) AFTER this
+                # dict is used to seed attributes, so it overwrites this default
+                # only when the user pinned the im2col node's own name/type.
+                'reuse_factor': gemm_attributes['reuse_factor'],
             }
             im2col_name = f'im2col_{node.name}'
             im2col_node = model.make_node(Im2Col, im2col_name, im2col_attributes, node.inputs.copy())

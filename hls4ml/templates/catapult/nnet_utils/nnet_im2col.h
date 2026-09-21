@@ -24,9 +24,10 @@ struct im2col_config {
     static const unsigned pad_right = 0;
     static const unsigned gemm_m = 1;
     static const unsigned tile_rows = 1;
+    static const unsigned reuse_factor = 1;
 };
 
-template <class a_row_T, class data_T, unsigned N>
+template <class a_row_T, class data_T, unsigned N, typename CONFIG_T>
 void write_im2col_row(const data_T (&kernel_data)[N], ac_channel<a_row_T> &a_rows) {
     static_assert(a_row_T::size == N, "im2col row width must match kernel window width");
     a_row_T out_pack;
@@ -67,7 +68,8 @@ void im2col_1d_gemm_rows(ac_channel<data_T> &data, ac_channel<a_row_T> &a_rows) 
 ReadInputWidth:
     // Pipeline the spatial driver loop (Catapult does not auto-flatten the nest the way Vivado does,
     // so pipelining only the inner ReadInputPack leaves this loop rolled). Unroll the inner pack loop.
-    #pragma hls_pipeline_init_interval 1
+    // II is CONFIG_T::reuse_factor (default 1, i.e. gapless): see the Im2Col ReuseFactor knob.
+    #pragma hls_pipeline_init_interval CONFIG_T::reuse_factor
     for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width / (data_T::size / CONFIG_T::n_chan); i_iw++) {
         data_T data_pack = data.read();
     ReadInputPack:
@@ -82,7 +84,8 @@ ReadInputWidth:
             kernel_shift_1d<decltype(pixel_pack), CONFIG_T>(pixel_pack, kernel_data);
 
             if ((sX - lShiftX) == 0 && pX > lShiftX - 1) {
-                write_im2col_row<a_row_T, data_element_t, CONFIG_T::filt_width * CONFIG_T::n_chan>(kernel_data, a_rows);
+                write_im2col_row<a_row_T, data_element_t, CONFIG_T::filt_width * CONFIG_T::n_chan, CONFIG_T>(
+                    kernel_data, a_rows);
                 tile_row = (tile_row + 1 == CONFIG_T::tile_rows) ? 0 : tile_row + 1;
             }
 
@@ -172,7 +175,7 @@ void im2col_2d_gemm_rows(ac_channel<data_T> &data, ac_channel<a_row_T> &a_rows) 
     // backpressure. GEMM-IP backpressure is only expected/allowed to be visible at
     // tile boundaries, between tiles.
 ReadInputPixels:
-    #pragma hls_pipeline_init_interval 1
+    #pragma hls_pipeline_init_interval CONFIG_T::reuse_factor
     for (unsigned i_beat = 0; i_beat < CONFIG_T::in_height * CONFIG_T::in_width / (data_T::size / CONFIG_T::n_chan);
          i_beat++) {
         data_T data_pack = data.read();
@@ -189,7 +192,7 @@ ReadInputPixels:
 
             if ((sX - lShiftX) == 0 && (sY - lShiftY) == 0 && pY > lShiftY - 1 && pX > lShiftX - 1) {
                 write_im2col_row<a_row_T, data_element_t,
-                                  CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan>(
+                                  CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan, CONFIG_T>(
                     kernel_data, a_rows);
                 tile_row = (tile_row + 1 == CONFIG_T::tile_rows) ? 0 : tile_row + 1;
             }

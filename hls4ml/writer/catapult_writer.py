@@ -994,6 +994,21 @@ class CatapultWriter(Writer):
                         )
                     else:
                         line = ''
+                elif '#hls-fpga-machine-learning insert fifo-depth-overrides' in line:
+                    # Per-boundary InputFifoDepth overrides (catapult:configure_input_fifo_depth)
+                    # win over the blanket fifo_depth/fifo_depth_bypass loops above: emitted after
+                    # them so the explicit directive is the last one Catapult sees for that channel.
+                    explicit_vars = [v for v in model.output_vars.values() if getattr(v, 'fifo_depth_explicit', False)]
+                    line = ''
+                    for var in explicit_vars:
+                        depth = var.pragma[1]
+                        line += (
+                            indent
+                            + f'logfile message "directive set -match glob $design/{var.name}:cns/FIFO_DEPTH '
+                            + f'{depth} (explicit)\\n" info\n'
+                            + indent
+                            + f'directive set -match glob "$design/{var.name}:cns/FIFO_DEPTH" {depth}\n'
+                        )
                 dst.write(line)
 
         # Optional bottom-up Tcl script

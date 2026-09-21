@@ -235,6 +235,8 @@ if {$opt(synth)} {
     logfile message "directive set -match glob $ch_fifo $opt(fifo_depth_bypass) (bypass)\n" info
     directive set -match glob "$ch_fifo" $opt(fifo_depth_bypass)
   }
+  # Per-boundary overrides (HLSConfig InputFifoDepth) win over the blanket loops above.
+  #hls-fpga-machine-learning insert fifo-depth-overrides
 
   go architect
 
@@ -327,6 +329,8 @@ if {$opt(synth)} {
     logfile message "directive set -match glob $ch_fifo $opt(fifo_depth_bypass) (bypass)\n" info
     directive set -match glob "$ch_fifo" $opt(fifo_depth_bypass)
   }
+  # Per-boundary overrides (HLSConfig InputFifoDepth) win over the blanket loops above.
+  #hls-fpga-machine-learning insert fifo-depth-overrides
   go architect
   go allocate
   go schedule

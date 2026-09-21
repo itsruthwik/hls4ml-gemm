@@ -210,6 +210,10 @@ class CatapultBackend(FPGABackend):
             'catapult:generate_conv_im2col',
             'catapult:apply_winograd_kernel_transformation',
             'catapult:validate_gemm',
+            # After transform_types (and, transitively, streaming's clone_output) so
+            # node.inputs[idx] already names the post-clone *_cpyN stream variable and
+            # that variable already has a ('stream', depth) pragma to override.
+            'catapult:configure_input_fifo_depth',
         ]
         catapult_types_flow = register_flow('specific_types', catapult_types, requires=[init_flow], backend=self.name)
 
@@ -566,6 +570,18 @@ class CatapultBackend(FPGABackend):
         layer.set_attr('dw_output_t', dw_output_t)
 
     def _set_pooling_accum_t(self, layer, pool_size):
+        # A user-pinned accum (HLSConfig LayerName ... Precision.accum) is already
+        # sized deliberately -- under bit_exact the pin is the pre-reduction base
+        # and register_precision adds the reduction headroom itself. Widening it a
+        # second time here would silently break the design's width budget (e.g. a
+        # <= 16-bit rule), so pins are left alone; bit-exactness is on the user.
+        # (layer_name_precision holds raw strings; convert like _explicit_precision.
+        # 'auto' and friends resolve away from FixedPrecisionType: not a pin.)
+        pinned = layer.model.config.layer_name_precision.get(f'{layer.name.lower()}_accum')
+        if isinstance(pinned, str):
+            pinned = FPGABackend.convert_precision_string(pinned)
+        if isinstance(pinned, FixedPrecisionType):
+            return
         extra_bits = ceil_log2(pool_size)
         accum_t = layer.get_attr('accum_t')
         accum_t.precision.width += extra_bits * 2

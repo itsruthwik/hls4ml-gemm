@@ -41,6 +41,7 @@ im2col_config_template = """struct config{index} : nnet::im2col_config {{
     static const unsigned pad_left = {pad_left};
     static const unsigned pad_right = {pad_right};
     static const unsigned gemm_m = {gemm_m};
+    static const unsigned reuse_factor = {reuse_factor};
 }};\n"""
 
 im2col_function_template = 'nnet::im2col_{n_dim}d_stream<{input_t}, {output_t}, {config}>({input}, {output});'

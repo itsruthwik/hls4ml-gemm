@@ -31,6 +31,7 @@ struct im2col_config {
     static const unsigned pad_left    = 0;
     static const unsigned pad_right   = 0;
     static const unsigned gemm_m      = 1;
+    static const unsigned reuse_factor = 1;
 };
 
 // ---------------------------------------------------------------------------
@@ -204,9 +205,9 @@ void im2col_1d_gemm_rows(hls::stream<data_T> &data, hls::stream<a_row_T> &a_rows
 
 ReadInputWidth:
     for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width / (data_T::size / CONFIG_T::n_chan); i_iw++) {
+        #pragma HLS PIPELINE II=CONFIG_T::reuse_factor
         data_T data_pack = data.read();
         for (unsigned p = 0; p < data_T::size / CONFIG_T::n_chan; p++) {
-            #pragma HLS PIPELINE II=1
             nnet::array<data_element_t, CONFIG_T::n_chan> pixel_pack;
         PackChannels:
             for (unsigned c = 0; c < CONFIG_T::n_chan; c++) {
@@ -263,9 +264,9 @@ ReadInputHeight:
     for (unsigned i_ih = 0; i_ih < CONFIG_T::in_height; i_ih++) {
     ReadInputWidth:
         for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width / (data_T::size / CONFIG_T::n_chan); i_iw++) {
+            #pragma HLS PIPELINE II=CONFIG_T::reuse_factor
             data_T data_pack = data.read();
             for (unsigned p = 0; p < data_T::size / CONFIG_T::n_chan; p++) {
-                #pragma HLS PIPELINE II=1
                 nnet::array<data_element_t, CONFIG_T::n_chan> pixel_pack;
             PackChannels:
                 for (unsigned c = 0; c < CONFIG_T::n_chan; c++) {

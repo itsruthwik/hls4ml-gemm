@@ -144,6 +144,9 @@ def set_optimized_fifo_depths(model, optimized_fifo_depths):
     for output_variable in model.output_vars.values():
         if 'StreamVariable' in str(type(output_variable)):
             if output_variable.pragma:
+                if getattr(output_variable, 'fifo_depth_explicit', False):
+                    # User-configured (InputFifoDepth) depth; profiling must not overwrite it.
+                    continue
                 if output_variable.name not in optimized_fifo_depths.keys():
                     continue
 

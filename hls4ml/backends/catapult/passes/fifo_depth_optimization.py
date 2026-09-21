@@ -47,6 +47,9 @@ def generate_max_depth_file(model, maxs):
 def set_fifo_depth(model, maxs):
     for v in model.output_vars.values():
         if v.pragma:
+            if getattr(v, 'fifo_depth_explicit', False):
+                # User-configured (InputFifoDepth) depth; profiling must not overwrite it.
+                continue
             filtered_max = [x['max'] for x in maxs if v.name in x['name']]
             if len(filtered_max) == 0:
                 continue

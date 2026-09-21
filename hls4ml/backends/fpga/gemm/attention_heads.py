@@ -62,6 +62,10 @@ _SOFTMAX_CARRY_KEYS = (
     'exp_table_t', 'exp_table_size', 'inv_table_t', 'inv_table_size',
     'inv_inp_t', 'inp_norm_t', 'table_size', 'table_t', 'accum_t',
     '_bit_exact', 'bit_exact_transformed',
+    # reuse_factor is resolved on the pre-split softmax from the user's LayerName pin;
+    # carry it so the per-head clones inherit it instead of re-resolving under their
+    # _h{h} names (which the config was never keyed against) and hitting the default 1.
+    'reuse_factor',
 )
 
 

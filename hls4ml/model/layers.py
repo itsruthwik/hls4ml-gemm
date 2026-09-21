@@ -735,6 +735,11 @@ class Im2Col(Layer):
         Attribute('gemm_m', default=None),
         Attribute('im2col_tile_rows', default=None),
         Attribute('strategy', value_type=str, default='latency'),
+        # II knob for the patch-staging loop only (see
+        # hls4ml.backends.fpga.gemm.gemm_nodes.SplitConvGemm): defaults to the
+        # source conv's resolved reuse factor, overridable per-node via the
+        # standard LayerName['im2col_<conv>']['ReuseFactor'] HLSConfig key.
+        ConfigurableAttribute('reuse_factor', default=1, description=descriptions.reuse_factor),
     ]
 
     def initialize(self):

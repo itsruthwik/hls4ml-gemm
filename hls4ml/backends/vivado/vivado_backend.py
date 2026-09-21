@@ -286,6 +286,10 @@ class VivadoBackend(FPGABackend):
             'vivado:d_a_latency_conv_template',
             'vivado:d_a_combinational_template',
             'vivado:validate_gemm',
+            # After transform_types (and, transitively, streaming's clone_output) so
+            # node.inputs[idx] already names the post-clone *_cpyN stream variable and
+            # that variable already has a ('stream', depth) pragma to override.
+            'vivado:configure_input_fifo_depth',
         ]
         vivado_types_flow = register_flow('specific_types', vivado_types, requires=[init_flow], backend=self.name)
 
