@@ -56,11 +56,9 @@ void layernorm_1d(data_T data[CONFIG_T::n_in / CONFIG_T::seq_len], res_T res[CON
     // Lossless (norm_t holds x - mean_q exactly), so it stays bit-exact.
     typename CONFIG_T::norm_t data_diff[dim];
 
-    // Vivado: #pragma HLS PIPELINE II=CONFIG_T::reuse_factor (applied at function top; there is
-    // no single enclosing loop, so it lands on the first of the sibling reduction loops below)
-    constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
-    (void)ce_reuse_factor;
-    #pragma hls_pipeline_init_interval ce_reuse_factor
+    // Vivado pipelines the function top, which unrolls these per-token loops. Catapult does not,
+    // so unroll them explicitly; otherwise they stay rolled and the caller's token loop cannot pipeline.
+    #pragma hls_unroll yes
 LAYERNORM_1D_SUM:
     for (int i = 0; i < dim; ++i) {
         sum_cache += static_cast<typename CONFIG_T::accum_t>(data[i]);
@@ -83,6 +81,7 @@ LAYERNORM_1D_SUM:
     // Quantize the mean to HGQ2's mean_q precision so (x - mean) is bit-exact to HGQ2.
     typename CONFIG_T::mean_t mean_q = mean;
 
+    #pragma hls_unroll yes
 LAYERNORM_1D_VAR:
     for (int i = 0; i < dim; ++i) {
         data_diff[i] = static_cast<typename CONFIG_T::norm_t>(static_cast<typename CONFIG_T::accum_t>(data[i]) - mean_q);
@@ -110,6 +109,7 @@ LAYERNORM_1D_VAR:
         index = CONFIG_T::table_size - 1;
     deno_inver = rsqrt_table[index.to_int()];
 
+    #pragma hls_unroll yes
 LAYERNORM_1D_RESULT:
     for (int i = 0; i < dim; ++i) {
         res[i] = data_diff[i] * deno_inver * scale[i] + bias[i];
