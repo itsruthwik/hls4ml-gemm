@@ -954,6 +954,7 @@ class VivadoBackend(FPGABackend):
         layer.attributes['gemm_m'] = recipe['L0']
         layer.attributes['gemm_k'] = recipe['C']
         layer.attributes['gemm_n'] = recipe['L1']
+        layer.attributes['kernel_shape'] = kernel_shape
         layer.add_weights(compression=layer.model.config.get_compression(layer))
         layer.add_bias()
 
@@ -972,6 +973,17 @@ class VivadoBackend(FPGABackend):
                 strategy = 'latency'
             layer.set_attr('strategy', strategy)
 
+        io_type = layer.model.config.get_config_value('IOType')
+        if not is_gemm_strategy(layer) and io_type == 'io_stream' and layer.get_attr('strategy') in (
+            'latency',
+            'distributed_arithmetic',
+        ):
+            raise Exception(
+                f'Layer "{layer.name}": io_stream EinsumDense requires Strategy=Resource. '
+                'The io_stream kernel (nnet::einsum_dense in nnet_einsum_dense_stream.h) only '
+                'implements the Resource contraction core; there is no io_stream Latency/DA path.'
+            )
+
         # Free-index parallelism. Latency keeps the historical full unroll (the array core is written
         # for that); Resource defaults to 1 (Conv-style sequential) so a single dense_resource instance
         # is time-shared across free-index positions. A user ParallelizationFactor overrides both.
@@ -983,8 +995,38 @@ class VivadoBackend(FPGABackend):
         layer.attributes['parallelization_factor'] = pf
 
         if layer.get_attr('strategy') == 'resource':
-            # Same legality check Dense performs; dense_resource asserts at runtime otherwise.
-            self.set_closest_reuse_factor(layer, recipe['C'], recipe['L1'])
+            if io_type == 'io_stream':
+                # The io_stream kernel (nnet_einsum_dense_stream.h) streams each row out as it's
+                # computed, with weights buffered (constant) rather than streamed -- see
+                # equation_row_plan in the Vivado Einsum pass. It raises a clear error itself if the
+                # equation's output doesn't end with all of the kernel's free indices, i.e. if the
+                # data operand can't supply rows directly.
+                from hls4ml.backends.fpga.einsum_utils import equation_row_plan
+
+                plan = equation_row_plan(equation, inp_shape, kernel_shape)
+                if plan['row_op'] != 0:
+                    raise Exception(
+                        f'Layer "{layer.name}": io_stream EinsumDense requires the equation\'s output to '
+                        'end with all of the kernel\'s free indices, so the data operand can be streamed '
+                        f'out row by row. Equation "{equation}" does not satisfy this.'
+                    )
+                # einsum_dense's row loop gives each multiplier lane a fixed partial sum and walks
+                # the contraction axis with the reuse counter (same scheme as einsum_resource /
+                # nnet_einsum_stream.h), so RF must divide n_contract, not n_in*n_out.
+                n_contract = recipe['C']
+                valid_rf = [d for d in range(1, n_contract + 1) if n_contract % d == 0]
+                chosen_rf = layer.get_attr('reuse_factor')
+                if chosen_rf not in valid_rf:
+                    closest_rf = self.get_closest_reuse_factor(valid_rf, chosen_rf)
+                    print(
+                        f'WARNING: Invalid ReuseFactor={chosen_rf} in layer "{layer.name}". '
+                        f'Using ReuseFactor={closest_rf} instead. Valid ReuseFactor(s): '
+                        f'{",".join(map(str, valid_rf))}.'
+                    )
+                    layer.set_attr('reuse_factor', closest_rf)
+            else:
+                # Same legality check Dense performs; dense_resource asserts at runtime otherwise.
+                self.set_closest_reuse_factor(layer, recipe['C'], recipe['L1'])
 
     @layer_optimizer(Einsum)
     def init_einsum(self, layer: Einsum) -> None:
@@ -1027,13 +1069,32 @@ class VivadoBackend(FPGABackend):
         if is_gemm_strategy(layer):
             layer.set_attr('strategy', 'gemm')
             return
+        io_type = layer.model.config.get_config_value('IOType')
         strategy: str | None = layer.model.config.get_strategy(layer)
         strategy = strategy.lower() if strategy else strategy
         if not strategy:
-            layer.set_attr('strategy', 'latency')
-            return
+            strategy = 'latency'
+        if io_type == 'io_stream' and strategy in ('latency', 'distributed_arithmetic'):
+            raise Exception(
+                f'Layer "{layer.name}": io_stream Einsum requires Strategy=Resource. '
+                'The single io_stream kernel (nnet::einsum in nnet_einsum_stream.h) only implements '
+                'the Resource contraction core; there is no io_stream Latency path.'
+            )
         if strategy == 'resource':
             layer.set_attr('strategy', 'resource')
+            if io_type == 'io_stream':
+                # The io_stream kernel (nnet_einsum_stream.h) streams whole rows straight out as
+                # they're computed -- no buffered output path. equation_row_plan derives, purely
+                # from the equation's index letters, which operand can supply rows and how the row
+                # loop nests; it raises a clear error itself if neither operand works.
+                from hls4ml.backends.fpga.einsum_utils import equation_row_plan
+
+                equation_row_plan(
+                    equation,
+                    inp0_shape,
+                    inp1_shape,
+                    out_pack=int(layer.get_output_variable().shape[-1]),
+                )
             # einsum_resource gives each multiplier lane a fixed partial sum and walks the
             # contraction axis with the reuse counter, so RF must divide n_contract.
             n_contract = int(recipe['C'])

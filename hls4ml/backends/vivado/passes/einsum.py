@@ -1,7 +1,7 @@
 from math import ceil
 
 from hls4ml.backends.backend import get_backend
-from hls4ml.backends.fpga.einsum_utils import select_row_stream_operand
+from hls4ml.backends.fpga.einsum_utils import equation_row_plan
 from hls4ml.backends.template import FunctionCallTemplate, LayerConfigTemplate
 from hls4ml.model.layers import Einsum
 from hls4ml.utils.transpose_utils import transpose_config_gen
@@ -10,6 +10,10 @@ from .reshaping_templates import transpose_config_template
 
 # Shared Dense template
 # Einsum template
+
+# equation_row_plan moved to hls4ml.backends.fpga.einsum_utils so the Catapult backend can share
+# it too; re-exported here (unused directly in this module beyond the import below) for anything
+# still importing it from this path.
 
 einsum_config_template = """
 struct config{index} {{
@@ -40,10 +44,14 @@ struct config{index} {{
     static const unsigned reuse_factor = {reuse_factor};
     static const unsigned multiplier_limit = {multiplier_limit};
     static const bool store_weights_in_bram = false; // NOT USED
-    // io_stream + Resource: stream operand 0 one row at a time against a buffered operand 1
-    // (see nnet_einsum_stream.h). True only when operand-0 and output transposes are identity.
-    static const bool row_stream = {row_stream};
-    static const unsigned row_stream_operand = {row_stream_operand};
+
+    // io_stream kernel (nnet_einsum_stream.h). row_stream_op says which operand's free axis
+    // supplies rows (0: rows are (i, l0), n_free1 outputs each; 1: rows are (i, l1), n_free0
+    // outputs each). row_major_i_outer says whether the flattened row counter decodes as
+    // i * ROW_COUNT + row_l (true) or row_l * n_inplace + i (false). Both are derived purely from
+    // the equation's index letters -- see equation_row_plan() in the Vivado Einsum pass.
+    static const unsigned row_stream_op = {row_stream_op};
+    static const bool row_major_i_outer = {row_major_i_outer};
 
     template <class x_T, class y_T>
     using product = nnet::product::{product_type}<x_T, y_T>;
@@ -96,38 +104,31 @@ class EinsumConfigTemplate(LayerConfigTemplate):
         total_mults = params['n_free0'] * params['n_free1'] * params['n_contract'] * params['n_inplace']
         params['multiplier_limit'] = ceil(total_mults / params['reuse_factor'])
 
-        # Row streaming: which operand can be streamed one row at a time against the other,
-        # buffered. Shared with the Catapult backend (hls4ml.backends.fpga.einsum_utils) so the
-        # selection logic and its semantics are defined once.
-        row_stream, row_stream_operand = select_row_stream_operand(
-            io_type=io_type,
-            strategy=strategy,
-            n_inplace=node.attributes['n_inplace'],
-            n_contract=int(node.attributes['n_contract']),
-            n_free0=int(node.attributes['n_free0']),
-            n_free1=int(node.attributes['n_free1']),
-            inp0_shape=node.attributes['inp0_shape'],
-            inp1_shape=node.attributes['inp1_shape'],
-            out_shape=node.attributes['out_interpert_shape'],
-            inp0_tpose_idxs=node.attributes['inp0_tpose_idxs'],
-            inp1_tpose_idxs=node.attributes['inp1_tpose_idxs'],
-            out_tpose_idxs=node.attributes['out_tpose_idxs'],
-            in0_pack=int(node.get_input_variable(node.inputs[0]).shape[-1]),
-            in1_pack=int(node.get_input_variable(node.inputs[1]).shape[-1]),
-            out_pack=int(node.get_output_variable().shape[-1]),
-        )
-        params['row_stream'] = 'true' if row_stream else 'false'
-        params['row_stream_operand'] = row_stream_operand
+        n_free0 = int(node.attributes['n_free0'])
+        n_free1 = int(node.attributes['n_free1'])
+        n_contract = int(node.attributes['n_contract'])
+        out_interpert_shape = node.attributes['out_interpert_shape']
+        inp0_shape = node.attributes['inp0_shape']
+        inp1_shape = node.attributes['inp1_shape']
+        inp0_tpose_idxs = node.attributes['inp0_tpose_idxs']
+        inp1_tpose_idxs = node.attributes['inp1_tpose_idxs']
+        out_tpose_idxs = node.attributes['out_tpose_idxs']
+
+        if io_type == 'io_stream' and strategy.lower() == 'resource':
+            # init_einsum already ran equation_row_plan and raised at conversion if it failed, so
+            # this must succeed here.
+            plan = equation_row_plan(node.attributes['equation'], inp0_shape, inp1_shape)
+            params['row_stream_op'] = plan['row_op']
+            params['row_major_i_outer'] = 'true' if plan['row_major_i_outer'] else 'false'
+        else:
+            # io_parallel and/or Latency don't use nnet_einsum_stream.h's kernel; these fields are
+            # unused but must still be defined (referenced as static class members).
+            params['row_stream_op'] = 0
+            params['row_major_i_outer'] = 'true'
 
         einsum_conf = self.template.format(**params)
 
         # inp/out transpose config
-        inp0_shape = node.attributes['inp0_shape']
-        inp1_shape = node.attributes['inp1_shape']
-        out_interpert_shape = node.attributes['out_interpert_shape']
-        inp0_tpose_idxs = node.attributes['inp0_tpose_idxs']
-        inp1_tpose_idxs = node.attributes['inp1_tpose_idxs']
-        out_tpose_idxs = node.attributes['out_tpose_idxs']
         tpose_inp0_config_name = f'config{node.index}_tpose_inp0'
         tpose_inp1_config_name = f'config{node.index}_tpose_inp1'
         tpose_out_conf_name = f'config{node.index}_tpose_out'

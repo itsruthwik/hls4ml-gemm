@@ -3,6 +3,7 @@ from hls4ml.backends.template import FunctionCallTemplate, LayerConfigTemplate
 from hls4ml.model.layers import EinsumDense
 from hls4ml.utils.transpose_utils import transpose_config_gen
 
+from hls4ml.backends.fpga.einsum_utils import equation_row_plan
 from .reshaping_templates import transpose_config_template
 
 # Shared Dense template
@@ -62,6 +63,12 @@ struct config{index} {{
     static const unsigned n_zeros = {nzeros};
     static const unsigned multiplier_limit = DIV_ROUNDUP(n_in * n_out, reuse_factor);
 
+    // io_stream kernel (nnet_einsum_dense_stream.h). row_major_i_outer says whether the flattened
+    // row counter decodes as i * n_free_data + l0 (true) or l0 * n_inplace + i (false); derived
+    // purely from the equation's index letters -- see equation_row_plan() in the Vivado Einsum
+    // pass.
+    static const bool row_major_i_outer = {row_major_i_outer};
+
     template<class x_T, class y_T>
     using product = nnet::product::{product_type}<x_T, y_T>;
 }};
@@ -75,6 +82,7 @@ einsum_dense_da_function_template = 'nnet::einsum_dense<{input_t}, {output_t}, {
 einsum_dense_include_list = [
     'nnet_utils/nnet_einsum_dense.h',
     'nnet_utils/nnet_dense.h',
+    'nnet_utils/nnet_einsum_stream.h',
     'nnet_utils/nnet_einsum_dense_stream.h',
 ]
 
@@ -160,6 +168,19 @@ class EinsumDenseConfigTemplate(LayerConfigTemplate):
         if pf < 0:
             pf = params['n_inplace']
         params['parallelization_factor'] = pf
+
+        if io_type == 'io_stream' and strategy.lower() == 'resource':
+            # init_einsum_dense already ran equation_row_plan and raised at conversion if it
+            # failed (and required row_op == 0: the data operand supplies rows), so this must
+            # succeed here.
+            plan = equation_row_plan(
+                node.attributes['equation'], node.attributes['inp_shape'], node.attributes['kernel_shape']
+            )
+            params['row_major_i_outer'] = 'true' if plan['row_major_i_outer'] else 'false'
+        else:
+            # io_parallel and/or Latency/DA don't use nnet_einsum_dense_stream.h's kernel; this
+            # field is unused but must still be defined (referenced as a static class member).
+            params['row_major_i_outer'] = 'true'
 
         einsum_conf = self.template.format(**params)
 

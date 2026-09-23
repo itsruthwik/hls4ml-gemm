@@ -1,7 +1,7 @@
 from math import ceil
 
 from hls4ml.backends.backend import get_backend
-from hls4ml.backends.fpga.einsum_utils import select_row_stream_operand
+from hls4ml.backends.fpga.einsum_utils import equation_row_plan
 from hls4ml.backends.template import FunctionCallTemplate, LayerConfigTemplate
 from hls4ml.model.layers import Einsum
 
@@ -36,11 +36,14 @@ struct config{index} {{
     static const unsigned strategy = nnet::{strategy};
     static const unsigned reuse_factor = {reuse_factor};
     static const unsigned multiplier_limit = {multiplier_limit};
-    // io_stream + Resource: stream one operand one row at a time against the other,
-    // buffered (see nnet_einsum_stream.h). True only when the streamed operand's and the
-    // output's transposes are identity (ignoring size-1 axes).
-    static const bool row_stream = {row_stream};
-    static const unsigned row_stream_operand = {row_stream_operand};
+
+    // io_stream kernel (nnet_einsum_stream.h). row_stream_op says which operand's free axis
+    // supplies rows (0: rows are (i, l0), n_free1 outputs each; 1: rows are (i, l1), n_free0
+    // outputs each). row_major_i_outer says whether the flattened row counter decodes as
+    // i * ROW_COUNT + row_l (true) or row_l * n_inplace + i (false). Both are derived purely from
+    // the equation's index letters -- see equation_row_plan() in hls4ml.backends.fpga.einsum_utils.
+    static const unsigned row_stream_op = {row_stream_op};
+    static const bool row_major_i_outer = {row_major_i_outer};
 
     template <class x_T, class y_T>
     using product = nnet::product::{product_type}<x_T, y_T>;
@@ -48,9 +51,6 @@ struct config{index} {{
 """
 
 einsum_function_template = 'nnet::einsum<{input0_t}, {input1_t}, {output_t}, {config}>({input0}, {input1}, {output});'
-einsum_stream_function_template = (
-    'nnet::einsum_stream<{input0_t}, {input1_t}, {output_t}, {config}>({input0}, {input1}, {output});'
-)
 
 einsum_include_list = ['nnet_utils/nnet_einsum.h', 'nnet_utils/nnet_einsum_stream.h']
 
@@ -66,14 +66,13 @@ class EinsumConfigTemplate(LayerConfigTemplate):
         strategy = node.attributes['strategy']
         io_type = node.model.config.get_config_value('IOType')
 
-        # Catapult backend supports io_parallel (array) and io_stream (streaming einsum,
-        # the attention 2-operand matmul case); Latency everywhere, and Resource under
-        # io_stream (row-streaming one operand against the other, Dense-style).
+        # Catapult backend supports io_parallel (array core, Latency or Resource) and io_stream
+        # (Resource only -- the one io_stream kernel, nnet_einsum_stream.h, has no Latency path
+        # and no drain fallback). This now matches the Vivado/Vitis backend's accepted set exactly:
+        # io_stream + Latency (and distributed_arithmetic) is rejected earlier, at conversion, by
+        # init_einsum -- see catapult_backend.py -- not here.
         assert io_type in ('io_parallel', 'io_stream'), 'Einsum layer supports io_parallel and io_stream'
         assert strategy.lower() in ('latency', 'resource'), 'Einsum layer supports Latency and Resource strategy'
-        assert strategy.lower() == 'latency' or io_type == 'io_stream', (
-            'Einsum layer only supports Resource strategy under io_stream for now'
-        )
 
         # Einsum config
         params = default_params.copy()
@@ -106,28 +105,23 @@ class EinsumConfigTemplate(LayerConfigTemplate):
                 stacklevel=2,
             )
 
-        # Row streaming: which operand can be streamed one row at a time against the other,
-        # buffered. Shared with the Vivado/Vitis backend (hls4ml.backends.fpga.einsum_utils) so
-        # the selection logic and its semantics are defined once.
-        row_stream, row_stream_operand = select_row_stream_operand(
-            io_type=io_type,
-            strategy=strategy,
-            n_inplace=node.attributes['n_inplace'],
-            n_contract=int(node.attributes['n_contract']),
-            n_free0=int(node.attributes['n_free0']),
-            n_free1=int(node.attributes['n_free1']),
-            inp0_shape=node.attributes['inp0_shape'],
-            inp1_shape=node.attributes['inp1_shape'],
-            out_shape=node.attributes['out_interpert_shape'],
-            inp0_tpose_idxs=node.attributes['inp0_tpose_idxs'],
-            inp1_tpose_idxs=node.attributes['inp1_tpose_idxs'],
-            out_tpose_idxs=node.attributes['out_tpose_idxs'],
-            in0_pack=int(node.get_input_variable(node.inputs[0]).shape[-1]),
-            in1_pack=int(node.get_input_variable(node.inputs[1]).shape[-1]),
-            out_pack=int(node.get_output_variable().shape[-1]),
-        )
-        params['row_stream'] = 'true' if row_stream else 'false'
-        params['row_stream_operand'] = row_stream_operand
+        if io_type == 'io_stream' and strategy.lower() == 'resource':
+            # init_einsum already ran equation_row_plan and raised at conversion if it failed, so
+            # this must succeed here.
+            plan = equation_row_plan(
+                node.attributes['equation'],
+                node.attributes['inp0_shape'],
+                node.attributes['inp1_shape'],
+                out_pack=int(node.get_output_variable().shape[-1]),
+            )
+            params['row_stream_op'] = plan['row_op']
+            params['row_major_i_outer'] = 'true' if plan['row_major_i_outer'] else 'false'
+        else:
+            # io_parallel and/or Latency don't use nnet_einsum_stream.h's row-streaming kernel;
+            # these fields are unused but must still be defined (referenced as static class
+            # members).
+            params['row_stream_op'] = 0
+            params['row_major_i_outer'] = 'true'
 
         einsum_conf = self.template.format(**params)
 
@@ -168,10 +162,9 @@ class EinsumFunctionTemplate(FunctionCallTemplate):
         params['output'] = node.get_output_variable().name
         # A gemm_ip Einsum never reaches this template: LowerEinsumToGemm lowers it
         # to a Gemm node in the IR. This template only serves the baseline paths —
-        # streaming (io_stream) and the flat-array einsum (io_parallel).
-        io_stream = node.model.config.get_config_value('IOType') == 'io_stream'
-        if io_stream:
-            return einsum_stream_function_template.format(**params)
+        # streaming (io_stream) and the flat-array einsum (io_parallel). Both call the same
+        # nnet::einsum name (overload resolution picks the ac_channel or the flat-array
+        # version), mirroring the Vivado/Vitis backend.
         return self.template.format(**params)
 
 

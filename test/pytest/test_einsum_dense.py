@@ -31,6 +31,8 @@ test_root_path = Path(__file__).parent
         ('...abcd,bcde->...aeb', (5, 4, 3, 2), (5, 6, 4), 'ab'),
         ('...abcd,bcde->...aeb', (5, 4, 3, 2), (5, 6, 4), 'a'),
         ('bqd,dk->bqk', (8, 4), (8, 5), None),
+        # n_inplace > 1: one kernel slice per 'a', so a row must read its own slice
+        ('...abc,acd->...abd', (3, 4, 5), (3, 4, 6), None),
     ],
 )
 def test_einsum_dense(test_case_id, backend, io_type, strategy, operation):

@@ -31,7 +31,13 @@ class ApplyResourceStrategy(OptimizerPass):
             # (n_in, n_out) latency-layout matrix per in-place slice. dense_resource reads (n_out, n_in).
             w = node.weights['weight'].data
             assert w.ndim == 3, f'EinsumDense weight expected 3-D (I, C, L1), got shape {w.shape}'
-            node.weights['weight'].data = np.transpose(w, axes=[0, 2, 1])
+            w = np.transpose(w, axes=[0, 2, 1])  # (I, C, L1) -> (I, L1, C)
+
+            # Single (I, L1, C) Resource layout for both io types: the io_stream kernel
+            # (nnet_einsum_dense_stream.h) computes each row with the same dense_resource
+            # kernel the io_parallel array core uses (nnet_einsum_dense.h), so it reads
+            # weights in the identical layout -- no separate io_stream permutation.
+            node.weights['weight'].data = w
         elif isinstance(node, Conv1D):
             node.weights['weight'].data = np.transpose(node.weights['weight'].data, axes=[2, 0, 1])  # (W,C,F) => (F,W,C)
         elif isinstance(node, SeparableConv1D):
