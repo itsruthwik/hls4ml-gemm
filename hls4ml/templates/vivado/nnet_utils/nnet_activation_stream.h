@@ -134,7 +134,7 @@ void softmax_latency(hls::stream<data_T> &data, hls::stream<res_T> &res) {
     typename CONFIG_T::inv_inp_t exp_sum(0);
 SoftmaxExpLoop:
     for (unsigned i = 0; i < CONFIG_T::n_in / data_T::size; i++) {
-        #pragma HLS PIPELINE II=ii
+        #pragma HLS PIPELINE II=ii rewind
 
         data_T in_pack = data.read();
     SoftmaxExpPackLoop:
@@ -193,7 +193,7 @@ void softmax_stable(hls::stream<data_T> &data, hls::stream<res_T> &res) {
 #pragma HLS ARRAY_PARTITION variable=data_array complete
 SoftmaxArrayLoop:
     for (unsigned i = 0; i < CONFIG_T::n_in / data_T::size; i++) {
-        #pragma HLS PIPELINE II=ii
+        #pragma HLS PIPELINE II=ii rewind
 
         data_T in_pack = data.read();
     SoftmaxArrayPackLoop:
