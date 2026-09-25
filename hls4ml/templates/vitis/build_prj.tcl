@@ -99,6 +99,39 @@ proc add_vcd_instructions_tcl {} {
     file rename -force $temp $filename
 }
 
+proc add_vcd_dump_instructions_tcl {} {
+    # Dump the DUT's top-level AXI-stream handshakes (ap_clk, *_TVALID, *_TREADY) to
+    # ${project_name}.vcd during the cosim itself, so per-frame latency and interval can be
+    # measured from the real simulation without re-running xsim (the cosim's own .wdb has
+    # no reader outside the GUI). Only these few signals are logged; the run is unchanged.
+    set tcldir [file dirname [info script]]
+    source [file join $tcldir project.tcl]
+
+    set filename ${project_name}_prj/solution1/sim/verilog/${project_name}.tcl
+    set timestamp [clock format [clock seconds] -format {%Y%m%d%H%M%S}]
+    set temp     $filename.new.$timestamp
+    set dut /apatb_${project_name}_top/AESL_inst_${project_name}
+
+    set in  [open $filename r]
+    set out [open $temp     w]
+    while {[gets $in line] != -1} {
+        if {[string equal "$line" "run all"]} {
+            puts $out "open_vcd ${project_name}.vcd"
+            puts $out "log_vcd $dut/ap_clk"
+            puts $out "foreach s \[get_objects -quiet $dut/*_TVALID $dut/*_TREADY\] { log_vcd \$s }"
+            puts $out "run all"
+            puts $out "flush_vcd"
+            puts $out "close_vcd"
+            continue
+        }
+        puts $out $line
+    }
+    close $in
+    close $out
+    file delete -force $filename
+    file rename -force $temp $filename
+}
+
 proc report_time { op_name time_start time_end } {
     set time_taken [expr $time_end - $time_start]
     set time_s [expr ($time_taken / 1000) % 60]
@@ -194,6 +227,7 @@ if {$opt(cosim)} {
     }
 
     remove_recursive_log_wave
+    add_vcd_dump_instructions_tcl
     set old_pwd [pwd]
     cd ${project_name}_prj/solution1/sim/verilog/
     source run_sim.tcl
