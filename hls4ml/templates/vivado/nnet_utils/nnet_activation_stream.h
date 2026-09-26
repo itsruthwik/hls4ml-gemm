@@ -349,6 +349,10 @@ void softmax_argmax(hls::stream<data_T> &data, hls::stream<res_T> &res) {
 }
 
 template <class data_T, class res_T, typename CONFIG_T> void softmax(hls::stream<data_T> &data, hls::stream<res_T> &res) {
+    // Inline the dispatcher: otherwise it is the dataflow process and, being an
+    // unpipelined wrapper around the kernel, it re-runs the kernel's full latency
+    // every frame; inlining makes the kernel's rewound row loop the process body.
+    #pragma HLS INLINE
     assert(CONFIG_T::axis == -1);
 
     switch (CONFIG_T::implementation) {

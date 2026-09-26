@@ -14,6 +14,8 @@
 
 // hls-fpga-machine-learning insert layer-config
 
+// hls-fpga-machine-learning insert gemm-ip
+
 // hls-fpga-machine-learning insert namespace-end
 
 #endif

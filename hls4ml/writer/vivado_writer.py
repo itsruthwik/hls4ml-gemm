@@ -36,6 +36,9 @@ class VivadoWriter(Writer):
             'layer_name': node.name,
             'gemm_ip_id': node.name,
             'gemm_ip_index': node.index,
+            # The one function the firmware calls for this node (io_stream): the package
+            # must define exactly this name on packed bit streams (see nnet_gemm_pack.h).
+            'function': f'gemm_stream_{node.name}',
             'interface': interface,
             'protocol': VivadoWriter._gemm_ip_protocol(interface, gemm_ip_weight_layout(node)),
             'blackbox': VivadoWriter._gemm_ip_blackbox(node),
@@ -696,6 +699,9 @@ class VivadoWriter(Writer):
                         newline += '// ' + layer.name + '\n'
                         newline += config + '\n'
 
+            elif '// hls-fpga-machine-learning insert gemm-ip' in line:
+                newline = line + self._gemm_ip_hook(model)
+
             elif '// hls-fpga-machine-learning insert namespace-start' in line:
                 newline = ''
 
@@ -715,6 +721,58 @@ class VivadoWriter(Writer):
             fout.write(newline)
         f.close()
         fout.close()
+
+    def _gemm_ip_stream_nodes(self, model):
+        """The io_stream GEMM nodes whose IP the firmware calls as gemm_stream_<name>."""
+        if model.config.get_config_value('IOType') != 'io_stream':
+            return []
+        return [node for node in model.get_layers()
+                if isinstance(node, Gemm) and node.get_attr('strategy') == 'gemm']
+
+    def _gemm_ip_hook(self, model):
+        """Text for the gemm-ip hook in parameters.h, after the layer configs.
+
+        With a package (-DGEMM_IP_HEADER) the package's combined header supplies every
+        gemm_stream_<name>: a declaration for an RTL blackbox, a definition in terms of
+        the node's config for a soft-logic target -- which is why it must come after the
+        configs. Without a package, csim gets the same names defined here on the
+        behavioral kernels (nnet_gemm_pack.h), and synthesis gets declarations only, so
+        a package-less synthesis fails loudly at link rather than silently.
+        """
+        nodes = self._gemm_ip_stream_nodes(model)
+        if not nodes:
+            return ''
+        decls, defs = [], []
+        for node in nodes:
+            fn = f'gemm_stream_{node.name}'
+            out_t = node.get_output_variable().type.name
+            cfg = f'config{node.index}'
+            if node.get_attr('weights_in_core', True):
+                in_t = node.get_input_variable().type.name
+                sig = (f'hls::stream<ap_uint<nnet::gemm_packed_bits<{in_t}>::value> > &a, '
+                       f'hls::stream<ap_uint<nnet::gemm_packed_bits<{out_t}>::value> > &p')
+                body = f'    nnet::gemm_stream_packed_const_weights<{in_t}, {out_t}, {cfg}>(a, p);'
+            else:
+                in0_t = node.get_input_variable(node.inputs[0]).type.name
+                in1_t = node.get_input_variable(node.inputs[1]).type.name
+                sig = (f'hls::stream<ap_uint<nnet::gemm_packed_bits<{in0_t}>::value> > &a, '
+                       f'hls::stream<ap_uint<nnet::gemm_packed_bits<{in1_t}>::value> > &b, '
+                       f'hls::stream<ap_uint<nnet::gemm_packed_bits<{out_t}>::value> > &p')
+                body = f'    nnet::gemm_stream_packed<{in0_t}, {in1_t}, {out_t}, {cfg}>(a, b, p);'
+            decls.append(f'void {fn}({sig});')
+            defs.append(f'inline void {fn}({sig}) {{\n{body}\n}}')
+        return (
+            '// GEMM IP entry points, one concrete function per io_stream GEMM node.\n'
+            '#if defined(GEMM_IP_HEADER)\n'
+            '#include "gemm_ip_combined.h"\n'
+            '#elif !defined(__SYNTHESIS__)\n'
+            '// no package: csim on the behavioral kernels\n'
+            + '\n'.join(defs) + '\n'
+            '#else\n'
+            '// no package under synthesis: declarations only -> loud link failure (intended)\n'
+            + '\n'.join(decls) + '\n'
+            '#endif\n'
+        )
 
     def _is_gemm_ip_weight(self, layer, weights):
         if not bool(layer.get_attr('strategy') == 'gemm'):

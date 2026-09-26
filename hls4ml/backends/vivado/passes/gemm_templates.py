@@ -130,9 +130,20 @@ gemm_const_weights_config_template = """struct config{index} : nnet::gemm_config
 # Bias, when this node has one, is read through the config (CONFIG_T::gemm_bias(),
 # injected alongside the weight ROM) rather than a function argument -- the same
 # mechanism the baked weight matrix uses, so there is only ever this one call form.
-gemm_stream_packed_function_template = (
-    'nnet::gemm_stream_const_weights<{input_t}, {output_t}, {config}>({input}, {output});'
-)
+# io_stream: the node's IP is the concrete function gemm_stream_<name> on packed bit
+# streams (an RTL blackbox, or a soft-logic definition from the package / the csim
+# stubs). It is called DIRECTLY from the top dataflow region -- no template dispatch,
+# no helper around the call (Vitis drops the blackbox's ap_ctrl adapter when the call
+# arrives through an inlined function) -- with hls4ml's own pack/unpack processes
+# converting the array streams right around it (nnet_gemm_pack.h).
+gemm_stream_packed_function_template = """
+    hls::stream<ap_uint<nnet::gemm_packed_bits<{input_t}>::value> > {output}_a_bits("{output}_a_bits");
+    #pragma HLS STREAM variable={output}_a_bits depth=2
+    hls::stream<ap_uint<nnet::gemm_packed_bits<{output_t}>::value> > {output}_p_bits("{output}_p_bits");
+    #pragma HLS STREAM variable={output}_p_bits depth=2
+    nnet::pack_stream<{input_t}, {config}::gemm_m>({input}, {output}_a_bits);
+    gemm_stream_{name}({output}_a_bits, {output}_p_bits);
+    nnet::unpack_stream<{output_t}, {config}::gemm_m>({output}_p_bits, {output});"""
 
 
 # Bias, when this node has one, is read through the config (CONFIG_T::gemm_bias(),
@@ -298,9 +309,17 @@ gemm_stream_two_op_function_template = """
 # a function-signature parameter at all, on either path), so this and the n_inplace
 # > 1 template above are now identical in shape; both are what Vitis was flagging as
 # a non-canonical dataflow region (214-114 / 214-169 / 200-471).
-gemm_stream_two_op_single_function_template = (
-    'nnet::gemm_stream<{input0_t}, {input1_t}, {output_t}, config{index}>({input0}, {input1}, {output});'
-)
+gemm_stream_two_op_single_function_template = """
+    hls::stream<ap_uint<nnet::gemm_packed_bits<{input0_t}>::value> > {output}_a_bits("{output}_a_bits");
+    #pragma HLS STREAM variable={output}_a_bits depth=2
+    hls::stream<ap_uint<nnet::gemm_packed_bits<{input1_t}>::value> > {output}_b_bits("{output}_b_bits");
+    #pragma HLS STREAM variable={output}_b_bits depth=2
+    hls::stream<ap_uint<nnet::gemm_packed_bits<{output_t}>::value> > {output}_p_bits("{output}_p_bits");
+    #pragma HLS STREAM variable={output}_p_bits depth=2
+    nnet::pack_stream<{input0_t}, config{index}::gemm_m>({input0}, {output}_a_bits);
+    nnet::pack_stream<{input1_t}, (config{index}::b_row_major ? config{index}::gemm_k : config{index}::gemm_n)>({input1}, {output}_b_bits);
+    gemm_stream_{name}({output}_a_bits, {output}_b_bits, {output}_p_bits);
+    nnet::unpack_stream<{output_t}, config{index}::gemm_m>({output}_p_bits, {output});"""
 
 
 def _format_two_operand(node):
@@ -408,7 +427,8 @@ class GemmFunctionTemplate(FunctionCallTemplate):
     def __init__(self):
         super().__init__(
             Gemm,
-            include_header=['nnet_utils/nnet_gemm_stream.h', 'nnet_utils/nnet_gemm_ip.h'],
+            include_header=['nnet_utils/nnet_gemm_stream.h', 'nnet_utils/nnet_gemm_ip.h',
+                            'nnet_utils/nnet_gemm_pack.h'],
         )
         self.template = gemm_array_function_template
 
@@ -431,6 +451,7 @@ class GemmFunctionTemplate(FunctionCallTemplate):
                 b_index = f'(i * config{idx}::gemm_n + l1) * config{idx}::gemm_k + c'
             two_op = {
                 'index': node.index,
+                'name': node.name,
                 'input0': inp0.name,
                 'input1': inp1.name,
                 'output': out_var.name,
@@ -451,6 +472,7 @@ class GemmFunctionTemplate(FunctionCallTemplate):
             return gemm_stream_two_op_function_template.format(**two_op)
 
         params = self._default_function_params(node)
+        params['name'] = node.name
         params['w'] = node.get_weights('weight').name
         params['n_out'] = node.get_attr('n_out')
         params['weight_t'] = node.get_weights('weight').type.name

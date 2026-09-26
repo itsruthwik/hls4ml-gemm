@@ -29,12 +29,11 @@
 // Always include the behavioral csim model first (the no-package csim path uses it).
 #include "nnet_gemm_behavioral.h"
 
-// The external package defines the four names for synthesis / cosim.
-#ifdef GEMM_IP_HEADER_VALUE
-#include GEMM_IP_HEADER_VALUE
-#elif defined(GEMM_IP_HEADER)
-#include "gemm_ip_combined.h"
-#endif
+// The external package (gemm_ip_combined.h) is included from parameters.h, AFTER the
+// layer configs: each io_stream GEMM node's IP is a concrete function
+// gemm_stream_<layer> on packed bit streams (see nnet_gemm_pack.h) that a soft-logic
+// target defines in terms of the node's config struct.
+#include "nnet_gemm_pack.h"
 
 namespace nnet {
 
