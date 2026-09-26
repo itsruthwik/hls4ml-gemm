@@ -27,14 +27,18 @@ template <class T> struct gemm_packed_bits {
 // never a value conversion), one beat per cycle, free-running across invocations.
 template <class data_T, unsigned N_BEATS>
 void pack_stream(hls::stream<data_T> &in, hls::stream<ap_uint<gemm_packed_bits<data_T>::value> > &out) {
-    const unsigned W = data_T::value_type::width;
-PACK: for (unsigned i = 0; i < N_BEATS; i++) {
-        #pragma HLS PIPELINE II=1 rewind
+    // Same shape as nnet::clone_stream: the loop is the whole function body and
+    // carries a plain PIPELINE, which Vitis auto-rewinds into a free-running process
+    // with no per-invocation handshake (an explicit `rewind` left it un-rewound).
+PACK:
+    for (int i = 0; i < (int)N_BEATS; i++) {
+        #pragma HLS PIPELINE
         data_T beat = in.read();
         ap_uint<gemm_packed_bits<data_T>::value> bits;
-        for (unsigned j = 0; j < data_T::size; j++) {
+        for (int j = 0; j < (int)data_T::size; j++) {
             #pragma HLS UNROLL
-            bits.range(j * W + W - 1, j * W) = beat[j].range(W - 1, 0);
+            bits.range(j * data_T::value_type::width + data_T::value_type::width - 1,
+                       j * data_T::value_type::width) = beat[j].range(data_T::value_type::width - 1, 0);
         }
         out.write(bits);
     }
@@ -45,15 +49,16 @@ PACK: for (unsigned i = 0; i < N_BEATS; i++) {
 // pattern with .range() and never re-converts the value.
 template <class res_T, unsigned N_BEATS>
 void unpack_stream(hls::stream<ap_uint<gemm_packed_bits<res_T>::value> > &in, hls::stream<res_T> &out) {
-    const unsigned W = res_T::value_type::width;
-UNPACK: for (unsigned i = 0; i < N_BEATS; i++) {
-        #pragma HLS PIPELINE II=1 rewind
+UNPACK:
+    for (int i = 0; i < (int)N_BEATS; i++) {
+        #pragma HLS PIPELINE
         ap_uint<gemm_packed_bits<res_T>::value> bits = in.read();
         res_T beat;
-        for (unsigned j = 0; j < res_T::size; j++) {
+        for (int j = 0; j < (int)res_T::size; j++) {
             #pragma HLS UNROLL
             typename res_T::value_type v;
-            v.range(W - 1, 0) = bits.range(j * W + W - 1, j * W);
+            v.range(res_T::value_type::width - 1, 0) =
+                bits.range(j * res_T::value_type::width + res_T::value_type::width - 1, j * res_T::value_type::width);
             beat[j] = v;
         }
         out.write(beat);
