@@ -28,7 +28,8 @@ ComputeIndex:
 template <class data_T, class res_T, typename CONFIG_T>
 void conv_2d_encoded_cl(
     ac_channel<data_T> &data, ac_channel<res_T> &res,
-    typename CONFIG_T::weight_t weights[CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan * CONFIG_T::n_filt],
+    typename weight_store<typename CONFIG_T::mult_config>::type
+        weights[weight_store<typename CONFIG_T::mult_config>::size],
     typename CONFIG_T::bias_t biases[CONFIG_T::n_filt]) {
     assert(CONFIG_T::pad_top == 0 && CONFIG_T::pad_bottom == 0 && CONFIG_T::pad_left == 0 && CONFIG_T::pad_right == 0);
     assert(CONFIG_T::filt_height == CONFIG_T::filt_width);
@@ -65,7 +66,8 @@ ReadInputHeight:
 template <class data_T, class res_T, typename CONFIG_T>
 void conv_2d_buffer_cl(
     ac_channel<data_T> &data, ac_channel<res_T> &res,
-    typename CONFIG_T::weight_t weights[CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan * CONFIG_T::n_filt],
+    typename weight_store<typename CONFIG_T::mult_config>::type
+        weights[weight_store<typename CONFIG_T::mult_config>::size],
     typename CONFIG_T::bias_t biases[CONFIG_T::n_filt]) {
     assert(CONFIG_T::pad_top == 0 && CONFIG_T::pad_bottom == 0 && CONFIG_T::pad_left == 0 && CONFIG_T::pad_right == 0);
 
@@ -94,7 +96,8 @@ ReadInputHeight:
 template <class data_T, class res_T, typename CONFIG_T>
 void conv_2d_cl(
     ac_channel<data_T> &data, ac_channel<res_T> &res,
-    typename CONFIG_T::weight_t weights[CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan * CONFIG_T::n_filt],
+    typename weight_store<typename CONFIG_T::mult_config>::type
+        weights[weight_store<typename CONFIG_T::mult_config>::size],
     typename CONFIG_T::bias_t biases[CONFIG_T::n_filt]) {
     switch (CONFIG_T::implementation) {
     case conv_implementation::linebuffer:

@@ -1,4 +1,5 @@
 from hls4ml.backends.backend import get_backend
+from hls4ml.backends.catapult.passes.resource_strategy import block_major_weight_keys
 from hls4ml.backends.template import FunctionCallTemplate, LayerConfigTemplate
 from hls4ml.model.layers import (
     Conv1D,
@@ -13,6 +14,7 @@ from hls4ml.model.layers import (
 # Shared multiplication template
 
 conv_mult_config_template = """struct config{index}_mult : nnet::dense_config {{
+    static const bool block_major_weights = {block_major};
     static const unsigned n_in = {n_in};
     static const unsigned n_out = {n_out};
     static const unsigned gemm_m = {gemm_m};
@@ -131,6 +133,7 @@ class Conv1DConfigTemplate(LayerConfigTemplate):
         conv_config = self.template.format(**params)
 
         mult_params = self._default_config_params(node)
+        mult_params['block_major'] = str('weight' in block_major_weight_keys(node)).lower()
         _latency_inner_mult_reuse(node, mult_params)
         mult_params['n_in'] = node.get_attr('n_chan') * node.get_attr('filt_width')
         mult_params['n_out'] = node.get_attr('n_filt')
@@ -272,6 +275,7 @@ class Conv2DConfigTemplate(LayerConfigTemplate):
         conv_config = self.template.format(**params)
 
         mult_params = self._default_config_params(node)
+        mult_params['block_major'] = str('weight' in block_major_weight_keys(node)).lower()
         _latency_inner_mult_reuse(node, mult_params)
         mult_params['n_in'] = node.get_attr('n_chan') * node.get_attr('filt_height') * node.get_attr('filt_width')
         mult_params['n_out'] = node.get_attr('n_filt')
@@ -366,6 +370,7 @@ class SeparableConv1DConfigTemplate(LayerConfigTemplate):
 
         # Depthwise mult config
         mult_params = self._default_config_params(node)
+        mult_params['block_major'] = str('weight' in block_major_weight_keys(node)).lower()
         _latency_inner_mult_reuse(node, mult_params)
         mult_params['index'] = str(node.index) + '_depthwise'
         mult_params['n_in'] = node.get_attr('n_chan') * node.get_attr('filt_width')
@@ -404,6 +409,7 @@ class SeparableConv1DConfigTemplate(LayerConfigTemplate):
 
         # Pointwise mult config
         mult_params = self._default_config_params(node)
+        mult_params['block_major'] = str('weight' in block_major_weight_keys(node)).lower()
         _latency_inner_mult_reuse(node, mult_params)
         mult_params['index'] = str(node.index) + '_pointwise'
         mult_params['n_in'] = node.get_attr('n_chan')
@@ -489,6 +495,7 @@ class SeparableConv2DConfigTemplate(LayerConfigTemplate):
 
         # Depthwise mult config
         mult_params = self._default_config_params(node)
+        mult_params['block_major'] = str('weight' in block_major_weight_keys(node)).lower()
         _latency_inner_mult_reuse(node, mult_params)
         mult_params['index'] = str(node.index) + '_depthwise'
         mult_params['n_in'] = node.get_attr('n_chan') * node.get_attr('filt_height') * node.get_attr('filt_width')
@@ -534,6 +541,7 @@ class SeparableConv2DConfigTemplate(LayerConfigTemplate):
 
         # Pointwise mult config
         mult_params = self._default_config_params(node)
+        mult_params['block_major'] = str('weight' in block_major_weight_keys(node)).lower()
         _latency_inner_mult_reuse(node, mult_params)
         mult_params['index'] = str(node.index) + '_pointwise'
         mult_params['n_in'] = node.get_attr('n_chan')

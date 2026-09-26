@@ -1,6 +1,7 @@
 import warnings
 
 from hls4ml.backends.backend import get_backend
+from hls4ml.backends.catapult.passes.resource_strategy import block_major_weight_keys
 from hls4ml.backends.fpga.einsum_utils import equation_row_plan
 from hls4ml.backends.template import FunctionCallTemplate, LayerConfigTemplate
 from hls4ml.model.layers import EinsumDense
@@ -62,6 +63,7 @@ dense_config_template = """struct config{index}_dense : nnet::dense_config {{
     static const unsigned strategy = nnet::{strategy};
     static const unsigned n_zeros = {nzeros};
     static const unsigned multiplier_limit = DIV_ROUNDUP(n_in * n_out, reuse_factor) - n_zeros / reuse_factor;
+    static const bool block_major_weights = {block_major};
     typedef {accum_t.name} accum_t;
     typedef {bias_t.name} bias_t;
     typedef {weight_t.name} weight_t;
@@ -91,6 +93,7 @@ class EinsumDenseConfigTemplate(LayerConfigTemplate):
         dense_params['strategy'] = strategy
         dense_params['n_in'] = node.attributes['n_contract']
         dense_params['n_out'] = node.attributes['n_free_kernel']
+        dense_params['block_major'] = str('weight' in block_major_weight_keys(node)).lower()
         dense_params['gemm_m'] = node.get_attr('gemm_m', node.attributes['n_free_data'])
         dense_params['gemm_k'] = node.get_attr('gemm_k', node.attributes['n_contract'])
         dense_params['gemm_n'] = node.get_attr('gemm_n', node.attributes['n_free_kernel'])

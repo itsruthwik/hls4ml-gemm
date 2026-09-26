@@ -48,6 +48,20 @@ template <typename T, unsigned N> struct array {
     bool operator!=(const array &other) const { return !(*this == other); }
 };
 
+// Storage of the weights one nnet::dense_resource call reads. Flat by default; when the writer
+// stores a layer's weights block-major (CONFIG_T::block_major_weights) they are reuse_factor
+// words of n_in*n_out/reuse_factor weights, word ir holding everything ReuseLoop iteration ir
+// reads. This is the Catapult counterpart of the Vivado ARRAY_RESHAPE block factor=block_factor:
+// one wide read per iteration from an array that is reuse_factor deep.
+template <class CONFIG_T, bool packed = CONFIG_T::block_major_weights> struct weight_store {
+    typedef typename CONFIG_T::weight_t type;
+    static const unsigned size = CONFIG_T::n_in * CONFIG_T::n_out;
+};
+template <class CONFIG_T> struct weight_store<CONFIG_T, true> {
+    typedef array<typename CONFIG_T::weight_t, CONFIG_T::n_in * CONFIG_T::n_out / CONFIG_T::reuse_factor> type;
+    static const unsigned size = CONFIG_T::reuse_factor;
+};
+
 // Generic lookup-table implementation, for use in approximations of math functions
 template <typename T, unsigned N, T (*func)(T)> class lookup_table {
   public:

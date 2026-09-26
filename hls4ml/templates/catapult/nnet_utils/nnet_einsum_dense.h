@@ -14,7 +14,8 @@ template <class data_T, class res_T, typename CONFIG_T>
 void einsum_dense(
     data_T data[CONFIG_T::n_free_data * CONFIG_T::n_contract * CONFIG_T::n_inplace],
     res_T res[CONFIG_T::n_free_data * CONFIG_T::n_free_kernel * CONFIG_T::n_inplace],
-    typename CONFIG_T::dense_conf::weight_t weights[CONFIG_T::n_free_kernel * CONFIG_T::n_contract * CONFIG_T::n_inplace],
+    typename weight_store<typename CONFIG_T::dense_conf>::type
+        weights[weight_store<typename CONFIG_T::dense_conf>::size * CONFIG_T::n_inplace],
     typename CONFIG_T::dense_conf::bias_t biases[CONFIG_T::n_free_data * CONFIG_T::n_free_kernel * CONFIG_T::n_inplace]) {
     data_T inp_tpose[CONFIG_T::n_free_data * CONFIG_T::n_contract * CONFIG_T::n_inplace];
     res_T out_tpose[CONFIG_T::n_free_data * CONFIG_T::n_free_kernel * CONFIG_T::n_inplace];
@@ -26,6 +27,7 @@ void einsum_dense(
     constexpr unsigned L0 = CONFIG_T::n_free_data;
     constexpr unsigned L1 = CONFIG_T::n_free_kernel;
     constexpr unsigned C = CONFIG_T::n_contract;
+    constexpr unsigned W = weight_store<typename CONFIG_T::dense_conf>::size; // weight words per in-place slice
     constexpr unsigned I = CONFIG_T::n_inplace;
 
     constexpr int pf_unroll = CONFIG_T::parallelization_factor;
@@ -35,7 +37,7 @@ void einsum_dense(
         #pragma hls_unroll
         for (unsigned i = 0; i < I; i++) {
             dense<data_T, res_T, typename CONFIG_T::dense_conf>(&inp_tpose[(i * L0 + l0) * C], out_buffer,
-                                                                &weights[(i * L1 * C)], &biases[((i * L0 + l0) * L1)]);
+                                                                &weights[i * W], &biases[((i * L0 + l0) * L1)]);
             #pragma hls_unroll
             for (unsigned j = 0; j < L1; j++) {
                 out_tpose[(i * L0 + l0) * L1 + j] = out_buffer[j];

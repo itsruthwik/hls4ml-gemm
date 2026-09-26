@@ -27,6 +27,9 @@ struct dense_config {
     static const unsigned reuse_factor = 1;
     static const bool store_weights_in_bram = false;
     static const unsigned n_zeros = 0;
+    // True when the writer stores this config's weights block-major as packed words (see
+    // nnet::weight_store); the layer config templates that get that layout set it.
+    static const bool block_major_weights = false;
     // partitioning arrays cyclically to go with roll factors?
     // Product function to use
     template <class x_T, class y_T> using product = nnet::product::mult<x_T, y_T>;
@@ -34,9 +37,9 @@ struct dense_config {
 
 template <class data_T, class res_T, typename CONFIG_T>
 void dense(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_out],
-           typename CONFIG_T::weight_t weights[CONFIG_T::n_in * CONFIG_T::n_out],
+           typename weight_store<CONFIG_T>::type weights[weight_store<CONFIG_T>::size],
            typename CONFIG_T::bias_t biases[CONFIG_T::n_out]) {
-    if (CONFIG_T::strategy == nnet::latency) {
+    if constexpr (CONFIG_T::strategy == nnet::latency) { // dense_latency takes flat weights only
         dense_latency<data_T, res_T, CONFIG_T>(data, res, weights, biases);
     } else {
         dense_resource<data_T, res_T, CONFIG_T>(data, res, weights, biases);

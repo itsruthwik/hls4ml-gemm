@@ -51,7 +51,8 @@ template <class data_T, class res_T, typename CONFIG_T>
 void conv_2d_full(
     data_T data[CONFIG_T::in_height * CONFIG_T::in_width * CONFIG_T::n_chan],
     res_T res[CONFIG_T::out_height * CONFIG_T::out_width * CONFIG_T::n_filt],
-    typename CONFIG_T::weight_t weights[CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan * CONFIG_T::n_filt],
+    typename weight_store<typename CONFIG_T::mult_config>::type
+        weights[weight_store<typename CONFIG_T::mult_config>::size],
     typename CONFIG_T::bias_t biases[CONFIG_T::n_filt]) {
     data_T data_conv[CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan * CONFIG_T::out_height *
                      CONFIG_T::out_width];
@@ -106,7 +107,8 @@ template <class data_T, class res_T, typename CONFIG_T>
 void conv_2d_resource_cf(
     data_T data[CONFIG_T::n_chan * CONFIG_T::in_height * CONFIG_T::in_width],
     res_T res[CONFIG_T::out_height * CONFIG_T::out_width * CONFIG_T::n_filt],
-    typename CONFIG_T::weight_t weights[CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan * CONFIG_T::n_filt],
+    typename weight_store<typename CONFIG_T::mult_config>::type
+        weights[weight_store<typename CONFIG_T::mult_config>::size],
     typename CONFIG_T::bias_t biases[CONFIG_T::n_filt]) {
     const int nin = CONFIG_T::n_chan * CONFIG_T::filt_width;
     const int nout = CONFIG_T::n_filt;
@@ -185,7 +187,8 @@ template <class data_T, class res_T, typename CONFIG_T>
 void conv_2d_resource_cl(
     data_T data[CONFIG_T::in_height * CONFIG_T::in_width * CONFIG_T::n_chan],
     res_T res[CONFIG_T::out_height * CONFIG_T::out_width * CONFIG_T::n_filt],
-    typename CONFIG_T::weight_t weights[CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan * CONFIG_T::n_filt],
+    typename weight_store<typename CONFIG_T::mult_config>::type
+        weights[weight_store<typename CONFIG_T::mult_config>::size],
     typename CONFIG_T::bias_t biases[CONFIG_T::n_filt]) {
     const int nin = CONFIG_T::n_chan * CONFIG_T::filt_width;
     const int nout = CONFIG_T::n_filt;
@@ -213,7 +216,8 @@ HeightLoop:
 template <class data_T, class res_T, typename CONFIG_T>
 void pointwise_conv_2d_resource_cl(data_T data[CONFIG_T::in_height * CONFIG_T::in_width * CONFIG_T::n_chan],
                                    res_T res[CONFIG_T::out_height * CONFIG_T::out_width * CONFIG_T::n_filt],
-                                   typename CONFIG_T::weight_t weights[CONFIG_T::n_chan * CONFIG_T::n_filt],
+                                   typename weight_store<typename CONFIG_T::mult_config>::type
+                                       weights[weight_store<typename CONFIG_T::mult_config>::size],
                                    typename CONFIG_T::bias_t biases[CONFIG_T::n_filt]) {
     assert(CONFIG_T::filt_height == 1 && CONFIG_T::filt_width == 1);
 

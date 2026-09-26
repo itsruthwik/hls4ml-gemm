@@ -105,15 +105,78 @@ class CatapultWriter(Writer):
         """Write GEMM-IP packed weight columns (shared implementation)."""
         write_gemm_ip_weight_cols(var, layer, odir)
 
-    def print_array_to_cpp(self, var, odir, write_txt_file=True):
+    @staticmethod
+    def _dense_resource_block_reorder_chunk(values, reuse_factor):
+        """Reorder the flat array one nnet::dense_resource call reads into block-major order:
+        position ir*block_factor + im holds logical weight ir + reuse_factor*im, i.e. lane im of
+        packed word ir (nnet::weight_store)."""
+        total = len(values)
+        if reuse_factor <= 1 or reuse_factor >= total:
+            return values
+        block_factor = -(-total // reuse_factor)  # ceil div, matches DIV_ROUNDUP in the template
+        reordered = [None] * total
+        p = 0
+        for ir in range(reuse_factor):
+            for im in range(block_factor):
+                logical = ir + reuse_factor * im
+                if logical >= total:
+                    break
+                reordered[p] = values[logical]
+                p += 1
+        assert p == total, 'block-major reorder did not cover every weight'
+        return reordered
+
+    @classmethod
+    def _dense_resource_block_reorder(cls, values, n_per_chunk, reuse_factor, n_chunks=1):
+        """Block-major reorder applied to each of n_chunks equal, contiguous chunks. EinsumDense
+        calls nnet::dense once per in-place slice ('&weights[i*L1*C]' in nnet_einsum_dense*.h), so
+        each slice is reordered on its own; every other covered layer is a single chunk."""
+        if n_chunks <= 1:
+            return cls._dense_resource_block_reorder_chunk(values, reuse_factor)
+        out = []
+        for c in range(n_chunks):
+            out.extend(cls._dense_resource_block_reorder_chunk(values[c * n_per_chunk:(c + 1) * n_per_chunk], reuse_factor))
+        return out
+
+    @staticmethod
+    def _packed_weight_decl(var, plan):
+        """Declaration of a block-major weight array as packed words, nnet::weight_store's packed
+        layout: reuse_factor words of block_factor weights per dense_resource call."""
+        n_per_chunk, rf, n_chunks = plan
+        return f'nnet::array<{var.type.name}, {n_per_chunk // rf}> {var.name}[{rf * n_chunks}]'
+
+    def _weight_decl(self, layer, var):
+        """C++ declaration of a weight array (packed words when stored block-major)."""
+        plan = self._dense_resource_reorder_plan(layer, var)
+        return var.definition_cpp() if plan is None else self._packed_weight_decl(var, plan)
+
+    def _weight_load_target(self, layer, var):
+        """Pointer the csim weight loader fills. A packed array (nnet::array words) is loaded
+        through its flat element view: each word is exactly block_factor contiguous weights, and
+        the .txt holds them in the same block-major order."""
+        if self._dense_resource_reorder_plan(layer, var) is None:
+            return var.name
+        return f'reinterpret_cast<{var.type.name} *>({var.name})'
+
+    def print_array_to_cpp(self, var, odir, write_txt_file=True, reorder_block_major=None, rom_component=None):
         """Write a weights array to C++ header files.
 
         Args:
             var (WeightVariable): Weight to write
             odir (str): Output directory
             write_txt_file (bool, optional): Write txt files in addition to .h files. Defaults to True.
+            reorder_block_major (tuple, optional): (n_per_chunk, reuse_factor, n_chunks) for weights
+                stored block-major for nnet::dense_resource. The .h array is declared as packed
+                words (one per ReuseLoop read, see nnet::weight_store) and the .txt keeps the same
+                weights in flat block-major order (the csim loader fills the packed array in place).
+            rom_component (str, optional): Catapult resource library component (e.g.
+                'Altera_ROMS.mgc_rom_sync'). When set, emits
+                `#pragma hls_resource <name>.rom:rsc variables="<name>" map_to_module="<rom_component>"`
+                right before the synthesis-visible array definition -- mirroring the Vivado
+                `if (reuse_factor > 1) RESOURCE core=ROM_nP_BRAM` guidance for this same weight array.
         """
 
+        decl = var.definition_cpp() if reorder_block_major is None else self._packed_weight_decl(var, reorder_block_major)
         h_file = open(f'{odir}/firmware/weights/{var.name}.h', 'w')
         if write_txt_file:
             txt_file = open(f'{odir}/firmware/weights/{var.name}.txt', 'w')
@@ -132,24 +195,27 @@ class CatapultWriter(Writer):
         if write_txt_file:
             h_file.write('#ifndef __SYNTHESIS__\n')
             h_file.write('// global extern pointer only - actual array allocated in myproject_test.cpp\n')
-            h_file.write('extern ' + var.definition_cpp() + ';\n')
+            h_file.write('extern ' + decl + ';\n')
             h_file.write('#else\n')
 
-        h_file.write(var.definition_cpp() + ' = {')
+        if rom_component is not None:
+            h_file.write(
+                f'#pragma hls_resource {var.name}.rom:rsc variables="{var.name}" map_to_module="{rom_component}"\n'
+            )
+        h_file.write(decl + ' = {')
 
         # fill c++ array.
         # not including internal brackets for multidimensional case
-        sep = ''
-        if getattr(var, 'transpose', False):
-            # If transpose is requested, we iterate in column-major order
-            # This is handled by the __iter__ method in WeightVariable
-            pass
-            
-        for x in var:
-            h_file.write(sep + x)
-            if write_txt_file:
-                txt_file.write(sep + x)
-            sep = ', '
+        values = list(var)
+        if reorder_block_major is not None:
+            values = self._dense_resource_block_reorder(values, *reorder_block_major)
+            block = reorder_block_major[0] // reorder_block_major[1]
+            words = [values[i : i + block] for i in range(0, len(values), block)]
+            h_file.write(', '.join('{{' + ', '.join(word) + '}}' for word in words))
+        else:
+            h_file.write(', '.join(values))
+        if write_txt_file:
+            txt_file.write(', '.join(values))
         h_file.write('};\n')
         if write_txt_file:
             h_file.write('#endif\n')
@@ -382,7 +448,7 @@ class CatapultWriter(Writer):
                             )
                         else:
                             newline += indent + '    nnet::load_weights_from_txt<{}, {}>({}, "{}.txt");\n'.format(
-                                w.type.name, w.data_length, w.name, w.name
+                                w.type.name, w.data_length, self._weight_load_target(layer, w), w.name
                             )
 
             # Add Interface Synthesis resource pragmas
@@ -596,15 +662,60 @@ class CatapultWriter(Writer):
         f.close()
         fout.close()
 
+    @classmethod
+    def _dense_resource_reorder_plan(cls, layer, weights):
+        """(n_per_chunk, reuse_factor, n_chunks) when `weights` is stored block-major, else None.
+
+        The covered layers come from block_major_weight_keys, which also sets
+        CONFIG_T::block_major_weights in their config templates. An EinsumDense kernel is
+        (n_inplace, n_free_kernel, n_contract) after the resource transpose, so shape[0] is its
+        chunk count.
+        """
+        from hls4ml.backends.catapult.passes.resource_strategy import block_major_weight_keys
+        from hls4ml.model.layers import EinsumDense
+
+        for key in block_major_weight_keys(layer):
+            try:
+                kw = layer.get_weights(key)
+            except KeyError:
+                continue
+            if kw is None or weights.name != kw.name:
+                continue
+            rf = layer.get_attr('reuse_factor', 1)
+            if not rf or rf <= 1:
+                return None
+            n_chunks = weights.data.shape[0] if isinstance(layer, EinsumDense) else 1
+            total = weights.data_length
+            if n_chunks < 1 or total % n_chunks != 0:
+                return None
+            return (total // n_chunks, rf, n_chunks)
+        return None
+
+    @staticmethod
+    def _weight_rom_component(model):
+        """ROM component for block-major weights (the Vivado RESOURCE core=ROM_nP_BRAM
+        counterpart), following the technology switch that picks the libraries in build_prj.tcl.
+        Only the default Altera path is verified (Catapult reports MEM-10 for it); the Xilinx and
+        ASIC paths return None and get no ROM pragma."""
+        if model.config.get_config_value('Technology') in ('asic', 'fpga'):
+            return None
+        return 'Altera_ROMS.mgc_rom_sync'
+
     def write_weights(self, model):
         """Write the weights into header files
 
         Args:
             model (ModelGraph): the hls4ml model.
         """
+        rom_component = self._weight_rom_component(model)
+
         for layer in model.get_layers():
             for weights in layer.get_weights():
-                self.print_array_to_cpp(weights, model.config.get_output_dir())
+                plan = self._dense_resource_reorder_plan(layer, weights)
+                rom = rom_component if plan is not None else None
+                self.print_array_to_cpp(
+                    weights, model.config.get_output_dir(), reorder_block_major=plan, rom_component=rom
+                )
                 if self._is_gemm_ip_weight(layer, weights):
                     # ROM header: source of truth for the legacy streamed-weight path AND
                     # the weight-stationary csim behavioral model (native, no gemm-ip-gen).
@@ -692,7 +803,7 @@ class CatapultWriter(Writer):
                 newline = line
                 for layer in model.get_layers():
                     for w in layer.get_weights():
-                        newline += w.definition_cpp() + ';\n'
+                        newline += self._weight_decl(layer, w) + ';\n'
 
             elif '// hls-fpga-machine-learning insert load weights' in line:
                 newline = line
@@ -708,7 +819,7 @@ class CatapultWriter(Writer):
                             )
                         else:
                             newline += indent + '    nnet::load_weights_from_txt<{}, {}>({}, "{}.txt");\n'.format(
-                                w.type.name, w.data_length, w.name, w.name
+                                w.type.name, w.data_length, self._weight_load_target(layer, w), w.name
                             )
 
             elif '// hls-fpga-machine-learning insert data' in line:
@@ -810,7 +921,7 @@ class CatapultWriter(Writer):
                 newline = line
                 for layer in model.get_layers():
                     for w in layer.get_weights():
-                        newline += w.definition_cpp() + ';\n'
+                        newline += self._weight_decl(layer, w) + ';\n'
             elif '// hls-fpga-machine-learning insert header' in line:
                 dtype = line.split('#', 1)[1].strip()
                 inputs_str = ', '.join([f'{dtype} {i.name}[{i.size_cpp()}]' for i in model_inputs])
@@ -915,16 +1026,21 @@ class CatapultWriter(Writer):
                 line = line.replace('myproject', model.config.get_project_name())
                 line = line.replace('CATAPULT_DIR', model.config.get_project_dir())
                 if '#hls-fpga-machine-learning insert techlibs' in line:
-                    if model.config.get_config_value('Technology') is None:
+                    tech = model.config.get_config_value('Technology')
+                    if tech is None:
                         if model.config.get_config_value('Part') is not None:
                             line = indent + 'setup_xilinx_part {{{}}}\n'.format(model.config.get_config_value('Part'))
                         elif model.config.get_config_value('ASICLibs') is not None:
                             line = indent + 'setup_asic_libs {{{}}}\n'.format(model.config.get_config_value('ASICLibs'))
-                    else:
-                        if model.config.get_config_value('Technology') == 'asic':
-                            line = indent + 'setup_asic_libs {{{}}}\n'.format(model.config.get_config_value('ASICLibs'))
                         else:
-                            line = indent + 'setup_xilinx_part {{{}}}\n'.format(model.config.get_config_value('Part'))
+                            line = indent + 'setup_altera_lib\n'
+                    elif tech == 'asic':
+                        line = indent + 'setup_asic_libs {{{}}}\n'.format(model.config.get_config_value('ASICLibs'))
+                    elif tech == 'fpga':
+                        line = indent + 'setup_xilinx_part {{{}}}\n'.format(model.config.get_config_value('Part'))
+                    else:
+                        # Default Catapult target: behavioral Agilex library (see build_prj.tcl).
+                        line = indent + 'setup_altera_lib\n'
                 elif '#hls-fpga-machine-learning insert invoke_args' in line:
                     # The writer copies InputData/OutputPredictions into tb_data/ under
                     # canonical names, so the testbench args must reference those names —
@@ -949,6 +1065,17 @@ class CatapultWriter(Writer):
                     # designs should set it. Costs the reset fan-out on every register.
                     clr = model.config.get_config_value('HLSConfig', {}).get('Model', {}).get('ResetClearsAllRegs', False)
                     line = indent + 'directive set -RESET_CLEARS_ALL_REGS {}\n'.format('yes' if clr else 'no')
+                elif 'directive set -MEM_MAP_THRESHOLD' in line:
+                    # HLSConfig.Model.MemMapThreshold (int, default None = keep the template's
+                    # own line unchanged). 0 or "default" drops the directive so Catapult
+                    # falls back to its built-in threshold (32 elements); an int sets it explicitly.
+                    thr = model.config.get_config_value('HLSConfig', {}).get('Model', {}).get('MemMapThreshold', None)
+                    if thr is None:
+                        pass  # keep template line as-is
+                    elif thr in (0, 'default'):
+                        line = ''
+                    else:
+                        line = indent + 'directive set -MEM_MAP_THRESHOLD {}\n'.format(int(thr))
                 elif 'options set Input/CompilerFlags' in line:
                     # Presence-driven const softmax LUTs: when the two-pass header has been
                     # generated next to the streaming activations, compile the exp/invert
@@ -1049,20 +1176,25 @@ class CatapultWriter(Writer):
                         for key, value in build_options.items():
                             line += indent + f'{key}: {value}\n'
                     elif '#hls-fpga-machine-learning insert techlibs' in line:
-                        if model.config.get_config_value('Technology') is None:
+                        tech = model.config.get_config_value('Technology')
+                        if tech is None:
                             if model.config.get_config_value('Part') is not None:
                                 line = indent + 'setup_xilinx_part {{{}}}\n'.format(model.config.get_config_value('Part'))
                             elif model.config.get_config_value('ASICLibs') is not None:
                                 line = indent + 'setup_asic_libs {{{}}}\n'.format(
                                     model.config.get_config_value('ASICLibs')
                                 )
-                        else:
-                            if model.config.get_config_value('Technology') == 'asic':
-                                line = indent + 'setup_asic_libs {{{}}}\n'.format(
-                                    model.config.get_config_value('ASICLibs')
-                                )
                             else:
-                                line = indent + 'setup_xilinx_part {{{}}}\n'.format(model.config.get_config_value('Part'))
+                                line = indent + 'setup_altera_lib\n'
+                        elif tech == 'asic':
+                            line = indent + 'setup_asic_libs {{{}}}\n'.format(
+                                model.config.get_config_value('ASICLibs')
+                            )
+                        elif tech == 'fpga':
+                            line = indent + 'setup_xilinx_part {{{}}}\n'.format(model.config.get_config_value('Part'))
+                        else:
+                            # Default Catapult target: behavioral Agilex library (see build_prj.tcl).
+                            line = indent + 'setup_altera_lib\n'
                     elif '#hls-fpga-machine-learning insert invoke_args' in line:
                         tb_in_file = model.config.get_config_value('InputData')
                         tb_out_file = model.config.get_config_value('OutputPredictions')

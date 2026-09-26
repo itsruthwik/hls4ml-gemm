@@ -11,9 +11,9 @@ namespace nnet {
 
 template <class data_T, class res_T, typename CONFIG_T>
 void dense_wrapper(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_out],
-                   typename CONFIG_T::weight_t weights[CONFIG_T::n_in * CONFIG_T::n_out],
+                   typename weight_store<CONFIG_T>::type weights[weight_store<CONFIG_T>::size],
                    typename CONFIG_T::bias_t biases[CONFIG_T::n_out]) {
-    if (CONFIG_T::strategy == nnet::latency) {
+    if constexpr (CONFIG_T::strategy == nnet::latency) { // dense_latency takes flat weights only
         constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
         (void)ce_reuse_factor;
         #pragma hls_pipeline_init_interval ce_reuse_factor
@@ -25,10 +25,16 @@ void dense_wrapper(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_out],
 
 template <class data_T, class res_T, typename CONFIG_T>
 void dense(ac_channel<data_T> &data_stream, ac_channel<res_T> &res_stream,
-           typename CONFIG_T::weight_t weights[CONFIG_T::n_in * CONFIG_T::n_out],
+           typename weight_store<CONFIG_T>::type weights[weight_store<CONFIG_T>::size],
            typename CONFIG_T::bias_t biases[CONFIG_T::n_out]) {
+    // data is written by the unrolled DataPack loop and read fully in parallel by dense_wrapper's
+    // unrolled inner loops; mirrors the Vivado ARRAY_PARTITION variable=data complete.
+    #pragma hls_resource data:rsc variables="data" map_to_module="[Register]"
     typename data_T::value_type data[CONFIG_T::n_in];
 
+    // res is written fully in parallel by dense_wrapper's unrolled inner loops and read by the
+    // unrolled ResPack loop; mirrors the Vivado ARRAY_PARTITION variable=res complete.
+    #pragma hls_resource res:rsc variables="res" map_to_module="[Register]"
     typename res_T::value_type res[CONFIG_T::n_out];
 
 #pragma hls_pipeline_init_interval 1

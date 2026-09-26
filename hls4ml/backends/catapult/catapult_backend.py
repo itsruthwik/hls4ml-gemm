@@ -270,11 +270,11 @@ class CatapultBackend(FPGABackend):
 
     def create_initial_config(
         self,
-        tech='fpga',
-        part='xcku115-flvb2104-2-i',
+        tech='altera',
+        part=None,
         asiclibs='nangate-45nm',
         fifo=None,
-        clock_period=5,
+        clock_period=3,
         io_type='io_parallel',
     ):
         config = {}
@@ -282,8 +282,10 @@ class CatapultBackend(FPGABackend):
         config['Technology'] = tech
         if tech == 'fpga':
             config['Part'] = part if part is not None else 'xcvu13p-flga2577-2-e'
-        else:
+        elif tech == 'asic':
             config['ASICLibs'] = asiclibs if asiclibs is not None else 'nangate-45nm'
+        # tech == 'altera' (the Catapult default): no Part/ASICLibs needed, the writer
+        # emits `setup_altera_lib` (behavioral Agilex-2 + M20K/MLAB/DIST/ROMS, no vendor IP).
         config['ClockPeriod'] = clock_period
         config['FIFO'] = fifo
         config['IOType'] = io_type
@@ -376,14 +378,10 @@ class CatapultBackend(FPGABackend):
                     f'Layer "{layer.name}" requested Strategy: GEMM, but Catapult Conv GEMM does not support dilation > 1.'
                 )
 
-        # Row/column streaming requires stride 1 and valid (zero) padding.
-        stride_h = layer.get_attr('stride_height', 1)
-        stride_w = layer.get_attr('stride_width', 1)
-        if stride_h != 1 or stride_w != 1:
-            raise ValueError(
-                f'Layer "{layer.name}" requested Strategy: GEMM, but only stride=1 is supported '
-                f'by the row/column GEMM IP (got stride={stride_h}x{stride_w}).'
-            )
+        # Row/column streaming requires valid (zero) padding. Any stride is fine: the im2col
+        # line buffer's stride counters emit one K-wide row per valid output position only,
+        # so the GEMM just sees M = out_height * out_width rows (e.g. a ViT patch embedding,
+        # stride == kernel, is a plain K = kh*kw*C GEMM).
         pad_top = layer.get_attr('pad_top', 0)
         pad_bottom = layer.get_attr('pad_bottom', 0)
         pad_left = layer.get_attr('pad_left', 0)

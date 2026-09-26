@@ -133,7 +133,8 @@ MultLoop:
 
 template <class data_T, class res_T, typename CONFIG_T>
 void pointwise_mult_buffer(const data_T &data_pack, ac_channel<res_T> &res_stream,
-                           typename CONFIG_T::weight_t weights[CONFIG_T::n_chan * CONFIG_T::n_filt],
+                           typename weight_store<typename CONFIG_T::mult_config>::type
+                               weights[weight_store<typename CONFIG_T::mult_config>::size],
                            typename CONFIG_T::bias_t biases[CONFIG_T::n_filt]) {
     typename data_T::value_type data[CONFIG_T::n_chan];
 
@@ -147,7 +148,7 @@ InitData:
         data[id] = data_pack[id];
     }
 
-    if (CONFIG_T::strategy == nnet::latency) {
+    if constexpr (CONFIG_T::strategy == nnet::latency) {
         dense_latency<typename data_T::value_type, typename res_T::value_type, typename CONFIG_T::mult_config>(
             data, res, weights, biases);
     } else {

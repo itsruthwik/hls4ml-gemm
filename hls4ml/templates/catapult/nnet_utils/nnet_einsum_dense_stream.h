@@ -25,7 +25,8 @@ namespace nnet {
 template <class data_T, class res_T, typename CONFIG_T>
 void einsum_dense(
     ac_channel<data_T> &data_stream, ac_channel<res_T> &res_stream,
-    typename CONFIG_T::dense_conf::weight_t weights[CONFIG_T::n_free_kernel * CONFIG_T::n_contract * CONFIG_T::n_inplace],
+    typename weight_store<typename CONFIG_T::dense_conf>::type
+        weights[weight_store<typename CONFIG_T::dense_conf>::size * CONFIG_T::n_inplace],
     typename CONFIG_T::dense_conf::bias_t biases[CONFIG_T::n_free_data * CONFIG_T::n_free_kernel * CONFIG_T::n_inplace]) {
     static_assert(CONFIG_T::strategy == nnet::resource, "io_stream EinsumDense requires Strategy=Resource");
 
@@ -33,6 +34,7 @@ void einsum_dense(
     constexpr unsigned L0 = CONFIG_T::n_free_data;
     constexpr unsigned L1 = CONFIG_T::n_free_kernel;
     constexpr unsigned C = CONFIG_T::n_contract;
+    constexpr unsigned W = weight_store<typename CONFIG_T::dense_conf>::size; // weight words per in-place slice
     constexpr unsigned row_count = L0;
 
     typename data_T::value_type data[CONFIG_T::tpose_inp_conf::N];
@@ -67,7 +69,7 @@ RowLoop:
         }
 
         nnet::dense<typename data_T::value_type, typename res_T::value_type, typename CONFIG_T::dense_conf>(
-            &inp_tpose[(i * L0 + l0) * C], out_buffer, &weights[i * L1 * C], &biases[(i * L0 + l0) * L1]);
+            &inp_tpose[(i * L0 + l0) * C], out_buffer, &weights[i * W], &biases[(i * L0 + l0) * L1]);
 
     WriteRow:
         for (unsigned i_out = 0; i_out < L1 / res_T::size; i_out++) {

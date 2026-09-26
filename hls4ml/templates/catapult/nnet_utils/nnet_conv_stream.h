@@ -72,7 +72,8 @@ template <unsigned K, unsigned S, unsigned W> class scale_index_unscaled {
 template <class data_T, class res_T, typename CONFIG_T>
 void mult_buffer(ac_channel<typename data_T::value_type> data_window[CONFIG_T::kernel_size * CONFIG_T::n_chan],
                  res_T &res_pack, ac_channel<res_T> &res_stream, unsigned &outputs_ready,
-                 typename CONFIG_T::weight_t weights[CONFIG_T::kernel_size * CONFIG_T::n_chan * CONFIG_T::n_filt],
+                 typename weight_store<typename CONFIG_T::mult_config>::type
+                     weights[weight_store<typename CONFIG_T::mult_config>::size],
                  typename CONFIG_T::bias_t biases[CONFIG_T::n_filt]) {
     typename data_T::value_type data[CONFIG_T::kernel_size * CONFIG_T::n_chan];
     typename res_T::value_type res[CONFIG_T::n_filt];
@@ -83,7 +84,7 @@ InitData:
         data[id] = data_window[id].read();
     }
 
-    if (CONFIG_T::strategy == nnet::latency) {
+    if constexpr (CONFIG_T::strategy == nnet::latency) {
         dense_latency<typename data_T::value_type, typename res_T::value_type, typename CONFIG_T::mult_config>(
             data, res, weights, biases);
     } else {
@@ -117,7 +118,8 @@ template <class data_T, class res_T, typename CONFIG_T>
 void compute_output_encoded(const data_T &in_elem,
                             ac_channel<typename data_T::value_type> data_window[CONFIG_T::kernel_size * CONFIG_T::n_chan],
                             ac_channel<res_T> &res, res_T &res_pack, unsigned &outputs_ready,
-                            typename CONFIG_T::weight_t weights[CONFIG_T::kernel_size * CONFIG_T::n_chan * CONFIG_T::n_filt],
+                            typename weight_store<typename CONFIG_T::mult_config>::type
+                                weights[weight_store<typename CONFIG_T::mult_config>::size],
                             typename CONFIG_T::bias_t biases[CONFIG_T::n_filt],
                             ac_int<CONFIG_T::kernel_size, false> *pixel_idx) {
     constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
@@ -247,7 +249,8 @@ void compute_output_buffer_2d(
     ap_shift_reg<typename data_T::value_type, CONFIG_T::in_width> line_buffer[MAX(CONFIG_T::filt_height - 1, 1)]
                                                                              [CONFIG_T::n_chan],
     ac_channel<res_T> &res_stream,
-    typename CONFIG_T::weight_t weights[CONFIG_T::kernel_size * CONFIG_T::n_chan * CONFIG_T::n_filt],
+    typename weight_store<typename CONFIG_T::mult_config>::type
+        weights[weight_store<typename CONFIG_T::mult_config>::size],
     typename CONFIG_T::bias_t biases[CONFIG_T::n_filt]) {
     // Thresholds
     const static int lShiftX = CONFIG_T::filt_width - 1;
@@ -273,7 +276,7 @@ void compute_output_buffer_2d(
     if ((sX - lShiftX) == 0 && (sY - lShiftY) == 0 && pY > lShiftY - 1 && pX > lShiftX - 1) {
 
         // Dense multiply
-        if (CONFIG_T::strategy == nnet::latency) {
+        if constexpr (CONFIG_T::strategy == nnet::latency) {
             dense_latency<typename data_T::value_type, typename res_T::value_type, typename CONFIG_T::mult_config>(
                 kernel_data, res_out, weights, biases);
         } else {
@@ -316,7 +319,8 @@ void compute_output_buffer_2d(
 template <class data_T, class res_T, typename CONFIG_T>
 void compute_output_buffer_1d(
     const data_T &in_elem, ac_channel<res_T> &res_stream,
-    typename CONFIG_T::weight_t weights[CONFIG_T::kernel_size * CONFIG_T::n_chan * CONFIG_T::n_filt],
+    typename weight_store<typename CONFIG_T::mult_config>::type
+        weights[weight_store<typename CONFIG_T::mult_config>::size],
     typename CONFIG_T::bias_t biases[CONFIG_T::n_filt]) {
     // Thresholds
     const static int lShiftX = CONFIG_T::filt_width - 1;
@@ -338,7 +342,7 @@ void compute_output_buffer_1d(
     if ((sX - lShiftX) == 0 && pX > lShiftX - 1) {
 
         // Dense multiply
-        if (CONFIG_T::strategy == nnet::latency) {
+        if constexpr (CONFIG_T::strategy == nnet::latency) {
             dense_latency<typename data_T::value_type, typename res_T::value_type, typename CONFIG_T::mult_config>(
                 kernel_data, res_out, weights, biases);
         } else {

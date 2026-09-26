@@ -1,6 +1,7 @@
 from math import ceil, log2
 
 from hls4ml.backends.backend import get_backend
+from hls4ml.backends.catapult.passes.resource_strategy import block_major_weight_keys
 from hls4ml.backends.template import FunctionCallTemplate, LayerConfigTemplate
 from hls4ml.model.layers import (
     Activation,
@@ -30,6 +31,7 @@ dense_config_template = """struct config{index} : nnet::dense_config {{
     static const unsigned n_nonzeros = {nonzeros};
     static const unsigned multiplier_limit = DIV_ROUNDUP(n_in * n_out, reuse_factor) - n_zeros / reuse_factor;
     static const bool store_weights_in_bram = false;
+    static const bool block_major_weights = {block_major};
     typedef {accum_t.name} accum_t;
     typedef {bias_t.name} bias_t;
     typedef {weight_t.name} weight_t;
@@ -63,6 +65,7 @@ class DenseConfigTemplate(LayerConfigTemplate):
         params['gemm_m'] = node.get_attr('gemm_m', 1)
         params['gemm_k'] = node.get_attr('gemm_k', node.get_attr('n_in'))
         params['gemm_n'] = node.get_attr('gemm_n', node.get_attr('n_out'))
+        params['block_major'] = str('weight' in block_major_weight_keys(node)).lower()
 
         return self.template.format(**params)
 

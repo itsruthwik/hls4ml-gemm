@@ -5,6 +5,7 @@
 #include "ac_channel.h"
 #include "nnet_common.h"
 #include "nnet_mult.h"
+#include "nnet_types.h"
 #include <assert.h>
 #include <math.h>
 
@@ -18,9 +19,30 @@ template <class T> struct tree_sum_t<T, 1> {
     static T sum(const T *p) { return p[0]; }
 };
 
+// The Vivado ARRAY_PARTITION complete pragmas on biases/acc/tmpmult/mult (and the Catapult-only
+// acc_part) have no hls_resource [Register] counterpart here: Catapult 2026.1 intermittently
+// crashes (SIGSEGV/SIGBUS during elaboration) on such pragmas once this code is inlined into the
+// conv stream path. The arrays stay in registers under the global MEM_MAP_THRESHOLD.
+
+// The weights ReuseLoop iteration ir uses, from either weight_store layout (nnet_types.h);
+// weight_lane(row, ir, im, rufactor) is logical weight ir + rufactor*im. Packed storage fetches
+// word ir once: one wide read per iteration, as the Vivado ARRAY_RESHAPE gives. Reading each lane
+// separately lets Catapult regroup the lanes into narrower words and replicate the ROM to serve
+// the extra reads.
+template <class T> inline T *weight_row(T *weights, unsigned, unsigned) { return weights; }
+template <class T, unsigned N> inline array<T, N> weight_row(array<T, N> *weights, unsigned ir, unsigned) {
+    return weights[ir];
+}
+template <class T> inline T weight_lane(T *row, unsigned ir, unsigned im, unsigned rufactor) {
+    return row[ir + rufactor * im];
+}
+template <class T, unsigned N> inline T weight_lane(const array<T, N> &row, unsigned, unsigned im, unsigned) {
+    return row[im];
+}
+
 template <class data_T, class res_T, typename CONFIG_T>
 void dense_resource_rf_leq_nin(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_out],
-                               typename CONFIG_T::weight_t weights[CONFIG_T::n_in * CONFIG_T::n_out],
+                               typename weight_store<CONFIG_T>::type weights[weight_store<CONFIG_T>::size],
                                typename CONFIG_T::bias_t biases[CONFIG_T::n_out]) {
 
     const int rufactor = CONFIG_T::reuse_factor;
@@ -52,8 +74,8 @@ InitAccum:
 #pragma hls_pipeline_init_interval 1
 ReuseLoop:
     for (int ir = 0; ir < rufactor; ir++) {
+        const auto w_row = weight_row(weights, ir, rufactor);
 
-        int w_index = ir;
         int in_index = ir;
         int out_index = 0;
         int acc_step = 0;
@@ -70,14 +92,14 @@ ReuseLoop:
             // rf==1 while its C model was exact).
             if (rufactor == 1) {
                 acc[out_index] += static_cast<typename CONFIG_T::accum_t>(
-                    CONFIG_T::template product<data_T, typename CONFIG_T::weight_t>::product(data[in_index], weights[w_index]));
+                    CONFIG_T::template product<data_T, typename CONFIG_T::weight_t>::product(
+                        data[in_index], weight_lane(w_row, ir, im, rufactor)));
             } else {
                 acc_part[out_index][acc_step] += static_cast<typename CONFIG_T::accum_t>(
-                    CONFIG_T::template product<data_T, typename CONFIG_T::weight_t>::product(data[in_index], weights[w_index]));
+                    CONFIG_T::template product<data_T, typename CONFIG_T::weight_t>::product(
+                        data[in_index], weight_lane(w_row, ir, im, rufactor)));
             }
 
-            // Increment w_index
-            w_index += rufactor;
             // Increment in_index
             in_index += rufactor;
             if (in_index >= nin) {
@@ -111,7 +133,7 @@ Result:
 
 template <class data_T, class res_T, typename CONFIG_T>
 void dense_resource_rf_gt_nin_rem0(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_out],
-                                   typename CONFIG_T::weight_t weights[CONFIG_T::n_in * CONFIG_T::n_out],
+                                   typename weight_store<CONFIG_T>::type weights[weight_store<CONFIG_T>::size],
                                    typename CONFIG_T::bias_t biases[CONFIG_T::n_out]) {
 
     const int rufactor = MIN(CONFIG_T::reuse_factor, CONFIG_T::n_in * CONFIG_T::n_out);
@@ -151,6 +173,7 @@ IndexLoop:
 #pragma hls_pipeline_init_interval 1
 ReuseLoop:
     for (unsigned int ir = 0; ir < rufactor; ir++) {
+        const auto w_row = weight_row(weights, ir, rufactor);
 
         w_index = ir;
         out_index = outidx[ir] /*outstep*/;
@@ -159,7 +182,8 @@ ReuseLoop:
     MultLoop:
         for (unsigned int im = 0; im < block_factor; im++) {
             acc[out_index] += static_cast<typename CONFIG_T::accum_t>(
-                CONFIG_T::template product<data_T, typename CONFIG_T::weight_t>::product(data[in_index], weights[w_index]));
+                CONFIG_T::template product<data_T, typename CONFIG_T::weight_t>::product(
+                    data[in_index], weight_lane(w_row, ir, im, rufactor)));
 
             w_index += rufactor;
             if (w_index >= CONFIG_T::n_in * CONFIG_T::n_out)
@@ -184,7 +208,7 @@ Result:
 
 template <class data_T, class res_T, typename CONFIG_T>
 void dense_resource_rf_gt_nin(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_out],
-                              typename CONFIG_T::weight_t weights[CONFIG_T::n_in * CONFIG_T::n_out],
+                              typename weight_store<CONFIG_T>::type weights[weight_store<CONFIG_T>::size],
                               typename CONFIG_T::bias_t biases[CONFIG_T::n_out]) {
 
     const int rufactor = CONFIG_T::reuse_factor;
@@ -209,6 +233,7 @@ InitAccum:
 #pragma hls_pipeline_init_interval 1
 ReuseLoop:
     for (int ir = 0; ir < rufactor; ir++) {
+        const auto w_row = weight_row(weights, ir, rufactor);
         typename CONFIG_T::accum_t tmpmult[block_factor];
 
     #pragma hls_unroll
@@ -219,7 +244,8 @@ ReuseLoop:
             if (w_index >= CONFIG_T::n_in * CONFIG_T::n_out)
                 continue; // check out of bounds
             tmpmult[im] =
-                CONFIG_T::template product<data_T, typename CONFIG_T::weight_t>::product(data[in_index], weights[w_index]);
+                CONFIG_T::template product<data_T, typename CONFIG_T::weight_t>::product(
+                    data[in_index], weight_lane(w_row, ir, im, rufactor));
         }
 
         typename CONFIG_T::accum_t mult[multiplier_limit];
@@ -259,7 +285,7 @@ Result:
 
 template <class data_T, class res_T, typename CONFIG_T>
 void dense_resource(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_out],
-                    typename CONFIG_T::weight_t weights[CONFIG_T::n_in * CONFIG_T::n_out],
+                    typename weight_store<CONFIG_T>::type weights[weight_store<CONFIG_T>::size],
                     typename CONFIG_T::bias_t biases[CONFIG_T::n_out]) {
 
 

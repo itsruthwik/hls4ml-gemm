@@ -80,6 +80,23 @@ proc setup_xilinx_part { part } {
 }
 
 
+proc setup_altera_lib { } {
+  # Default Catapult target: behavioral Agilex family library, queried the same way
+  # setup_xilinx_part looks up Vivado parts (rtlsyntool/vendor/family/speed/part come
+  # from Catapult's own /CONFIG/PARAMETERS/Quartus/PARAMETERS/Altera tree, not guessed).
+  solution library add mgc_Altera-Agilex-2_beh -- -rtlsyntool Quartus -manufacturer Altera -family Agilex -speed 2 -part AGFB014R24B2E2V
+  # Only the behavioral Altera memory libraries (a plain register array plus a ramstyle
+  # attribute). Altera_FIFO and Altera_LPM are left out: they instantiate Intel IP
+  # (scfifo/dcfifo/altera_syncram), which keeps the RTL from being vendor-neutral.
+  # Catapult's generic ccs_sample_mem/ccs_sample_rom cannot be used here: Catapult rejects
+  # them next to any FPGA family library (LIB-223), they only load in ASIC solutions.
+  solution library add Altera_M20K
+  solution library add Altera_MLAB
+  solution library add Altera_DIST
+  solution library add Altera_ROMS
+}
+
+
 proc setup_asic_libs { args } {
   set do_saed 0
   foreach lib $args {
@@ -178,8 +195,10 @@ if { $IOType == "io_stream" } {
 solution options set Architectural/DefaultRegisterThreshold 2050
 }
 directive set -RESET_CLEARS_ALL_REGS no
-# Constrain arrays to map to memory only over a certain size
-directive set -MEM_MAP_THRESHOLD [expr 2048 * 16 + 1]
+# Constrain arrays to map to memory only over a certain size. Matches the Vivado flow's
+# config_array_partition -complete_threshold 4096 (MaximumSize default), so unannotated
+# arrays get the same register/memory policy in both backends.
+directive set -MEM_MAP_THRESHOLD 4096
 # The following line gets modified by the backend writer
 set hls_clock_period 5
 

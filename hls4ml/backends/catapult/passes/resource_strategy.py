@@ -1,7 +1,43 @@
 import numpy as np
 
-from hls4ml.model.layers import GRU, LSTM, Conv1D, Conv2D, Dense, EinsumDense, SeparableConv1D, SeparableConv2D
+from hls4ml.model.layers import (
+    GRU,
+    LSTM,
+    Conv1D,
+    Conv2D,
+    Dense,
+    DepthwiseConv1D,
+    DepthwiseConv2D,
+    EinsumDense,
+    SeparableConv1D,
+    SeparableConv2D,
+)
 from hls4ml.model.optimizer import OptimizerPass
+
+
+def block_major_weight_keys(node):
+    """Weight keys the writer stores block-major as packed words for nnet::dense_resource (see
+    nnet::weight_store), the Catapult counterpart of the Vivado ARRAY_RESHAPE block factor.
+
+    Covers layers whose weight array is read whole by dense_resource (EinsumDense: one call per
+    in-place slice). Depthwise, separable and recurrent weights keep their order: they are read
+    by other kernels or split across several dense calls. The layer config templates derive
+    CONFIG_T::block_major_weights from this same function, so both sides always agree.
+    """
+    if str(node.get_attr('strategy', '')).lower() != 'resource':
+        return ()
+    if isinstance(node, (DepthwiseConv1D, DepthwiseConv2D)):
+        return ()
+    if not isinstance(node, (Dense, EinsumDense, Conv1D, Conv2D)):
+        return ()
+    # Block-major positions ir*block_factor + im only tile the array when the reuse factor
+    # divides the length one dense_resource call reads; otherwise keep the original order.
+    weight = node.get_weights('weight')
+    n_calls = weight.data.shape[0] if isinstance(node, EinsumDense) else 1
+    per_call, rf = weight.data_length // n_calls, node.get_attr('reuse_factor', 1)
+    if weight.data_length % n_calls or not rf or per_call % rf:
+        return ()
+    return ('weight',)
 
 
 class ApplyResourceStrategy(OptimizerPass):
