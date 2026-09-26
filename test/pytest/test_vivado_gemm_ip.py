@@ -136,7 +136,10 @@ class TestReplaceDenseGemm:
         for node in hls_model.graph.values():
             if isinstance(node, Gemm):
                 fn_cpp = node.get_attr('function_cpp', '')
-                assert 'nnet::gemm_stream' in fn_cpp, f'Expected nnet::gemm_stream in function_cpp: {fn_cpp!r}'
+                # io_stream: the node's IP is called by name on packed row streams, with
+                # hls4ml's pack/unpack processes around the call
+                assert f'gemm_stream_{node.name}(' in fn_cpp, f'Expected gemm_stream_{node.name}( in function_cpp: {fn_cpp!r}'
+                assert 'nnet::pack_stream<' in fn_cpp and 'nnet::unpack_stream<' in fn_cpp
                 break
         else:
             pytest.fail('No Gemm node found in graph')
