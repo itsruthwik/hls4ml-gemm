@@ -141,7 +141,12 @@ def _generate_mask_fn_stream_beatwise(
         compute = '        switch (i) {\n' + '\n'.join(cases) + '\n            default: break;\n        }'
 
     stream = _stream_type(backend)
-    return f"""
+    # One beat per cycle, always. The body converts every lane of a beat in
+    # parallel, so there is nothing for ReuseFactor to share: a lane mux would cost
+    # as much as the few-bit conversion it replaces.
+    if backend.lower() in ('vivado', 'vitis'):
+        # Vivado/Vitis bind a loop pragma inside the loop body.
+        return f"""
 template<typename input_t, typename output_t>
 void {name}({stream}<input_t> &inp_s, {stream}<output_t> &out_s) {{
     static const unsigned N = {n};
@@ -152,11 +157,47 @@ void {name}({stream}<input_t> &inp_s, {stream}<output_t> &out_s) {{
 
 Beat_{name}:
     for (unsigned i = 0; i < N / BEAT; i++) {{
+        #pragma HLS PIPELINE II=1
         input_t beat = inp_s.read();
         output_t res;
 {compute}
         out_s.write(res);
     }}
+}}
+"""
+    # Catapult: a free-running block that converts one beat per call, its main loop
+    # pipelined at II=1, so there is no per-frame loop fill/drain (which would
+    # dominate a frame of one or a few beats). The beat index for beat-dependent
+    # lane types is kept across calls. The C model still converts a whole frame per
+    # call, as hls4ml calls each layer once per frame; the stream is identical.
+    return f"""
+#pragma hls_design block
+#pragma hls_pipeline_init_interval 1
+template<typename input_t, typename output_t>
+void {name}({stream}<input_t> &inp_s, {stream}<output_t> &out_s) {{
+    static const unsigned N = {n};
+    static const unsigned BEAT = {beat_size};
+    static_assert(N % input_t::size == 0, "{name}: input beat size must divide N");
+    static_assert(input_t::size == BEAT, "{name}: input beat size disagrees with codegen");
+    static_assert(output_t::size == BEAT, "{name}: output beat size disagrees with codegen");
+#ifdef __SYNTHESIS__
+    static unsigned i = 0;
+    {{
+        input_t beat = inp_s.read();
+        output_t res;
+{compute}
+        out_s.write(res);
+    }}
+    i = (i + 1 == N / BEAT) ? 0 : i + 1;
+#else
+Beat_{name}:
+    for (unsigned i = 0; i < N / BEAT; i++) {{
+        input_t beat = inp_s.read();
+        output_t res;
+{compute}
+        out_s.write(res);
+    }}
+#endif
 }}
 """
 
