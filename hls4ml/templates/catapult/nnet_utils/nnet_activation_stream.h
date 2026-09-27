@@ -410,6 +410,155 @@ void softmax_argmax(ac_channel<data_T> &data, ac_channel<res_T> &res) {
     }
 }
 
+#ifndef HLS4ML_SOFTMAX_AC_MATH
+// Resource strategy for the stable softmax. One row (one beat) is accepted every
+// reuse_factor cycles: lanes = ceil(size / reuse_factor) elements per cycle, and rows overlap
+// across three blocks (max | exp + sum | normalize) joined by channels, each one flat II 1
+// loop over (row, fold step). Only lane groups and one scalar per row flow between blocks.
+// Bit-exact to softmax_stable: the exp sum is exact in accum_t and rounded once into
+// inv_inp_t, so the summation order doesn't matter.
+namespace softmax_resource {
+
+template <class data_T, typename CONFIG_T> struct fold {
+    static const unsigned lanes = DIV_ROUNDUP(data_T::size, CONFIG_T::reuse_factor);
+    static const unsigned steps = DIV_ROUNDUP(data_T::size, lanes);
+    static const unsigned rows = CONFIG_T::n_in / data_T::size;
+    typedef array<typename data_T::value_type, lanes> x_group_t;
+    typedef array<typename CONFIG_T::accum_t, lanes> e_group_t;
+};
+
+#pragma hls_design block
+template <class data_T, typename CONFIG_T>
+void row_max(ac_channel<data_T> &data, ac_channel<typename fold<data_T, CONFIG_T>::x_group_t> &xs,
+             ac_channel<typename data_T::value_type> &maxs) {
+    typedef fold<data_T, CONFIG_T> F;
+    data_T x;
+    typename data_T::value_type mx[F::lanes];
+    unsigned s = 0;
+    #pragma hls_pipeline_init_interval 1
+SoftmaxMaxLoop:
+    for (unsigned n = 0; n < F::rows * F::steps; n++) {
+        if (s == 0)
+            x = data.read();
+        typename F::x_group_t g;
+        #pragma hls_unroll yes
+        for (unsigned l = 0; l < F::lanes; l++) {
+            unsigned j = s * F::lanes + l;
+            typename data_T::value_type v = (j < data_T::size) ? x[j] : x[0];
+            g[l] = v;
+            if (s == 0 || v > mx[l])
+                mx[l] = v;
+        }
+        xs.write(g);
+        if (s == F::steps - 1) {
+            typename data_T::value_type m = mx[0];
+            #pragma hls_unroll yes
+            for (unsigned l = 1; l < F::lanes; l++) {
+                if (mx[l] > m)
+                    m = mx[l];
+            }
+            maxs.write(m);
+            s = 0;
+        } else {
+            s++;
+        }
+    }
+}
+
+#pragma hls_design block
+template <class data_T, typename CONFIG_T>
+void row_exp(ac_channel<typename fold<data_T, CONFIG_T>::x_group_t> &xs, ac_channel<typename data_T::value_type> &maxs,
+             ac_channel<typename fold<data_T, CONFIG_T>::e_group_t> &es,
+             ac_channel<typename CONFIG_T::inv_table_t> &invs,
+             typename CONFIG_T::exp_table_t exp_table[CONFIG_T::exp_table_size],
+             typename CONFIG_T::inv_table_t invert_table[CONFIG_T::inv_table_size]) {
+    typedef fold<data_T, CONFIG_T> F;
+    typename data_T::value_type x_max = 0;
+    typename CONFIG_T::accum_t part[F::lanes];
+    unsigned s = 0;
+    #pragma hls_pipeline_init_interval 1
+SoftmaxExpLoop:
+    for (unsigned n = 0; n < F::rows * F::steps; n++) {
+        if (s == 0)
+            x_max = maxs.read();
+        typename F::x_group_t g = xs.read();
+        typename F::e_group_t eg;
+        #pragma hls_unroll yes
+        for (unsigned l = 0; l < F::lanes; l++) {
+            unsigned j = s * F::lanes + l;
+            typename CONFIG_T::accum_t acc = (s == 0) ? typename CONFIG_T::accum_t(0) : part[l];
+            typename CONFIG_T::accum_t ev = 0;
+            if (j < data_T::size) {
+                typename CONFIG_T::inp_norm_t d = x_max - g[l];
+                ev = exp_table[softmax_idx_from_real_val<typename CONFIG_T::inp_norm_t, CONFIG_T::exp_table_size>(d)];
+                acc += ev;
+            }
+            eg[l] = ev;
+            part[l] = acc;
+        }
+        es.write(eg);
+        if (s == F::steps - 1) {
+            typename CONFIG_T::accum_t sum = 0;
+            #pragma hls_unroll yes
+            for (unsigned l = 0; l < F::lanes; l++) {
+                sum += part[l];
+            }
+            typename CONFIG_T::inv_inp_t exp_sum = sum;
+            invs.write(invert_table[softmax_idx_from_real_val<typename CONFIG_T::inv_inp_t, CONFIG_T::inv_table_size>(exp_sum)]);
+            s = 0;
+        } else {
+            s++;
+        }
+    }
+}
+
+#pragma hls_design block
+template <class data_T, class res_T, typename CONFIG_T>
+void row_normalize(ac_channel<typename fold<data_T, CONFIG_T>::e_group_t> &es,
+                   ac_channel<typename CONFIG_T::inv_table_t> &invs, ac_channel<res_T> &res) {
+    typedef fold<data_T, CONFIG_T> F;
+    res_T y;
+    typename CONFIG_T::inv_table_t inv = 0;
+    unsigned s = 0;
+    #pragma hls_pipeline_init_interval 1
+SoftmaxNormalizeLoop:
+    for (unsigned n = 0; n < F::rows * F::steps; n++) {
+        if (s == 0)
+            inv = invs.read();
+        typename F::e_group_t eg = es.read();
+        #pragma hls_unroll yes
+        for (unsigned l = 0; l < F::lanes; l++) {
+            unsigned j = s * F::lanes + l;
+            if (j < res_T::size)
+                y[j] = eg[l] * inv;
+        }
+        if (s == F::steps - 1) {
+            res.write(y);
+            s = 0;
+        } else {
+            s++;
+        }
+    }
+}
+
+} // namespace softmax_resource
+
+template <class data_T, class res_T, typename CONFIG_T>
+void softmax_stable_resource(ac_channel<data_T> &data, ac_channel<res_T> &res,
+                             typename CONFIG_T::exp_table_t exp_table[CONFIG_T::exp_table_size],
+                             typename CONFIG_T::inv_table_t invert_table[CONFIG_T::inv_table_size]) {
+    typedef softmax_resource::fold<data_T, CONFIG_T> F;
+    static ac_channel<typename F::x_group_t> x_stream;
+    static ac_channel<typename data_T::value_type> max_stream;
+    static ac_channel<typename F::e_group_t> e_stream;
+    static ac_channel<typename CONFIG_T::inv_table_t> inv_stream;
+
+    softmax_resource::row_max<data_T, CONFIG_T>(data, x_stream, max_stream);
+    softmax_resource::row_exp<data_T, CONFIG_T>(x_stream, max_stream, e_stream, inv_stream, exp_table, invert_table);
+    softmax_resource::row_normalize<data_T, res_T, CONFIG_T>(e_stream, inv_stream, res);
+}
+#endif // HLS4ML_SOFTMAX_AC_MATH
+
 // Table forms (latency / stable): tables come in as constant weight arrays.
 template <class data_T, class res_T, typename CONFIG_T>
 void softmax(ac_channel<data_T> &data, ac_channel<res_T> &res,
@@ -426,6 +575,8 @@ void softmax(ac_channel<data_T> &data, ac_channel<res_T> &res,
 #else
     if constexpr (CONFIG_T::implementation == softmax_implementation::latency) {
         softmax_latency<data_T, res_T, CONFIG_T>(data, res, exp_table, invert_table);
+    } else if constexpr (CONFIG_T::strategy == nnet::resource) {
+        softmax_stable_resource<data_T, res_T, CONFIG_T>(data, res, exp_table, invert_table);
     } else {
         softmax_stable<data_T, res_T, CONFIG_T>(data, res, exp_table, invert_table);
     }
@@ -509,8 +660,14 @@ TanHActLoop:
 // *************************************************
 //       UnaryLUT Activation
 // *************************************************
+// Two implementations, selected by CONFIG_T::strategy like dense:
+//  - latency:  every element of a beat looked up in parallel from the table.
+//  - resource: the beat is folded over reuse_factor cycles, ceil(size / reuse_factor)
+//              lookups per cycle, each from a memory copy of the table (a dual-port copy
+//              serves two lanes).
 template <class data_T, class res_T, typename CONFIG_T>
-void unary_lut(ac_channel<data_T> &data, ac_channel<res_T> &res, typename CONFIG_T::table_t table[CONFIG_T::table_size]) {
+void unary_lut_latency(ac_channel<data_T> &data, ac_channel<res_T> &res,
+                       typename CONFIG_T::table_t table[CONFIG_T::table_size]) {
     // Vivado: #pragma HLS PIPELINE II=CONFIG_T::reuse_factor (Catapult takes a constexpr name)
     constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
     (void)ce_reuse_factor;
@@ -533,6 +690,64 @@ UnaryLUTActLoop:
         }
 
         res.write(out_data);
+    }
+}
+
+template <class data_T, class res_T, typename CONFIG_T>
+void unary_lut_resource(ac_channel<data_T> &data, ac_channel<res_T> &res,
+                        typename CONFIG_T::table_t table[CONFIG_T::table_size]) {
+    static const unsigned rf = CONFIG_T::reuse_factor;
+    static const unsigned lanes = DIV_ROUNDUP(data_T::size, rf);
+    static const unsigned n_copies = DIV_ROUNDUP(lanes, 2);
+
+    // Memory copies of the table, filled on the first call (the table is constant).
+    static typename CONFIG_T::table_t table_mem[n_copies][CONFIG_T::table_size];
+    static bool table_loaded = false;
+    if (!table_loaded) {
+        #pragma hls_pipeline_init_interval 1
+    UnaryLUTLoadTable:
+        for (int t = 0; t < CONFIG_T::table_size; t++) {
+            #pragma hls_unroll yes
+            for (int k = 0; k < n_copies; k++) {
+                table_mem[k][t] = table[t];
+            }
+        }
+        table_loaded = true;
+    }
+
+    data_T in_data;
+    res_T out_data;
+
+    // One flat loop over (beat, fold step) so consecutive beats don't restart the pipeline.
+    unsigned c = 0;
+    #pragma hls_pipeline_init_interval 1
+UnaryLUTFoldLoop:
+    for (int n = 0; n < CONFIG_T::n_in / data_T::size * rf; n++) {
+        if (c == 0)
+            in_data = data.read();
+        #pragma hls_unroll yes
+        for (int l = 0; l < lanes; l++) {
+            int j = c * lanes + l;
+            if (j < data_T::size) {
+                unsigned index = get_index_unary_lut<CONFIG_T::table_size>(in_data[j]);
+                out_data[j] = table_mem[l / 2][index];
+            }
+        }
+        if (c == rf - 1) {
+            res.write(out_data);
+            c = 0;
+        } else {
+            c++;
+        }
+    }
+}
+
+template <class data_T, class res_T, typename CONFIG_T>
+void unary_lut(ac_channel<data_T> &data, ac_channel<res_T> &res, typename CONFIG_T::table_t table[CONFIG_T::table_size]) {
+    if constexpr (CONFIG_T::strategy == nnet::resource) {
+        unary_lut_resource<data_T, res_T, CONFIG_T>(data, res, table);
+    } else {
+        unary_lut_latency<data_T, res_T, CONFIG_T>(data, res, table);
     }
 }
 

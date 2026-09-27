@@ -31,6 +31,7 @@ from hls4ml.model.layers import (
     SeparableConv1D,
     SeparableConv2D,
     SimpleRNN,
+    Softmax,
 )
 from hls4ml.backends.catapult.passes import (
     TransposeWeightsForGemmIP,
@@ -40,6 +41,7 @@ from hls4ml.backends.catapult.passes import (
     ValidateGemm,
     SplitAttentionHeads,
 )
+from hls4ml.model.optimizer.passes.hgq_proxy_model import UnaryLUT
 from hls4ml.model.optimizer import get_backend_passes, layer_optimizer
 from hls4ml.model.types import (
     FixedPrecisionType,
@@ -399,6 +401,35 @@ class CatapultBackend(FPGABackend):
 
         target_cycles = layer.model.config.get_target_cycles(layer)
         layer.set_attr('target_cycles', target_cycles)
+
+    @layer_optimizer(LayerNormalization)
+    def init_layernorm(self, layer):
+        # Resource folds the io_stream kernel over ReuseFactor cycles per token; everything else
+        # (including a model-wide GEMM strategy, which has no LayerNorm meaning) keeps latency.
+        if layer.model.config.is_resource_strategy(layer):
+            layer.set_attr('strategy', 'resource')
+        else:
+            layer.set_attr('strategy', 'latency')
+
+    @layer_optimizer(Softmax)
+    def init_softmax(self, layer):
+        # Resource folds the io_stream stable softmax over ReuseFactor cycles per row, with
+        # its tables in BRAM; everything else (including a model-wide GEMM strategy) keeps
+        # the existing kernels.
+        if layer.model.config.is_resource_strategy(layer):
+            layer.set_attr('strategy', 'resource')
+        else:
+            layer.set_attr('strategy', 'latency')
+
+    @layer_optimizer(UnaryLUT)
+    def init_unary_lut(self, layer):
+        # Resource folds the io_stream lookup over ReuseFactor cycles per beat, reading the
+        # table from BRAM; everything else (including a model-wide GEMM strategy) keeps the
+        # fully parallel latency kernel.
+        if layer.model.config.is_resource_strategy(layer):
+            layer.set_attr('strategy', 'resource')
+        else:
+            layer.set_attr('strategy', 'latency')
 
     @layer_optimizer(Dense)
     def init_dense(self, layer):

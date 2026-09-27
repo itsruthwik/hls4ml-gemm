@@ -5,7 +5,7 @@
 // The io_stream counterparts live in nnet_im2col_stream.h. These take a flat
 // channels_last input array (random access) and materialize a_rows[gemm_m], so
 // no hls::stream / shift-register machinery is needed. Assumes the conv-GEMM
-// guard's constraints: stride 1, valid (zero) padding, dilation 1.
+// guard's constraints: valid (zero) padding, dilation 1 (any stride).
 
 #include "nnet_common.h"
 
@@ -31,7 +31,7 @@ GemmRowsWidth:
         GemmRowsChan:
             for (unsigned c = 0; c < CONFIG_T::n_chan; c++) {
                 #pragma HLS UNROLL
-                out_pack[kw * CONFIG_T::n_chan + c] = data[(ow + kw) * CONFIG_T::n_chan + c];
+                out_pack[kw * CONFIG_T::n_chan + c] = data[(ow * CONFIG_T::stride_width + kw) * CONFIG_T::n_chan + c];
             }
         }
         a_rows[ow] = out_pack;
@@ -65,7 +65,8 @@ GemmRowsHeight:
                     for (unsigned c = 0; c < CONFIG_T::n_chan; c++) {
                         #pragma HLS UNROLL
                         out_pack[(kh * CONFIG_T::filt_width + kw) * CONFIG_T::n_chan + c] =
-                            data[((oh + kh) * CONFIG_T::in_width + (ow + kw)) * CONFIG_T::n_chan + c];
+                            data[((oh * CONFIG_T::stride_height + kh) * CONFIG_T::in_width +
+                                  (ow * CONFIG_T::stride_width + kw)) * CONFIG_T::n_chan + c];
                     }
                 }
             }

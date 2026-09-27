@@ -84,3 +84,33 @@ def test_multimodelgraph_predict(test_case_id, split_layers, io_type, strategy, 
     #     sim_results = hls_model_multi.predict(inp, sim='rtl')
     #     for sim_out, pred_out in zip(sim_results, list([pred_multi[0][0], pred_multi[1][0]])):
     #         np.testing.assert_allclose(sim_out, pred_out, rtol=0, atol=1e-5)
+
+
+def test_multimodelgraph_split_at_clone(test_case_id):
+    """
+    Splits an io_stream model right before an inserted Clone layer (relu_common fans out to
+    both heads). The Clone's call is rendered by a Vivado-flow template, so the subgraph must
+    re-render it against its new input; otherwise it still reads the pre-split stream and the
+    subgraph does not compile.
+    """
+    model = create_test_model()
+    model.compile(optimizer='adam', loss='categorical_crossentropy')
+    X_input = np.random.rand(5, 6, 8).astype(np.float32)
+
+    config = hls4ml.utils.config_from_keras_model(model, granularity='model', default_precision='ap_fixed<32,16>')
+    output_dir = str(test_root_path / test_case_id)
+
+    hls_model_mono = hls4ml.converters.convert_from_keras_model(
+        model, hls_config=config, output_dir=output_dir, backend='vitis', io_type='io_stream'
+    )
+    assert 'clone_relu_common' in hls_model_mono.graph
+    hls_model_mono.compile()
+    pred_mono = hls_model_mono.predict(X_input)
+
+    hls_model_multi = hls4ml.model.to_multi_model_graph(hls_model_mono, ['clone_relu_common'])
+    hls_model_multi.compile()
+    pred_multi = hls_model_multi.predict(X_input)
+
+    assert len(hls_model_multi.graphs) == 2
+    for mono_out, multi_out in zip(pred_mono, pred_multi):
+        np.testing.assert_allclose(multi_out, mono_out, rtol=0, atol=1e-5)

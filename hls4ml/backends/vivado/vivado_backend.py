@@ -31,6 +31,7 @@ from hls4ml.model.layers import (
     SeparableConv1D,
     SeparableConv2D,
     SimpleRNN,
+    Softmax,
     TimeDistributed,
 )
 from hls4ml.backends.vivado.passes.gemm_nodes import (
@@ -41,6 +42,7 @@ from hls4ml.backends.vivado.passes.gemm_nodes import (
     ValidateGemm,
     SplitAttentionHeads,
 )
+from hls4ml.model.optimizer.passes.hgq_proxy_model import UnaryLUT
 from hls4ml.model.optimizer import get_backend_passes, layer_optimizer
 from hls4ml.model.types import FixedPrecisionType, IntegerPrecisionType, NamedType, PackedType, RoundingMode, SaturationMode
 from hls4ml.report import parse_vivado_report
@@ -212,14 +214,10 @@ class VivadoBackend(FPGABackend):
                     f'Layer "{layer.name}" requested Strategy: GEMM, but Vivado Conv GEMM does not support dilation > 1.'
                 )
 
-        # Row/column streaming requires stride 1 and valid (zero) padding.
-        stride_h = layer.get_attr('stride_height', 1)
-        stride_w = layer.get_attr('stride_width', 1)
-        if stride_h != 1 or stride_w != 1:
-            raise ValueError(
-                f'Layer "{layer.name}" requested Strategy: GEMM, but only stride=1 is supported '
-                f'by the row/column GEMM IP (got stride={stride_h}x{stride_w}).'
-            )
+        # Row/column streaming requires valid (zero) padding. Any stride is fine: the im2col
+        # line buffer's stride counters emit one K-wide row per valid output position only,
+        # so the GEMM just sees M = out_height * out_width rows (e.g. a ViT patch embedding,
+        # stride == kernel, is a plain K = kh*kw*C GEMM).
         pad_top = layer.get_attr('pad_top', 0)
         pad_bottom = layer.get_attr('pad_bottom', 0)
         pad_left = layer.get_attr('pad_left', 0)
@@ -751,6 +749,35 @@ class VivadoBackend(FPGABackend):
     @layer_optimizer(Pooling2D)
     def init_pooling2d(self, layer):
         layer.set_attr('implementation', layer.model.config.get_conv_implementation(layer).lower())
+
+    @layer_optimizer(LayerNormalization)
+    def init_layernorm(self, layer):
+        # Resource folds the io_stream kernel over ReuseFactor cycles per token; everything else
+        # (including a model-wide GEMM strategy, which has no LayerNorm meaning) keeps latency.
+        if layer.model.config.is_resource_strategy(layer):
+            layer.set_attr('strategy', 'resource')
+        else:
+            layer.set_attr('strategy', 'latency')
+
+    @layer_optimizer(Softmax)
+    def init_softmax(self, layer):
+        # Resource folds the io_stream stable softmax over ReuseFactor cycles per row, with
+        # its tables in BRAM; everything else (including a model-wide GEMM strategy) keeps
+        # the existing kernels.
+        if layer.model.config.is_resource_strategy(layer):
+            layer.set_attr('strategy', 'resource')
+        else:
+            layer.set_attr('strategy', 'latency')
+
+    @layer_optimizer(UnaryLUT)
+    def init_unary_lut(self, layer):
+        # Resource folds the io_stream lookup over ReuseFactor cycles per beat, reading the
+        # table from BRAM; everything else (including a model-wide GEMM strategy) keeps the
+        # fully parallel latency kernel.
+        if layer.model.config.is_resource_strategy(layer):
+            layer.set_attr('strategy', 'resource')
+        else:
+            layer.set_attr('strategy', 'latency')
 
     @layer_optimizer(Embedding)
     def init_embed(self, layer):

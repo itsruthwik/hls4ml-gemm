@@ -2,7 +2,6 @@ import glob
 import os
 import stat
 import tarfile
-import json
 from collections import OrderedDict
 from copy import copy
 from pathlib import Path
@@ -20,6 +19,7 @@ import yaml
 from hls4ml.backends import get_backend
 from hls4ml.backends.fpga.gemm.gemm_nodes import Gemm
 from hls4ml.model.layers import EinsumDense, Einsum
+from hls4ml.writer.gemm_ip_json import write_gemm_config_json
 from hls4ml.writer.writers import Writer
 
 config_filename = 'hls4ml_config.yml'
@@ -1591,6 +1591,5 @@ class CatapultWriter(Writer):
 
         if gemm_info:
             output_dir = model.config.get_output_dir()
-            with open(f'{output_dir}/gemm_config.json', 'w') as f:
-                json.dump(gemm_info, f, indent=4)
+            write_gemm_config_json(f'{output_dir}/gemm_config.json', gemm_info)
             print(f'Wrote GEMM configuration to {output_dir}/gemm_config.json')

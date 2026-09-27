@@ -87,22 +87,27 @@ class TestGeneralConv1DGemmIP:
         assert 'static const unsigned gemm_k = 9;' in parameters_text   # 3 * 3 = filt_width * n_chan
         assert 'static const unsigned gemm_n = 8;' in parameters_text   # n_filt
 
-    def test_conv1d_stride_rejects_gemm_ip(self, test_case_id):
-        """The row/col GEMM IP supports stride=1 only; stride>1 must be rejected."""
+    def test_conv1d_stride_gemm_ip_metadata(self, test_case_id):
+        """Stride>1 is accepted: im2col emits one row per strided output position."""
         model = _make_general_conv1d_model((12, 4), kernel_size=2, n_filters=6, strides=2, padding='valid', name='conv1d')
 
         config = hls4ml.utils.config_from_keras_model(model, granularity='name')
         config['LayerName']['conv1d']['Strategy'] = 'GEMM'
 
         output_dir = test_root_path / test_case_id
-        with pytest.raises(ValueError, match='only stride=1'):
-            hls4ml.converters.convert_from_keras_model(
-                model,
-                hls_config=config,
-                output_dir=str(output_dir),
-                io_type='io_stream',
-                backend='Catapult',
-            )
+        hls_model = hls4ml.converters.convert_from_keras_model(
+            model,
+            hls_config=config,
+            output_dir=str(output_dir),
+            io_type='io_stream',
+            backend='Catapult',
+        )
+        hls_model.write()
+
+        parameters_text = (output_dir / 'firmware' / 'parameters.h').read_text()
+        assert 'static const unsigned gemm_m = 6;' in parameters_text   # (12 - 2) / 2 + 1
+        assert 'static const unsigned gemm_k = 8;' in parameters_text   # 2 * 4 = filt_width * n_chan
+        assert 'static const unsigned stride_width = 2;' in parameters_text
 
     def test_conv1d_channels_first_rejects_gemm_ip(self, test_case_id):
         """Conv1D with channels_first should reject GEMM IP for now."""
@@ -149,22 +154,28 @@ class TestGeneralConv2DGemmIP:
         assert myproject_text.count('gemm_conv2d_stage(') >= 2, 'stage should be defined and invoked'
         assert 'nnet::im2col_2d_gemm_rows<' in myproject_text
 
-    def test_conv2d_stride_rejects_gemm_ip(self, test_case_id):
-        """The row/col GEMM IP supports stride=1 only; stride>1 must be rejected."""
+    def test_conv2d_stride_gemm_ip_metadata(self, test_case_id):
+        """Stride>1 is accepted; kernel == stride (patch embedding) is a plain GEMM over patches."""
         model = _make_general_conv2d_model((8, 8, 3), kernel_size=(2, 2), n_filters=8, strides=(2, 2), padding='valid', name='conv2d')
 
         config = hls4ml.utils.config_from_keras_model(model, granularity='name')
         config['LayerName']['conv2d']['Strategy'] = 'GEMM'
 
         output_dir = test_root_path / test_case_id
-        with pytest.raises(ValueError, match='only stride=1'):
-            hls4ml.converters.convert_from_keras_model(
-                model,
-                hls_config=config,
-                output_dir=str(output_dir),
-                io_type='io_stream',
-                backend='Catapult',
-            )
+        hls_model = hls4ml.converters.convert_from_keras_model(
+            model,
+            hls_config=config,
+            output_dir=str(output_dir),
+            io_type='io_stream',
+            backend='Catapult',
+        )
+        hls_model.write()
+
+        parameters_text = (output_dir / 'firmware' / 'parameters.h').read_text()
+        assert 'static const unsigned gemm_m = 16;' in parameters_text   # 4 * 4 patches
+        assert 'static const unsigned gemm_k = 12;' in parameters_text   # 2 * 2 * 3
+        assert 'static const unsigned stride_height = 2;' in parameters_text
+        assert 'static const unsigned stride_width = 2;' in parameters_text
 
     def test_conv2d_rectangular_kernel_gemm_ip_metadata(self, test_case_id):
         """Conv2D with rectangular kernel should emit correct GEMM metadata."""
@@ -549,8 +560,8 @@ class TestPointwiseConvGemmIP:
             assert 'gemm_k = 3' in content or 'gemm_k=3' in content, "Pointwise Conv1D gemm_k should be n_chan"
             assert 'gemm_n = 8' in content or 'gemm_n=8' in content, "Pointwise Conv1D gemm_n should be n_filt"
 
-    def test_pointwise_conv1d_stride_rejects_gemm_ip(self, test_case_id):
-        """The row/col GEMM IP supports stride=1 only, including for pointwise conv."""
+    def test_pointwise_conv1d_stride_uses_im2col(self, test_case_id):
+        """A strided 1x1 conv subsamples, so it routes through im2col rather than the direct GEMM."""
         model = _make_general_conv1d_model((10, 3), kernel_size=1, n_filters=8,
                                           padding='valid', strides=2, name='conv1d')
 
@@ -558,14 +569,20 @@ class TestPointwiseConvGemmIP:
         config['LayerName']['conv1d']['Strategy'] = 'GEMM'
 
         output_dir = test_root_path / test_case_id
-        with pytest.raises(ValueError, match='only stride=1'):
-            hls4ml.converters.convert_from_keras_model(
-                model,
-                hls_config=config,
-                output_dir=str(output_dir),
-                io_type='io_stream',
-                backend='Catapult',
-            )
+        hls_model = hls4ml.converters.convert_from_keras_model(
+            model,
+            hls_config=config,
+            output_dir=str(output_dir),
+            io_type='io_stream',
+            backend='Catapult',
+        )
+        hls_model.write()
+
+        parameters_text = (output_dir / 'firmware' / 'parameters.h').read_text()
+        assert 'static const unsigned gemm_m = 5;' in parameters_text   # (10 - 1) / 2 + 1
+        assert 'static const unsigned gemm_k = 3;' in parameters_text   # n_chan
+        myproject_text = (output_dir / 'firmware' / 'myproject.cpp').read_text()
+        assert 'im2col_' in myproject_text, 'strided 1x1 conv must subsample through im2col'
 
     def test_pointwise_conv2d_valid_padding_stride1_codegen(self, test_case_id):
         """Pointwise Conv2D with valid padding, stride=1 should generate correct GEMM metadata."""
@@ -625,8 +642,8 @@ class TestPointwiseConvGemmIP:
             assert 'gemm_m = 64' in content or 'gemm_m=64' in content, "Pointwise Conv2D with same padding should have M=64"
             assert 'gemm_k = 3' in content or 'gemm_k=3' in content, "Pointwise Conv2D gemm_k should be n_chan"
 
-    def test_pointwise_conv2d_stride_rejects_gemm_ip(self, test_case_id):
-        """The row/col GEMM IP supports stride=1 only, including for pointwise conv."""
+    def test_pointwise_conv2d_stride_uses_im2col(self, test_case_id):
+        """A strided 1x1 conv subsamples, so it routes through im2col rather than the direct GEMM."""
         model = _make_general_conv2d_model((8, 8, 3), kernel_size=(1, 1), n_filters=16,
                                           padding='valid', strides=(2, 2), name='conv2d')
 
@@ -634,25 +651,31 @@ class TestPointwiseConvGemmIP:
         config['LayerName']['conv2d']['Strategy'] = 'GEMM'
 
         output_dir = test_root_path / test_case_id
-        with pytest.raises(ValueError, match='only stride=1'):
-            hls4ml.converters.convert_from_keras_model(
-                model,
-                hls_config=config,
-                output_dir=str(output_dir),
-                io_type='io_stream',
-                backend='Catapult',
-            )
+        hls_model = hls4ml.converters.convert_from_keras_model(
+            model,
+            hls_config=config,
+            output_dir=str(output_dir),
+            io_type='io_stream',
+            backend='Catapult',
+        )
+        hls_model.write()
+
+        parameters_text = (output_dir / 'firmware' / 'parameters.h').read_text()
+        assert 'static const unsigned gemm_m = 16;' in parameters_text   # 4 * 4
+        assert 'static const unsigned gemm_k = 3;' in parameters_text   # n_chan
+        myproject_text = (output_dir / 'firmware' / 'myproject.cpp').read_text()
+        assert 'im2col_' in myproject_text, 'strided 1x1 conv must subsample through im2col'
 
     def test_pointwise_conv1d_stride_matrix_validated(self, test_case_id):
-        """Pointwise Conv1D: stride=1 generates code; stride>1 is rejected.
+        """Pointwise Conv1D: every stride generates code (stride>1 via im2col).
 
         kernel=1 'same' padding adds no pad, so it is accepted at stride=1.
         """
         configs_to_test = [
-            {'stride': 1, 'padding': 'valid', 'ok': True},
-            {'stride': 1, 'padding': 'same', 'ok': True},
-            {'stride': 2, 'padding': 'valid', 'ok': False},
-            {'stride': 3, 'padding': 'valid', 'ok': False},
+            {'stride': 1, 'padding': 'valid'},
+            {'stride': 1, 'padding': 'same'},
+            {'stride': 2, 'padding': 'valid'},
+            {'stride': 3, 'padding': 'valid'},
         ]
 
         for i, cfg in enumerate(configs_to_test):
@@ -663,34 +686,24 @@ class TestPointwiseConvGemmIP:
             config['LayerName']['conv1d']['Strategy'] = 'GEMM'
 
             output_dir = test_root_path / test_case_id / f"s{cfg['stride']}_p{cfg['padding']}"
-            if cfg['ok']:
-                hls_model = hls4ml.converters.convert_from_keras_model(
-                    model,
-                    hls_config=config,
-                    output_dir=str(output_dir),
-                    io_type='io_stream',
-                    backend='Catapult',
-                )
-                hls_model.write()
-                assert (output_dir / 'firmware/myproject.h').exists()
-            else:
-                with pytest.raises(ValueError, match='only stride=1'):
-                    hls4ml.converters.convert_from_keras_model(
-                        model,
-                        hls_config=config,
-                        output_dir=str(output_dir),
-                        io_type='io_stream',
-                        backend='Catapult',
-                    )
+            hls_model = hls4ml.converters.convert_from_keras_model(
+                model,
+                hls_config=config,
+                output_dir=str(output_dir),
+                io_type='io_stream',
+                backend='Catapult',
+            )
+            hls_model.write()
+            assert (output_dir / 'firmware/myproject.h').exists()
 
     def test_pointwise_conv2d_stride_matrix_validated(self, test_case_id):
-        """Pointwise Conv2D: stride=(1,1) generates code; any stride>1 is rejected."""
+        """Pointwise Conv2D: every stride generates code (stride>1 via im2col)."""
         configs_to_test = [
-            {'stride': (1, 1), 'padding': 'valid', 'ok': True},
-            {'stride': (1, 1), 'padding': 'same', 'ok': True},
-            {'stride': (2, 2), 'padding': 'valid', 'ok': False},
-            {'stride': (1, 2), 'padding': 'valid', 'ok': False},
-            {'stride': (2, 1), 'padding': 'valid', 'ok': False},
+            {'stride': (1, 1), 'padding': 'valid'},
+            {'stride': (1, 1), 'padding': 'same'},
+            {'stride': (2, 2), 'padding': 'valid'},
+            {'stride': (1, 2), 'padding': 'valid'},
+            {'stride': (2, 1), 'padding': 'valid'},
         ]
 
         for i, cfg in enumerate(configs_to_test):
@@ -702,22 +715,12 @@ class TestPointwiseConvGemmIP:
 
             s_str = f"s{cfg['stride'][0]}x{cfg['stride'][1]}"
             output_dir = test_root_path / test_case_id / f"{s_str}_p{cfg['padding']}"
-            if cfg['ok']:
-                hls_model = hls4ml.converters.convert_from_keras_model(
-                    model,
-                    hls_config=config,
-                    output_dir=str(output_dir),
-                    io_type='io_stream',
-                    backend='Catapult',
-                )
-                hls_model.write()
-                assert (output_dir / 'firmware/myproject.h').exists()
-            else:
-                with pytest.raises(ValueError, match='only stride=1'):
-                    hls4ml.converters.convert_from_keras_model(
-                        model,
-                        hls_config=config,
-                        output_dir=str(output_dir),
-                        io_type='io_stream',
-                        backend='Catapult',
-                    )
+            hls_model = hls4ml.converters.convert_from_keras_model(
+                model,
+                hls_config=config,
+                output_dir=str(output_dir),
+                io_type='io_stream',
+                backend='Catapult',
+            )
+            hls_model.write()
+            assert (output_dir / 'firmware/myproject.h').exists()

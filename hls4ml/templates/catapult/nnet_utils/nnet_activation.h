@@ -48,6 +48,7 @@ struct activ_config {
 
     // Resource reuse info
     static const unsigned io_type = io_parallel;
+    static const unsigned strategy = latency;
     static const unsigned reuse_factor = 1;
 
     // Internal data type definitions

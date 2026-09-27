@@ -59,6 +59,10 @@ class HLSConfig(Serializable):
 
         self.pipeline_style = 'auto'
         self.pipeline_ii = None
+        # Default depth of the io_stream FIFOs between layers; None keeps one beat per
+        # element of the tensor (the whole tensor). LayerName.<name>.InputFifoDepth still
+        # overrides individual edges.
+        self.fifo_depth = None
 
         if 'WriterConfig' in self.config:
             self.writer_config = self.config['WriterConfig']
@@ -279,6 +283,7 @@ class HLSConfig(Serializable):
             self.model_compression = bool(model_cfg.get('Compression', 0))
             self.pipeline_style = model_cfg.get('PipelineStyle', 'auto')
             self.pipeline_ii = model_cfg.get('PipelineInterval', None)
+            self.fifo_depth = model_cfg.get('FifoDepth', None)
 
         layer_type_cfg = hls_config.get('LayerType')
         if layer_type_cfg is not None:
@@ -352,6 +357,7 @@ class HLSConfig(Serializable):
         state['trace_output'] = self.trace_output
         state['pipeline_style'] = self.pipeline_style
         state['pipeline_ii'] = self.pipeline_ii
+        state['fifo_depth'] = self.fifo_depth
         state['writer_config'] = self.writer_config.copy()
         state['flows'] = self.flows.copy()
         state['optimizers'] = self.optimizers.copy() if self.optimizers is not None else None
@@ -390,6 +396,7 @@ class HLSConfig(Serializable):
         config.trace_output = state['trace_output']
         config.pipeline_style = state['pipeline_style']
         config.pipeline_ii = state['pipeline_ii']
+        config.fifo_depth = state.get('fifo_depth')
         config.writer_config = state['writer_config']
         config.flows = state['flows']
         config.optimizers = state['optimizers']
@@ -1108,6 +1115,10 @@ class MultiModelGraph:
             # NOTE might need to examine other subgraph-related flows (i.e., fifo_optimizer)
             subgraph.apply_flow('vivado:specific_types')
             subgraph.apply_flow('vitis:apply_templates')
+            # The Vitis flow runs vivado:apply_templates after its own, and some templates
+            # live only there (e.g. Clone). Re-render them too, or a subgraph whose first node
+            # is such a layer keeps a call that reads the pre-split input stream.
+            subgraph.apply_flow('vivado:apply_templates')
 
             input_var = subgraph.output_vars[input_layer.name]
             if getattr(input_var, 'pragma', None) == 'reshape':

@@ -148,7 +148,10 @@ layernorm_config_template = """struct config{index} : nnet::layernorm_config {{
     typedef {rsqrt_table_t.name} table_t;
     typedef {mean_t} mean_t;
     typedef {norm_t} norm_t;
+    typedef {sum_t} sum_t;
+    typedef {sum2_t} sum2_t;
     static const unsigned io_type = nnet::{iotype};
+    static const unsigned strategy = nnet::{strategy};
     static const unsigned reuse_factor = {reuse};
     template<class x_T, class y_T>
     using product = nnet::product::{product_type}<x_T, y_T>;
@@ -179,6 +182,9 @@ class LayerNormalizationConfigTemplate(LayerConfigTemplate):
         params['mean_t'] = getattr(_mean_t, 'precision', _mean_t).definition_cpp()
         _norm_t = node.get_attr('norm_t')
         params['norm_t'] = getattr(_norm_t, 'precision', _norm_t).definition_cpp()
+        for name in ('sum_t', 'sum2_t'):
+            _t = node.get_attr(name)
+            params[name] = getattr(_t, 'precision', _t).definition_cpp()
 
         return self.template.format(**params)
 
@@ -203,6 +209,15 @@ activ_config_template = """struct {type}_config{index} : nnet::activ_config {{
     static const unsigned n_in = {n_in};
     static const unsigned table_size = {table_size};
     static const unsigned io_type = nnet::{iotype};
+    static const unsigned reuse_factor = {reuse};
+    typedef {table_t.name} table_t;
+}};\n"""
+
+unary_lut_config_template = """struct {type}_config{index} : nnet::activ_config {{
+    static const unsigned n_in = {n_in};
+    static const unsigned table_size = {table_size};
+    static const unsigned io_type = nnet::{iotype};
+    static const unsigned strategy = nnet::{strategy};
     static const unsigned reuse_factor = {reuse};
     typedef {table_t.name} table_t;
 }};\n"""
@@ -239,6 +254,7 @@ softmax_config_template = """struct {type}_config{index} : nnet::activ_config {{
     static const unsigned exp_table_size = {exp_table_size};
     static const unsigned inv_table_size = {inv_table_size};
     static const unsigned io_type = nnet::{iotype};
+    static const unsigned strategy = nnet::{strategy};
     static const unsigned reuse_factor = {reuse};
     static const unsigned axis = {axis};
     static const nnet::softmax_implementation implementation = nnet::softmax_implementation::{implementation};
@@ -263,8 +279,20 @@ activ_include_list = ['nnet_utils/nnet_activation.h', 'nnet_utils/nnet_activatio
 
 class ActivationConfigTemplate(LayerConfigTemplate):
     def __init__(self):
-        super().__init__((Activation, UnaryLUT))
+        super().__init__(Activation)
         self.template = activ_config_template
+
+    def format(self, node):
+        params = self._default_config_params(node)
+        params['type'] = node.get_attr('activation')
+
+        return self.template.format(**params)
+
+
+class UnaryLUTConfigTemplate(LayerConfigTemplate):
+    def __init__(self):
+        super().__init__(UnaryLUT)
+        self.template = unary_lut_config_template
 
     def format(self, node):
         params = self._default_config_params(node)
@@ -311,6 +339,10 @@ class SoftmaxConfigTemplate(ActivationConfigTemplate):
         params.setdefault('n_outer', 1)
         params.setdefault('exp_scale', 1.0)
         params.setdefault('parallelization_factor', -1)
+        # Per-head attention clones carry the pre-split softmax's configured strategy as the
+        # user wrote it (the backend init doesn't revisit them), and a model-wide strategy
+        # such as GEMM means nothing to softmax: only Resource selects the folded kernel.
+        params['strategy'] = 'resource' if str(node.get_attr('strategy', '')).lower() == 'resource' else 'latency'
 
         n_slice = params['n_in'] // params['n_inner'] // params['n_outer']
         params['n_slice'] = n_slice

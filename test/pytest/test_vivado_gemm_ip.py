@@ -893,3 +893,42 @@ def test_conv_gemm_ip_io_parallel_csim(backend, dim, tmp_path):
     y_hls = hls_model.predict(x).reshape(4, -1)
     y_keras = model.predict(x, verbose=0).reshape(4, -1)
     np.testing.assert_allclose(y_hls, y_keras, atol=0.15, rtol=0.0)
+
+
+@pytest.mark.parametrize('io_type', ['io_parallel', 'io_stream'])
+@pytest.mark.parametrize('dim', [1, 2])
+@pytest.mark.parametrize('kernel,stride', [(3, 2), (4, 4), (1, 2)])
+def test_conv_gemm_ip_strided_csim(kernel, stride, dim, io_type, tmp_path):
+    """Strided Conv1D/2D GEMM-IP csim-matches keras. Covers an overlapping stride
+    (kernel 3, stride 2), a non-overlapping one (kernel == stride, as in a ViT patch
+    embedding) where im2col emits exactly one K-wide row per patch, and a strided 1x1
+    conv, which must subsample through im2col instead of the direct pointwise GEMM."""
+    import keras
+
+    rng = np.random.default_rng(2)
+    if dim == 1:
+        inp = keras.layers.Input((16, 3))
+        layer = keras.layers.Conv1D(4, kernel, strides=stride, padding='valid', use_bias=True)
+    else:
+        inp = keras.layers.Input((12, 12, 3))
+        layer = keras.layers.Conv2D(4, kernel, strides=stride, padding='valid', use_bias=True)
+    out = layer(inp)
+    model = keras.Model(inp, out)
+    model.set_weights([rng.standard_normal(w.shape).astype(np.float32) * 0.2 for w in model.get_weights()])
+
+    hls_model = hls4ml.converters.convert_from_keras_model(
+        model,
+        backend='Vitis',
+        io_type=io_type,
+        output_dir=str(tmp_path / f'conv{dim}d_k{kernel}s{stride}_{io_type}'),
+        hls_config={
+            'Model': {'Precision': 'ap_fixed<20,8>', 'ReuseFactor': 1, 'Strategy': 'Latency'},
+            'LayerType': {'Conv1D': {'Strategy': 'GEMM'}, 'Conv2D': {'Strategy': 'GEMM'}},
+        },
+    )
+    assert any('Im2Col' in type(n).__name__ for n in hls_model.graph.values()), 'expected a standalone Im2Col node'
+    hls_model.compile()
+    x = rng.standard_normal((4,) + inp.shape[1:]).astype(np.float32) * 0.5
+    y_hls = hls_model.predict(x).reshape(4, -1)
+    y_keras = model.predict(x, verbose=0).reshape(4, -1)
+    np.testing.assert_allclose(y_hls, y_keras, atol=0.15, rtol=0.0)

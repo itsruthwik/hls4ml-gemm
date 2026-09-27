@@ -18,6 +18,8 @@ struct layernorm_config {
     typedef float table_t;
     typedef float mean_t;
     typedef float norm_t;
+    typedef float sum_t;
+    typedef float sum2_t;
 
     // Layer Sizes
     static const unsigned n_in = 20;
@@ -27,6 +29,7 @@ struct layernorm_config {
 
     // Resource reuse info
     static const unsigned io_type = io_parallel;
+    static const unsigned strategy = latency;
     static const unsigned reuse_factor = 1;
 
     template <class x_T, class y_T> using product = nnet::product::mult<x_T, y_T>;

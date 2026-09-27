@@ -206,6 +206,21 @@ class Layer(Serializable):
             type_t = NamedType(*reversed(self.model.config.get_precision(self, name)))
             self.set_attr(name + '_t', type_t)
 
+    def _set_configured_type_t(self, name):
+        """Materialize an explicitly configured type without replacing defaults.
+
+        Backend-added TypeAttributes normally receive their declared default during
+        validation. Only use ModelConfig's resolved precision when it came from a
+        layer/type/model entry for this variable (or a layer/type default), not from
+        the model-wide fallback precision.
+        """
+        attr_name = name + '_t'
+        if self.get_attr(attr_name) is not None:
+            return
+        precision, type_name = self.model.config.get_precision(self, name)
+        if type_name != 'model_default_t':
+            self.set_attr(attr_name, NamedType(type_name, precision))
+
     def get_input_node(self, input_name=None):
         if input_name is None:
             if len(self.inputs) > 0:
@@ -1083,6 +1098,8 @@ class PReLU(Activation):
 class Softmax(Activation):
     def initialize(self):
         super().initialize()
+        for name in ('exp_table', 'inv_table', 'inv_inp'):
+            self._set_configured_type_t(name)
 
 
 class TernaryTanh(Activation):
@@ -1299,6 +1316,11 @@ class LayerNormalization(Layer):
             'norm', default=FixedPrecisionType(18, 8, signed=True,
                                               rounding_mode=RoundingMode.RND_CONV, saturation_mode=SaturationMode.SAT)
         ),
+        # Running sum(x) and sum(x^2) of the Resource-strategy stream kernel, which gathers
+        # both statistics in one pass. Same handling as mean/norm: register_precision sizes
+        # them exactly for HGQ2 models; this default covers the plain Keras path.
+        TypeAttribute('sum', default=FixedPrecisionType(24, 12, signed=True)),
+        TypeAttribute('sum2', default=FixedPrecisionType(32, 16, signed=True)),
     ]
 
     def initialize(self):

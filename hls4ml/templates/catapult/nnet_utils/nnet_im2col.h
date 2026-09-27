@@ -225,7 +225,7 @@ ReadInputPixels:
 //   a_row[kw * n_chan + c]
 // to match the GEMM weight transposition ([W,C,F] -> [F, W*C]); the streaming
 // path (kernel_shift_1d) packs the identical order. Assumes the conv-GEMM
-// guard's constraints: stride 1, valid (zero) padding, dilation 1.
+// guard's constraints: valid (zero) padding, dilation 1 (any stride).
 // ---------------------------------------------------------------------------
 template <class data_T, class a_row_T, typename CONFIG_T>
 void im2col_1d_gemm_rows_array(const data_T data[CONFIG_T::in_width * CONFIG_T::n_chan],
@@ -241,7 +241,7 @@ GemmRowsWidth:
         GemmRowsChan:
             #pragma hls_unroll
             for (unsigned c = 0; c < CONFIG_T::n_chan; c++) {
-                out_pack[kw * CONFIG_T::n_chan + c] = data[(ow + kw) * CONFIG_T::n_chan + c];
+                out_pack[kw * CONFIG_T::n_chan + c] = data[(ow * CONFIG_T::stride_width + kw) * CONFIG_T::n_chan + c];
             }
         }
         a_rows[ow] = out_pack;
@@ -254,7 +254,7 @@ GemmRowsWidth:
 //   a_row[(kh * filt_width + kw) * n_chan + c]
 // to match the Conv2D GEMM weight transposition ([H,W,C,F] -> [F, H*W*C]).
 // Output rows are raster-ordered (oh * out_width + ow) = gemm_m order.
-// Assumes stride 1, valid padding, dilation 1 (the conv-GEMM guard).
+// Assumes valid padding, dilation 1 (the conv-GEMM guard); any stride.
 // ---------------------------------------------------------------------------
 template <class data_T, class a_row_T, typename CONFIG_T>
 void im2col_2d_gemm_rows_array(const data_T data[CONFIG_T::in_height * CONFIG_T::in_width * CONFIG_T::n_chan],
@@ -276,7 +276,8 @@ GemmRowsHeight:
                     #pragma hls_unroll
                     for (unsigned c = 0; c < CONFIG_T::n_chan; c++) {
                         out_pack[(kh * CONFIG_T::filt_width + kw) * CONFIG_T::n_chan + c] =
-                            data[((oh + kh) * CONFIG_T::in_width + (ow + kw)) * CONFIG_T::n_chan + c];
+                            data[((oh * CONFIG_T::stride_height + kh) * CONFIG_T::in_width +
+                                  (ow * CONFIG_T::stride_width + kw)) * CONFIG_T::n_chan + c];
                     }
                 }
             }

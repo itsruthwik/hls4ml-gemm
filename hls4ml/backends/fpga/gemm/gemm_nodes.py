@@ -244,7 +244,15 @@ class SplitConvGemm(OptimizerPass):
         return isinstance(node, (Conv1D, Conv2D)) and node.get_attr('strategy') == 'gemm'
 
     def transform(self, model, node):
-        is_pointwise = node.get_attr('filt_height', 1) == 1 and node.get_attr('filt_width') == 1
+        # A 1x1 conv is a plain GEMM over every input pixel only at stride 1. A strided 1x1
+        # conv subsamples, so it goes through im2col (K = n_chan), which emits only the
+        # rows at strided output positions.
+        is_pointwise = (
+            node.get_attr('filt_height', 1) == 1
+            and node.get_attr('filt_width') == 1
+            and node.get_attr('stride_height', 1) == 1
+            and node.get_attr('stride_width', 1) == 1
+        )
 
         # Capture the original Conv output shape so the GEMM node can restore it.
         original_output_shape = list(node.get_output_variable().shape)

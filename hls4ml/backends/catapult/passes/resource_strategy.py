@@ -12,6 +12,7 @@ from hls4ml.model.layers import (
     SeparableConv1D,
     SeparableConv2D,
 )
+from hls4ml.backends.fpga.fpga_layers import PointwiseConv1D, PointwiseConv2D
 from hls4ml.model.optimizer import OptimizerPass
 
 
@@ -20,13 +21,14 @@ def block_major_weight_keys(node):
     nnet::weight_store), the Catapult counterpart of the Vivado ARRAY_RESHAPE block factor.
 
     Covers layers whose weight array is read whole by dense_resource (EinsumDense: one call per
-    in-place slice). Depthwise, separable and recurrent weights keep their order: they are read
-    by other kernels or split across several dense calls. The layer config templates derive
+    in-place slice). Depthwise, pointwise, separable and recurrent weights keep their order. The layer config templates derive
     CONFIG_T::block_major_weights from this same function, so both sides always agree.
     """
     if str(node.get_attr('strategy', '')).lower() != 'resource':
         return ()
-    if isinstance(node, (DepthwiseConv1D, DepthwiseConv2D)):
+    # Depthwise weights go to other kernels; the Vivado pointwise conv partitions its weights
+    # completely (no ROM), so pointwise keeps the flat, constant layout too.
+    if isinstance(node, (DepthwiseConv1D, DepthwiseConv2D, PointwiseConv1D, PointwiseConv2D)):
         return ()
     if not isinstance(node, (Dense, EinsumDense, Conv1D, Conv2D)):
         return ()

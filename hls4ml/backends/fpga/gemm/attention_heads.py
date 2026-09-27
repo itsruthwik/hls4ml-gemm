@@ -66,6 +66,8 @@ _SOFTMAX_CARRY_KEYS = (
     # carry it so the per-head clones inherit it instead of re-resolving under their
     # _h{h} names (which the config was never keyed against) and hitting the default 1.
     'reuse_factor',
+    # likewise the backend-resolved strategy (latency / resource kernel choice)
+    'strategy',
 )
 
 

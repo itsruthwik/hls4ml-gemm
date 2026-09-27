@@ -97,6 +97,79 @@ proc setup_altera_lib { } {
 }
 
 
+proc find_array_resources { design pat } {
+  # Resources matching pat up to four levels below the design (stage instance, nested block
+  # instance such as im2col, core); a glob '*' does not cross '/'.
+  set found {}
+  foreach prefix [list $design $design/* $design/*/* $design/*/*/*] {
+    foreach m2m [directive get -match glob -checkpath 0 -ret p $prefix/$pat/MAP_TO_MODULE] {
+      lappend found [join [lrange [split $m2m /] 0 end-1] /]
+    }
+  }
+  return [lsort -unique $found]
+}
+
+
+proc map_partitioned_arrays_to_registers { design } {
+  # Arrays the Vivado templates partition completely (ARRAY_PARTITION complete), mapped to
+  # registers so Catapult never builds them as a memory, whatever MEM_MAP_THRESHOLD is. Matched
+  # by resource name (declaring function + array): hls_resource pragmas on these arrays make
+  # Catapult crash intermittently once inlined into the conv path, and line_buffer.Array is an
+  # ap_shift_reg member that no pragma can name. Templates that are their own block (im2col) are
+  # anchored on the block name instead. Add an entry per template once it is reviewed.
+  set patterns {
+    *dense_resource_rf_*:acc:rsc
+    *dense_resource_rf_*:acc_part:rsc
+    *dense_resource_rf_*:tmpmult:rsc
+    *dense_resource_rf_*:mult:rsc
+    *compute_output_buffer_?d<*:kernel_data:rsc
+    *compute_output_buffer_?d<*:res_out:rsc
+    *pointwise_mult_buffer<*:data:rsc
+    *pointwise_mult_buffer<*:res:rsc
+    *shift_line_buffer<*:shift_buffer:rsc
+    *conv_?d_buffer_cl<*:line_buffer.Array:rsc
+    *im2col_?d_gemm_rows<*>/core/kernel_data:rsc
+    *im2col_?d_gemm_rows<*>/core/line_buffer:rsc
+    *im2col_?d_gemm_rows<*>/core/*shift_buffer:rsc
+    *einsum_dense<*:data:rsc
+    *einsum_dense<*:inp_tpose:rsc
+    *einsum_dense<*:out_buffer:rsc
+    *einsum_stream_impl<*::run:data0:rsc
+    *einsum_stream_impl<*::run:data1:rsc
+    *einsum_stream_impl<*::run:tpose_i0:rsc
+    *einsum_stream_impl<*::run:tpose_i1:rsc
+    *einsum_stream_rows<*:lane_acc:rsc
+    *einsum_resource<*:lane_acc:rsc
+  }
+  foreach pat $patterns {
+    foreach rsc [find_array_resources $design $pat] {
+      logfile message "directive set $rsc -MAP_TO_MODULE {\[Register\]}\n" info
+      directive set $rsc -MAP_TO_MODULE {[Register]}
+    }
+  }
+}
+
+
+proc keep_stream_packets_out_of_memory { design } {
+  # nnet::array stream packets stay a packed word, as Vitis packs structs in streams by default:
+  # channels without an explicit mapping stay on the FIFO Catapult picks by default (it would
+  # otherwise turn them into a shared memory), and every packet member array (the nnet::array
+  # 'data' member, e.g. data_pack.data) is mapped to registers. Matched by resource name because
+  # no source pragma can name a struct member.
+  foreach m2m [directive get -match glob -checkpath 0 -ret p $design/*:cns/MAP_TO_MODULE] {
+    if { [directive get $m2m] eq "" } {
+      set rsc [join [lrange [split $m2m /] 0 end-1] /]
+      logfile message "directive set $rsc -MAP_TO_MODULE ccs_ioport.ccs_pipe\n" info
+      directive set $rsc -MAP_TO_MODULE ccs_ioport.ccs_pipe
+    }
+  }
+  foreach rsc [find_array_resources $design *.data:rsc] {
+    logfile message "directive set $rsc -MAP_TO_MODULE {\[Register\]}\n" info
+    directive set $rsc -MAP_TO_MODULE {[Register]}
+  }
+}
+
+
 proc setup_asic_libs { args } {
   set do_saed 0
   foreach lib $args {
@@ -256,6 +329,8 @@ if {$opt(synth)} {
   }
   # Per-boundary overrides (HLSConfig InputFifoDepth) win over the blanket loops above.
   #hls-fpga-machine-learning insert fifo-depth-overrides
+  map_partitioned_arrays_to_registers $design
+  keep_stream_packets_out_of_memory $design
 
   go architect
 
@@ -350,6 +425,8 @@ if {$opt(synth)} {
   }
   # Per-boundary overrides (HLSConfig InputFifoDepth) win over the blanket loops above.
   #hls-fpga-machine-learning insert fifo-depth-overrides
+  map_partitioned_arrays_to_registers $design
+  keep_stream_packets_out_of_memory $design
   go architect
   go allocate
   go schedule

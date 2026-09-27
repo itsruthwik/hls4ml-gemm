@@ -1417,3 +1417,12 @@ def _(node: LayerNormalization):
     norm_i = max(i_in, i_mean) + 1
     norm_f = max(f_in, f_mean)
     node.attributes['norm_t'] = to_hls4ml_fixed(1, norm_i, norm_f, f'{node.name}_norm_t')
+
+    # sum_t / sum2_t: the running sum(x) and sum(x^2) of the Resource-strategy stream kernel,
+    # which gathers both in one pass and recovers sum((x - mean_q)^2) by the exact expansion
+    # sum(x^2) - 2*mean_q*sum(x) + dim*mean_q^2. Both are held exactly (never rounded), so they
+    # take the input's fractional bits and grow by `scale` integer bits over `dim` terms. A signed
+    # input's square reaches 2^(2*i_in) at x = -2^i_in, one integer bit above an unsigned one's.
+    k_in = int(np.max(_k))
+    node.attributes['sum_t'] = to_hls4ml_fixed(k_in, i_in + scale, f_in, f'{node.name}_sum_t')
+    node.attributes['sum2_t'] = to_hls4ml_fixed(0, 2 * i_in + k_in + scale, 2 * f_in, f'{node.name}_sum2_t')

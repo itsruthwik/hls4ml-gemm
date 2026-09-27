@@ -33,7 +33,8 @@ class TransformTypes(GlobalOptimizerPass):
                     # full-n_patches depth.
                     new_var = self.stream_var_converter.convert(var, depth=2)
                 else:
-                    new_var = self.stream_var_converter.convert(var)
+                    # HLSConfig Model.FifoDepth, when set, replaces the whole-tensor default.
+                    new_var = self.stream_var_converter.convert(var, depth=node.model.config.fifo_depth or 0)
             elif io_type == 'io_serial':
                 new_var = self.array_var_converter.convert(var, pragma='stream')
             elif io_type == 'io_parallel':

@@ -19,10 +19,10 @@ template <class T> struct tree_sum_t<T, 1> {
     static T sum(const T *p) { return p[0]; }
 };
 
-// The Vivado ARRAY_PARTITION complete pragmas on biases/acc/tmpmult/mult (and the Catapult-only
-// acc_part) have no hls_resource [Register] counterpart here: Catapult 2026.1 intermittently
-// crashes (SIGSEGV/SIGBUS during elaboration) on such pragmas once this code is inlined into the
-// conv stream path. The arrays stay in registers under the global MEM_MAP_THRESHOLD.
+// The Vivado ARRAY_PARTITION complete pragmas on acc/tmpmult/mult (and the Catapult-only
+// acc_part) are applied by build_prj.tcl (map_partitioned_arrays_to_registers), not by
+// hls_resource pragmas here: Catapult 2026.1 intermittently crashes (SIGSEGV/SIGBUS during
+// elaboration) on such pragmas once this code is inlined into the conv stream path.
 
 // The weights ReuseLoop iteration ir uses, from either weight_store layout (nnet_types.h);
 // weight_lane(row, ir, im, rufactor) is logical weight ir + rufactor*im. Packed storage fetches
