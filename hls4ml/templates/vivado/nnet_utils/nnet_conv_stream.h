@@ -280,13 +280,24 @@ void compute_output_buffer_2d(
     // Add pixel to buffer
     nnet::shift_line_buffer<data_T, CONFIG_T>(in_elem, line_buffer, kernel_data);
 
+    // Hand the dense call a copy of the window: it is not inlined, so reading the static
+    // kernel_data directly makes the next pixel's buffer shift wait for the whole multiply,
+    // and the per-pixel loop misses its ReuseFactor II.
+    typename data_T::value_type kernel_copy[CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan];
+    #pragma HLS ARRAY_PARTITION variable = kernel_copy complete
+KernelCopy:
+    for (unsigned i_kc = 0; i_kc < CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan; i_kc++) {
+        #pragma HLS UNROLL
+        kernel_copy[i_kc] = kernel_data[i_kc];
+    }
+
     // Check to see if we have a full kernel
     if ((sX - lShiftX) == 0 && (sY - lShiftY) == 0 && pY > lShiftY - 1 && pX > lShiftX - 1) {
 
         // Dense multiply
         // #pragma HLS INLINE recursive
         CONFIG_T::mult_config::template kernel<typename data_T::value_type, typename res_T::value_type,
-                                               typename CONFIG_T::mult_config>::dense(kernel_data, res_out, weights, biases);
+                                               typename CONFIG_T::mult_config>::dense(kernel_copy, res_out, weights, biases);
 
     // Pack output
     CastLoop:
@@ -346,13 +357,24 @@ void compute_output_buffer_1d(
     // Add pixel to buffer
     nnet::kernel_shift_1d<data_T, CONFIG_T>(in_elem, kernel_data);
 
+    // Hand the dense call a copy of the window: it is not inlined, so reading the static
+    // kernel_data directly makes the next pixel's buffer shift wait for the whole multiply,
+    // and the per-pixel loop misses its ReuseFactor II.
+    typename data_T::value_type kernel_copy[CONFIG_T::filt_width * CONFIG_T::n_chan];
+    #pragma HLS ARRAY_PARTITION variable = kernel_copy complete
+KernelCopy:
+    for (unsigned i_kc = 0; i_kc < CONFIG_T::filt_width * CONFIG_T::n_chan; i_kc++) {
+        #pragma HLS UNROLL
+        kernel_copy[i_kc] = kernel_data[i_kc];
+    }
+
     // Check to see if we have a full kernel
     if ((sX - lShiftX) == 0 && pX > lShiftX - 1) {
 
         // Dense multiply
         // #pragma HLS INLINE recursive
         CONFIG_T::mult_config::template kernel<typename data_T::value_type, typename res_T::value_type,
-                                               typename CONFIG_T::mult_config>::dense(kernel_data, res_out, weights, biases);
+                                               typename CONFIG_T::mult_config>::dense(kernel_copy, res_out, weights, biases);
 
     // Pack output
     CastLoop:
