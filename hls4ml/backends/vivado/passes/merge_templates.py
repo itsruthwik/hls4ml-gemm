@@ -1,5 +1,5 @@
 from hls4ml.backends.backend import get_backend
-from hls4ml.backends.template import FunctionCallTemplate, LayerConfigTemplate
+from hls4ml.backends.template import FunctionCallTemplate, LayerConfigTemplate, stream_type_arg
 from hls4ml.model.layers import Concatenate, Dot, Merge
 
 # Merge templates
@@ -41,9 +41,9 @@ class MergeFunctionTemplate(FunctionCallTemplate):
         params = {}
         params['merge'] = node.get_attr('op').lower()
         params['config'] = f'config{node.index}'
-        params['input1_t'] = node.get_input_variable(node.inputs[0]).type.name
-        params['input2_t'] = node.get_input_variable(node.inputs[1]).type.name
-        params['output_t'] = node.get_output_variable().type.name
+        params['input1_t'] = stream_type_arg(node.get_input_variable(node.inputs[0]))
+        params['input2_t'] = stream_type_arg(node.get_input_variable(node.inputs[1]))
+        params['output_t'] = stream_type_arg(node.get_output_variable())
         params['input1'] = node.get_input_variable(node.inputs[0]).name
         params['input2'] = node.get_input_variable(node.inputs[1]).name
         params['output'] = node.get_output_variable().name

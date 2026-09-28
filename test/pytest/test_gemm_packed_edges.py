@@ -52,7 +52,8 @@ def _boundary(hls_model):
     return {v.name for v in hls_model.get_input_variables() + hls_model.get_output_variables()}
 
 
-@pytest.mark.parametrize('packed', [None, False])
+# 'False' as a string is how a YAML file or a command-line override can carry the knob.
+@pytest.mark.parametrize('packed', [None, False, 'False'])
 def test_off_marks_nothing(packed, tmp_path):
     hls_model = _convert(_model(), tmp_path, packed)
     hls_model.write()

@@ -3,30 +3,36 @@
 
 #include "hls_stream.h"
 #include "nnet_common.h"
+#include "nnet_stream_beat.h"
 #include <math.h>
 
 namespace nnet {
 
+// Any side may be a GEMM IP edge kept packed (nnet::packed<...>, nnet_stream_beat.h).
 template <class input1_T, class input2_T, class res_T, typename CONFIG_T>
-void add(hls::stream<input1_T> &data1, hls::stream<input2_T> &data2, hls::stream<res_T> &res) {
-    assert(input1_T::size == input2_T::size && input1_T::size == res_T::size);
+void add(hls::stream<typename beat_io<input1_T>::elem_t> &data1, hls::stream<typename beat_io<input2_T>::elem_t> &data2,
+         hls::stream<typename beat_io<res_T>::elem_t> &res) {
+    typedef typename beat_io<input1_T>::array_t in1_A;
+    typedef typename beat_io<input2_T>::array_t in2_A;
+    typedef typename beat_io<res_T>::array_t res_A;
+    assert(in1_A::size == in2_A::size && in1_A::size == res_A::size);
 
 AddLoop:
-    for (int i = 0; i < CONFIG_T::n_elem / input1_T::size; i++) {
+    for (int i = 0; i < CONFIG_T::n_elem / in1_A::size; i++) {
         #pragma HLS PIPELINE
 
-        input1_T in_data1 = data1.read();
-        input2_T in_data2 = data2.read();
-        res_T out_data;
+        in1_A in_data1 = beat_io<input1_T>::read(data1);
+        in2_A in_data2 = beat_io<input2_T>::read(data2);
+        res_A out_data;
         PRAGMA_DATA_PACK(out_data)
 
     AddPack:
-        for (int j = 0; j < res_T::size; j++) {
+        for (int j = 0; j < res_A::size; j++) {
             #pragma HLS UNROLL
             out_data[j] = in_data1[j] + in_data2[j];
         }
 
-        res.write(out_data);
+        beat_io<res_T>::write(res, out_data);
     }
 }
 

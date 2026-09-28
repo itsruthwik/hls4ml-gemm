@@ -8,6 +8,7 @@
 #include "nnet_common.h"
 #include "nnet_function_stubs.h"
 #include "nnet_mult.h"
+#include "nnet_stream_beat.h"
 
 namespace nnet {
 

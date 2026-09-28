@@ -4,6 +4,7 @@
 #include "ap_shift_reg.h"
 #include "hls_stream.h"
 #include "nnet_common.h"
+#include "nnet_stream_beat.h"
 #include "nnet_conv_stream.h"
 #include "nnet_pooling.h"
 #include "utils/x_hls_utils.h"
@@ -224,8 +225,11 @@ PoolFilt:
     }
 }
 
+// Either side may be a GEMM IP edge kept packed (nnet::packed<...>, nnet_stream_beat.h).
 template <class data_T, class res_T, typename CONFIG_T>
-void global_pooling2d_cl(hls::stream<data_T> &data, hls::stream<res_T> &res) {
+void global_pooling2d_cl(hls::stream<typename beat_io<data_T>::elem_t> &data, hls::stream<typename beat_io<res_T>::elem_t> &res) {
+    typedef typename beat_io<data_T>::array_t data_A;
+    typedef typename beat_io<res_T>::array_t res_A;
     assert(CONFIG_T::pad_top == 0 && CONFIG_T::pad_bottom == 0 && CONFIG_T::pad_left == 0 && CONFIG_T::pad_right == 0);
     assert(CONFIG_T::pool_height == CONFIG_T::stride_height && CONFIG_T::pool_width == CONFIG_T::stride_width);
 
@@ -246,39 +250,39 @@ PoolInitLoop:
 ReadInputHeight:
     for (unsigned i_ih = 0; i_ih < CONFIG_T::in_height; i_ih++) {
     ReadInputWidth:
-        for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width / (data_T::size / CONFIG_T::n_filt); i_iw++) {
+        for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width / (data_A::size / CONFIG_T::n_filt); i_iw++) {
             #pragma HLS LOOP_FLATTEN
-            compute_global_pool<data_T, res_T, CONFIG_T>(data.read(), data_window);
+            compute_global_pool<data_A, res_A, CONFIG_T>(beat_io<data_T>::read(data), data_window);
         }
     }
 
     if (CONFIG_T::pool_op == Max) {
     MaxPoolRes:
-        for (unsigned i_res = 0; i_res < CONFIG_T::n_filt / res_T::size; i_res++) {
+        for (unsigned i_res = 0; i_res < CONFIG_T::n_filt / res_A::size; i_res++) {
             #pragma HLS PIPELINE
 
-            res_T res_pack;
+            res_A res_pack;
             PRAGMA_DATA_PACK(res_pack)
         MaxPoolPack:
-            for (unsigned i_pack = 0; i_pack < res_T::size; i_pack++) {
+            for (unsigned i_pack = 0; i_pack < res_A::size; i_pack++) {
                 #pragma HLS UNROLL
                 res_pack[i_pack] = data_window[i_pack];
             }
-            res.write(res_pack);
+            beat_io<res_T>::write(res, res_pack);
         }
     } else {
     AvgPoolRes:
-        for (unsigned i_res = 0; i_res < CONFIG_T::n_filt / res_T::size; i_res++) {
+        for (unsigned i_res = 0; i_res < CONFIG_T::n_filt / res_A::size; i_res++) {
             #pragma HLS PIPELINE
 
-            res_T res_pack;
+            res_A res_pack;
             PRAGMA_DATA_PACK(res_pack)
         AvgPoolPack:
-            for (unsigned i_pack = 0; i_pack < res_T::size; i_pack++) {
+            for (unsigned i_pack = 0; i_pack < res_A::size; i_pack++) {
                 #pragma HLS UNROLL
                 res_pack[i_pack] = data_window[i_pack] / (CONFIG_T::in_height * CONFIG_T::in_width);
             }
-            res.write(res_pack);
+            beat_io<res_T>::write(res, res_pack);
         }
     }
 }

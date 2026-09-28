@@ -145,23 +145,27 @@ def _generate_mask_fn_stream_beatwise(
     # parallel, so there is nothing for ReuseFactor to share: a lane mux would cost
     # as much as the few-bit conversion it replaces.
     if backend.lower() in ('vivado', 'vitis'):
-        # Vivado/Vitis bind a loop pragma inside the loop body.
+        # Vivado/Vitis bind a loop pragma inside the loop body. Either side may be a GEMM IP
+        # edge kept packed (nnet::packed<...>, nnet_stream_beat.h); beat_io converts in-loop.
         return f"""
 template<typename input_t, typename output_t>
-void {name}({stream}<input_t> &inp_s, {stream}<output_t> &out_s) {{
+void {name}(hls::stream<typename nnet::beat_io<input_t>::elem_t> &inp_s,
+            hls::stream<typename nnet::beat_io<output_t>::elem_t> &out_s) {{
+    typedef typename nnet::beat_io<input_t>::array_t in_A;
+    typedef typename nnet::beat_io<output_t>::array_t out_A;
     static const unsigned N = {n};
     static const unsigned BEAT = {beat_size};
-    static_assert(N % input_t::size == 0, "{name}: input beat size must divide N");
-    static_assert(input_t::size == BEAT, "{name}: input beat size disagrees with codegen");
-    static_assert(output_t::size == BEAT, "{name}: output beat size disagrees with codegen");
+    static_assert(N % in_A::size == 0, "{name}: input beat size must divide N");
+    static_assert(in_A::size == BEAT, "{name}: input beat size disagrees with codegen");
+    static_assert(out_A::size == BEAT, "{name}: output beat size disagrees with codegen");
 
 Beat_{name}:
     for (unsigned i = 0; i < N / BEAT; i++) {{
         #pragma HLS PIPELINE II=1
-        input_t beat = inp_s.read();
-        output_t res;
+        in_A beat = nnet::beat_io<input_t>::read(inp_s);
+        out_A res;
 {compute}
-        out_s.write(res);
+        nnet::beat_io<output_t>::write(out_s, res);
     }}
 }}
 """
