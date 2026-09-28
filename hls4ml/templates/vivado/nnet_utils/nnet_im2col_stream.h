@@ -6,12 +6,23 @@
 // and im2col_1d/2d_gemm_rows for row/column GEMM-IP streaming.
 // All stream arguments use hls::stream instead of ac_channel.
 
+#include "ap_int.h"
 #include "ap_shift_reg.h"
 #include "hls_stream.h"
 #include "nnet_common.h"
 #include "nnet_conv_stream.h"
 
 namespace nnet {
+
+// Minimal signed width that holds [-(N-1) .. N-1] plus a sign bit, used to
+// right-size the im2col_gemm_rows position/shift counters below instead of
+// native 32-bit int.
+constexpr int im2col_idx_bits_for(int n, int b = 2, int cap = 4) {
+    return (cap > n) ? b : im2col_idx_bits_for(n, b + 1, cap << 1);
+}
+template <int N> struct im2col_idx_bits {
+    static constexpr int value = im2col_idx_bits_for(N) + 1; // + sign bit headroom
+};
 
 // ---------------------------------------------------------------------------
 // im2col_config — base configuration struct used by im2cl and gemm_rows templates.
@@ -198,10 +209,23 @@ void im2col_1d_gemm_rows(hls::stream<data_T> &data, hls::stream<a_row_T> &a_rows
                   "A row width must equal filt_width * n_chan");
 
     typedef typename data_T::value_type data_element_t;
-    int pX = 0, sX = 0;
+    // pX/sX only ever hold values in [-stride, in_width], but a native 32-bit
+    // int keeps all 32 bits live through the "== 0" compares and the
+    // conditional +1/reset updates below, so the position and shift counters
+    // synthesize as wide adders/compares even though their upper bits are
+    // always zero. Narrowing to just enough bits removes that dead width.
+    constexpr int idxBits = im2col_idx_bits<CONFIG_T::in_width>::value;
+    ap_int<idxBits> pX = 0, sX = 0;
     data_element_t kernel_data[CONFIG_T::filt_width * CONFIG_T::n_chan] = {};
     #pragma HLS ARRAY_PARTITION variable=kernel_data complete dim=1
-    const static int lShiftX = CONFIG_T::filt_width - 1;
+    // Keep the shift-window bound and stride/width constants the same narrow
+    // width as pX/sX, so mixing them in the compares/updates below does not
+    // silently re-widen the arithmetic back to 32-bit int.
+    const static ap_int<idxBits> lShiftX  = CONFIG_T::filt_width - 1;
+    const static ap_int<idxBits> strideWidth = CONFIG_T::stride_width;
+    const static ap_int<idxBits> inWidthIdx  = CONFIG_T::in_width;
+    const static ap_int<idxBits> one = 1;
+    const static ap_int<idxBits> lShiftXm1 = lShiftX - one;
 
 ReadInputWidth:
     for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width / (data_T::size / CONFIG_T::n_chan); i_iw++) {
@@ -216,7 +240,7 @@ ReadInputWidth:
             }
             nnet::kernel_shift_1d<decltype(pixel_pack), CONFIG_T>(pixel_pack, kernel_data);
 
-            if ((sX - lShiftX) == 0 && pX > lShiftX - 1) {
+            if (sX == lShiftX && pX > lShiftXm1) {
                 a_row_T out_pack;
             PackLoop:
                 for (unsigned i = 0; i < CONFIG_T::filt_width * CONFIG_T::n_chan; i++) {
@@ -226,11 +250,11 @@ ReadInputWidth:
                 a_rows.write(out_pack);
             }
 
-            if (pX + 1 == (int)CONFIG_T::in_width) {
+            if (pX + one == inWidthIdx) {
                 pX = 0; sX = 0;
             } else {
                 pX++;
-                sX = ((sX - lShiftX) == 0) ? sX - (int)CONFIG_T::stride_width + 1 : sX + 1;
+                sX = (sX == lShiftX) ? ap_int<idxBits>(sX - strideWidth + one) : ap_int<idxBits>(sX + one);
             }
         }
     }
@@ -254,11 +278,29 @@ void im2col_2d_gemm_rows(hls::stream<data_T> &data, hls::stream<a_row_T> &a_rows
     static ap_shift_reg<data_element_t, CONFIG_T::in_width> line_buffer[MAX(CONFIG_T::filt_height - 1, 1)]
                                                                             [CONFIG_T::n_chan];
     #pragma HLS ARRAY_PARTITION variable=line_buffer complete dim=2
-    int pX = 0, pY = 0, sX = 0, sY = 0;
+    // pX/pY/sX/sY only ever hold values in [-stride, MAX(in_height, in_width)],
+    // but a native 32-bit int keeps all 32 bits live through the "== 0"
+    // compares and the conditional +1/reset updates below, so the
+    // row/column position and shift counters synthesize as wide
+    // adders/compares even though their upper bits are always zero.
+    // Narrowing to just enough bits removes that dead width from the
+    // recurrence.
+    constexpr int idxBits = im2col_idx_bits<MAX(CONFIG_T::in_height, CONFIG_T::in_width)>::value;
+    ap_int<idxBits> pX = 0, pY = 0, sX = 0, sY = 0;
     data_element_t kernel_data[CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan] = {};
     #pragma HLS ARRAY_PARTITION variable=kernel_data complete dim=1
-    const static int lShiftX = CONFIG_T::filt_width  - 1;
-    const static int lShiftY = CONFIG_T::filt_height - 1;
+    // Keep the shift-window bounds and stride/dimension constants the same
+    // narrow width as pX/pY/sX/sY, so mixing them in the compares/updates
+    // below does not silently re-widen the arithmetic back to 32-bit int.
+    const static ap_int<idxBits> lShiftX = CONFIG_T::filt_width  - 1;
+    const static ap_int<idxBits> lShiftY = CONFIG_T::filt_height - 1;
+    const static ap_int<idxBits> strideWidth  = CONFIG_T::stride_width;
+    const static ap_int<idxBits> strideHeight = CONFIG_T::stride_height;
+    const static ap_int<idxBits> inWidthIdx   = CONFIG_T::in_width;
+    const static ap_int<idxBits> inHeightIdx  = CONFIG_T::in_height;
+    const static ap_int<idxBits> one = 1;
+    const static ap_int<idxBits> lShiftXm1 = lShiftX - one;
+    const static ap_int<idxBits> lShiftYm1 = lShiftY - one;
 
 ReadInputHeight:
     for (unsigned i_ih = 0; i_ih < CONFIG_T::in_height; i_ih++) {
@@ -275,7 +317,7 @@ ReadInputHeight:
                 }
                 nnet::shift_line_buffer<decltype(pixel_pack), CONFIG_T>(pixel_pack, line_buffer, kernel_data);
 
-                if ((sX - lShiftX) == 0 && (sY - lShiftY) == 0 && pY > lShiftY - 1 && pX > lShiftX - 1) {
+                if (sX == lShiftX && sY == lShiftY && pY > lShiftYm1 && pX > lShiftXm1) {
                     a_row_T out_pack;
                 PackLoop:
                     for (unsigned i = 0; i < CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan; i++) {
@@ -285,17 +327,17 @@ ReadInputHeight:
                     a_rows.write(out_pack);
                 }
 
-                if (pX + 1 == (int)CONFIG_T::in_width) {
+                if (pX + one == inWidthIdx) {
                     pX = 0; sX = 0;
-                    if (pY + 1 == (int)CONFIG_T::in_height) {
+                    if (pY + one == inHeightIdx) {
                         pY = 0; sY = 0;
                     } else {
                         pY++;
-                        sY = ((sY - lShiftY) == 0) ? sY - (int)CONFIG_T::stride_height + 1 : sY + 1;
+                        sY = (sY == lShiftY) ? ap_int<idxBits>(sY - strideHeight + one) : ap_int<idxBits>(sY + one);
                     }
                 } else {
                     pX++;
-                    sX = ((sX - lShiftX) == 0) ? sX - (int)CONFIG_T::stride_width + 1 : sX + 1;
+                    sX = (sX == lShiftX) ? ap_int<idxBits>(sX - strideWidth + one) : ap_int<idxBits>(sX + one);
                 }
             }
         }
