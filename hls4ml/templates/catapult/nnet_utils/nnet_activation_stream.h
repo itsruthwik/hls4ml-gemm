@@ -428,10 +428,47 @@ template <class data_T, typename CONFIG_T> struct fold {
 };
 
 #pragma hls_design block
+#pragma hls_pipeline_init_interval 1
 template <class data_T, typename CONFIG_T>
 void row_max(ac_channel<data_T> &data, ac_channel<typename fold<data_T, CONFIG_T>::x_group_t> &xs,
              ac_channel<typename data_T::value_type> &maxs) {
     typedef fold<data_T, CONFIG_T> F;
+#ifdef __SYNTHESIS__
+    // Free-running: one call converts one (row, step) beat, with x, mx and the step
+    // counter carried across calls so the block's II=1 loop never fills/drains per
+    // frame. See row_exp/row_normalize below and the HGQ2 quantizer masks in
+    // hgq_proxy_model.py for the same pattern.
+    static data_T x;
+    static typename data_T::value_type mx[F::lanes];
+    static unsigned s = 0;
+    {
+        if (s == 0)
+            x = data.read();
+        typename F::x_group_t g;
+        #pragma hls_unroll yes
+        for (unsigned l = 0; l < F::lanes; l++) {
+            unsigned j = s * F::lanes + l;
+            typename data_T::value_type v = (j < data_T::size) ? x[j] : x[0];
+            g[l] = v;
+            if (s == 0 || v > mx[l])
+                mx[l] = v;
+        }
+        xs.write(g);
+        if (s == F::steps - 1) {
+            typename data_T::value_type m = mx[0];
+            #pragma hls_unroll yes
+            for (unsigned l = 1; l < F::lanes; l++) {
+                if (mx[l] > m)
+                    m = mx[l];
+            }
+            maxs.write(m);
+            s = 0;
+        } else {
+            s++;
+        }
+    }
+#else
+    // C model: unchanged, one frame (F::rows * F::steps beats) per call.
     data_T x;
     typename data_T::value_type mx[F::lanes];
     unsigned s = 0;
@@ -463,9 +500,11 @@ SoftmaxMaxLoop:
             s++;
         }
     }
+#endif
 }
 
 #pragma hls_design block
+#pragma hls_pipeline_init_interval 1
 template <class data_T, typename CONFIG_T>
 void row_exp(ac_channel<typename fold<data_T, CONFIG_T>::x_group_t> &xs, ac_channel<typename data_T::value_type> &maxs,
              ac_channel<typename fold<data_T, CONFIG_T>::e_group_t> &es,
@@ -473,6 +512,43 @@ void row_exp(ac_channel<typename fold<data_T, CONFIG_T>::x_group_t> &xs, ac_chan
              typename CONFIG_T::exp_table_t exp_table[CONFIG_T::exp_table_size],
              typename CONFIG_T::inv_table_t invert_table[CONFIG_T::inv_table_size]) {
     typedef fold<data_T, CONFIG_T> F;
+#ifdef __SYNTHESIS__
+    static typename data_T::value_type x_max = 0;
+    static typename CONFIG_T::accum_t part[F::lanes];
+    static unsigned s = 0;
+    {
+        if (s == 0)
+            x_max = maxs.read();
+        typename F::x_group_t g = xs.read();
+        typename F::e_group_t eg;
+        #pragma hls_unroll yes
+        for (unsigned l = 0; l < F::lanes; l++) {
+            unsigned j = s * F::lanes + l;
+            typename CONFIG_T::accum_t acc = (s == 0) ? typename CONFIG_T::accum_t(0) : part[l];
+            typename CONFIG_T::accum_t ev = 0;
+            if (j < data_T::size) {
+                typename CONFIG_T::inp_norm_t d = x_max - g[l];
+                ev = exp_table[softmax_idx_from_real_val<typename CONFIG_T::inp_norm_t, CONFIG_T::exp_table_size>(d)];
+                acc += ev;
+            }
+            eg[l] = ev;
+            part[l] = acc;
+        }
+        es.write(eg);
+        if (s == F::steps - 1) {
+            typename CONFIG_T::accum_t sum = 0;
+            #pragma hls_unroll yes
+            for (unsigned l = 0; l < F::lanes; l++) {
+                sum += part[l];
+            }
+            typename CONFIG_T::inv_inp_t exp_sum = sum;
+            invs.write(invert_table[softmax_idx_from_real_val<typename CONFIG_T::inv_inp_t, CONFIG_T::inv_table_size>(exp_sum)]);
+            s = 0;
+        } else {
+            s++;
+        }
+    }
+#else
     typename data_T::value_type x_max = 0;
     typename CONFIG_T::accum_t part[F::lanes];
     unsigned s = 0;
@@ -510,13 +586,37 @@ SoftmaxExpLoop:
             s++;
         }
     }
+#endif
 }
 
 #pragma hls_design block
+#pragma hls_pipeline_init_interval 1
 template <class data_T, class res_T, typename CONFIG_T>
 void row_normalize(ac_channel<typename fold<data_T, CONFIG_T>::e_group_t> &es,
                    ac_channel<typename CONFIG_T::inv_table_t> &invs, ac_channel<res_T> &res) {
     typedef fold<data_T, CONFIG_T> F;
+#ifdef __SYNTHESIS__
+    static res_T y;
+    static typename CONFIG_T::inv_table_t inv = 0;
+    static unsigned s = 0;
+    {
+        if (s == 0)
+            inv = invs.read();
+        typename F::e_group_t eg = es.read();
+        #pragma hls_unroll yes
+        for (unsigned l = 0; l < F::lanes; l++) {
+            unsigned j = s * F::lanes + l;
+            if (j < res_T::size)
+                y[j] = eg[l] * inv;
+        }
+        if (s == F::steps - 1) {
+            res.write(y);
+            s = 0;
+        } else {
+            s++;
+        }
+    }
+#else
     res_T y;
     typename CONFIG_T::inv_table_t inv = 0;
     unsigned s = 0;
@@ -539,6 +639,7 @@ SoftmaxNormalizeLoop:
             s++;
         }
     }
+#endif
 }
 
 } // namespace softmax_resource
