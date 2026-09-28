@@ -514,7 +514,11 @@ template <class data_T, class res_T, typename CONFIG_T>
 void softmax_stable_resource(hls::stream<data_T> &data, hls::stream<res_T> &res) {
     #pragma HLS DATAFLOW
     typedef softmax_resource::fold<data_T, CONFIG_T> F;
-    static const unsigned group_depth = 2 * F::steps;
+    // A row's lane groups are written early in each stage's pipeline, but the row's scalar
+    // (max / inverse sum) is written at the row's last step, several pipeline stages later.
+    // A blocked group write stalls the whole pipeline, including that pending scalar write
+    // the consumer waits on, so the group FIFO needs a row plus slack for the pipeline depth.
+    static const unsigned group_depth = 2 * F::steps + 16;
 
     hls::stream<typename F::x_group_t> x_stream("softmax_x");
     hls::stream<typename data_T::value_type> max_stream("softmax_max");
