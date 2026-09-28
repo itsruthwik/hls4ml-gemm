@@ -2,6 +2,7 @@
 #define NNET_SPLIT_MERGE_H_
 
 #include "hls_stream.h"
+#include "nnet_stream_beat.h"
 #include "nnet_types.h"
 
 // Head-lane Split / Merge for multi-head attention on the GEMM path (Vivado/Vitis
@@ -26,20 +27,23 @@ namespace nnet {
 
 // Split a d_model-wide stream into H head-lane streams (key_dim each), given as
 // enumerated output channels. data_T = array<T, d_model>, res_T = array<T, key_dim>.
+// Either side may be nnet::packed<...> (a GEMM IP edge kept packed, nnet_stream_beat.h).
 template <class data_T, class res_T, typename CONFIG_T, class... Outs>
-void split_lanes(hls::stream<data_T> &data, Outs &... outs) {
+void split_lanes(hls::stream<typename beat_io<data_T>::elem_t> &data, Outs &... outs) {
+    typedef typename beat_io<data_T>::array_t data_A;
+    typedef typename beat_io<res_T>::array_t res_A;
     const unsigned H = sizeof...(outs);
-    hls::stream<res_T> *out_ch[] = {&outs...};
+    hls::stream<typename beat_io<res_T>::elem_t> *out_ch[] = {&outs...};
     for (unsigned b = 0; b < CONFIG_T::n_beats; b++) {
-        data_T in = data.read();
+        data_A in = beat_io<data_T>::read(data);
         for (unsigned h = 0; h < H; h++) {
             #pragma HLS UNROLL
-            res_T out;
-            for (unsigned k = 0; k < res_T::size; k++) {
+            res_A out;
+            for (unsigned k = 0; k < res_A::size; k++) {
                 #pragma HLS UNROLL
-                out[k] = in[h * res_T::size + k];
+                out[k] = in[h * res_A::size + k];
             }
-            out_ch[h]->write(out);
+            beat_io<res_T>::write(*out_ch[h], out);
         }
     }
 }
@@ -47,20 +51,22 @@ void split_lanes(hls::stream<data_T> &data, Outs &... outs) {
 // Inverse: concatenate H head-lane streams (key_dim each, enumerated) into one
 // d_model-wide stream. data_T = array<T, key_dim>, res_T = array<T, d_model>.
 template <class data_T, class res_T, typename CONFIG_T, class... Ins>
-void merge_lanes(hls::stream<res_T> &res, Ins &... ins) {
+void merge_lanes(hls::stream<typename beat_io<res_T>::elem_t> &res, Ins &... ins) {
+    typedef typename beat_io<data_T>::array_t data_A;
+    typedef typename beat_io<res_T>::array_t res_A;
     const unsigned H = sizeof...(ins);
-    hls::stream<data_T> *in_ch[] = {&ins...};
+    hls::stream<typename beat_io<data_T>::elem_t> *in_ch[] = {&ins...};
     for (unsigned b = 0; b < CONFIG_T::n_beats; b++) {
-        res_T out;
+        res_A out;
         for (unsigned h = 0; h < H; h++) {
             #pragma HLS UNROLL
-            data_T beat = in_ch[h]->read();
-            for (unsigned k = 0; k < data_T::size; k++) {
+            data_A beat = beat_io<data_T>::read(*in_ch[h]);
+            for (unsigned k = 0; k < data_A::size; k++) {
                 #pragma HLS UNROLL
-                out[h * data_T::size + k] = beat[k];
+                out[h * data_A::size + k] = beat[k];
             }
         }
-        res.write(out);
+        beat_io<res_T>::write(res, out);
     }
 }
 

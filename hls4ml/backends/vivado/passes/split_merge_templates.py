@@ -8,7 +8,7 @@ The HeadSplit / HeadMerge IR node classes live in the shared FPGA base
 names as Catapult; only the runtime header dialect (hls::stream vs ac_channel) differs.
 """
 
-from hls4ml.backends.template import LayerConfigTemplate, FunctionCallTemplate
+from hls4ml.backends.template import FunctionCallTemplate, LayerConfigTemplate, stream_type_arg
 from hls4ml.backends.fpga.passes.split_merge_nodes import HeadSplit, HeadMerge
 
 
@@ -45,12 +45,11 @@ class HeadSplitFunctionTemplate(FunctionCallTemplate):
         outs = [node.get_output_variable(o) for o in node.outputs]
         out_names = ', '.join(o.name for o in outs)
         cfg = f'config{node.index}'
-        head_t = outs[0].type.name
         if io_type == 'io_parallel':
             in_t = inp.type.precision.definition_cpp()
             out_t = outs[0].type.precision.definition_cpp()
             return f'nnet::split_lanes_array<{in_t}, {out_t}, {cfg}>({inp.name}, {out_names});'
-        return f'nnet::split_lanes<{inp.type.name}, {head_t}, {cfg}>({inp.name}, {out_names});'
+        return f'nnet::split_lanes<{stream_type_arg(inp)}, {stream_type_arg(outs[0])}, {cfg}>({inp.name}, {out_names});'
 
 
 class HeadMergeConfigTemplate(LayerConfigTemplate):
@@ -77,9 +76,8 @@ class HeadMergeFunctionTemplate(FunctionCallTemplate):
         in_names = ', '.join(i.name for i in ins)
         out = node.get_output_variable()
         cfg = f'config{node.index}'
-        head_t = ins[0].type.name
         if io_type == 'io_parallel':
             head_scalar = ins[0].type.precision.definition_cpp()
             out_scalar = out.type.precision.definition_cpp()
             return f'nnet::merge_lanes_array<{head_scalar}, {out_scalar}, {cfg}>({out.name}, {in_names});'
-        return f'nnet::merge_lanes<{head_t}, {out.type.name}, {cfg}>({out.name}, {in_names});'
+        return f'nnet::merge_lanes<{stream_type_arg(ins[0])}, {stream_type_arg(out)}, {cfg}>({out.name}, {in_names});'

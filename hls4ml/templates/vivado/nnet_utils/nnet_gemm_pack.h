@@ -8,20 +8,17 @@
 // operand of a two-operand GEMM, one full row or column) per beat, packed lane 0 in
 // the low bits. Bit widths are exact -- elements * element width -- so a
 // gemm-ip-gen package and this header compute the same number from the same config.
-// hls4ml keeps its array streams everywhere else and converts right around the call
-// with the two processes below; an RTL-blackbox IP then sits directly in the top
-// dataflow region with no nested region and no wrapper of its own (Vitis will not
-// hand a top-level argument straight to a blackbox, so the pack/unpack processes are
-// always present, even where the GEMM is the model's first or last layer).
+// Where an edge is not kept packed (see nnet_stream_beat.h), hls4ml converts right
+// around the call with the two processes below; an RTL-blackbox IP then sits directly
+// in the top dataflow region with no nested region and no wrapper of its own (Vitis
+// will not hand a top-level argument straight to a blackbox, so a GEMM that is the
+// model's first or last layer always keeps its pack/unpack process on that side).
 
 #include "ap_int.h"
 #include "hls_stream.h"
+#include "nnet_stream_beat.h"
 
 namespace nnet {
-
-template <class T> struct gemm_packed_bits {
-    static const unsigned value = T::size * T::value_type::width;
-};
 
 // array beats -> packed beats, N_BEATS per invocation. Pure bit copy (raw pattern,
 // never a value conversion), one beat per cycle, free-running across invocations.
@@ -33,14 +30,7 @@ void pack_stream(hls::stream<data_T> &in, hls::stream<ap_uint<gemm_packed_bits<d
 PACK:
     for (int i = 0; i < (int)N_BEATS; i++) {
         #pragma HLS PIPELINE
-        data_T beat = in.read();
-        ap_uint<gemm_packed_bits<data_T>::value> bits;
-        for (int j = 0; j < (int)data_T::size; j++) {
-            #pragma HLS UNROLL
-            bits.range(j * data_T::value_type::width + data_T::value_type::width - 1,
-                       j * data_T::value_type::width) = beat[j].range(data_T::value_type::width - 1, 0);
-        }
-        out.write(bits);
+        out.write(pack_beat<data_T>(in.read()));
     }
 }
 
@@ -52,16 +42,7 @@ void unpack_stream(hls::stream<ap_uint<gemm_packed_bits<res_T>::value> > &in, hl
 UNPACK:
     for (int i = 0; i < (int)N_BEATS; i++) {
         #pragma HLS PIPELINE
-        ap_uint<gemm_packed_bits<res_T>::value> bits = in.read();
-        res_T beat;
-        for (int j = 0; j < (int)res_T::size; j++) {
-            #pragma HLS UNROLL
-            typename res_T::value_type v;
-            v.range(res_T::value_type::width - 1, 0) =
-                bits.range(j * res_T::value_type::width + res_T::value_type::width - 1, j * res_T::value_type::width);
-            beat[j] = v;
-        }
-        out.write(beat);
+        out.write(unpack_beat<res_T>(in.read()));
     }
 }
 

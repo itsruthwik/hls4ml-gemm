@@ -4,6 +4,7 @@
 
 #include "hls_stream.h"
 #include "nnet_common.h"
+#include "nnet_stream_beat.h"
 
 namespace nnet {
 
@@ -17,76 +18,82 @@ struct broadcast_config {
 };
 
 template <class data_T, class res_T, int N>
-void clone_stream(hls::stream<data_T> &data, hls::stream<res_T> &res1, hls::stream<res_T> &res2) {
+void clone_stream(hls::stream<typename beat_io<data_T>::elem_t> &data, hls::stream<typename beat_io<res_T>::elem_t> &res1, hls::stream<typename beat_io<res_T>::elem_t> &res2) {
+    typedef typename beat_io<data_T>::array_t data_A;
+    typedef typename beat_io<res_T>::array_t res_A;
 CloneLoop:
-    for (int i = 0; i < N / data_T::size; i++) {
+    for (int i = 0; i < N / data_A::size; i++) {
         #pragma HLS PIPELINE
 
-        data_T in_data = data.read();
-        res_T out_data1;
-        res_T out_data2;
+        data_A in_data = beat_io<data_T>::read(data);
+        res_A out_data1;
+        res_A out_data2;
         PRAGMA_DATA_PACK(out_data1)
         PRAGMA_DATA_PACK(out_data2)
 
     ClonePack:
-        for (int j = 0; j < data_T::size; j++) {
+        for (int j = 0; j < data_A::size; j++) {
             #pragma HLS UNROLL
             out_data1[j] = in_data[j];
             out_data2[j] = in_data[j];
         }
 
-        res1.write(out_data1);
-        res2.write(out_data2);
+        beat_io<res_T>::write(res1, out_data1);
+        beat_io<res_T>::write(res2, out_data2);
     }
 }
 
 template <class data_T, class res_T, int N>
-void clone_stream(hls::stream<data_T> &data, hls::stream<res_T> &res1, hls::stream<res_T> &res2, hls::stream<res_T> &res3) {
+void clone_stream(hls::stream<typename beat_io<data_T>::elem_t> &data, hls::stream<typename beat_io<res_T>::elem_t> &res1, hls::stream<typename beat_io<res_T>::elem_t> &res2, hls::stream<typename beat_io<res_T>::elem_t> &res3) {
+    typedef typename beat_io<data_T>::array_t data_A;
+    typedef typename beat_io<res_T>::array_t res_A;
 CloneLoop:
-    for (int i = 0; i < N / data_T::size; i++) {
+    for (int i = 0; i < N / data_A::size; i++) {
         #pragma HLS PIPELINE
 
-        data_T in_data = data.read();
-        res_T out_data1;
-        res_T out_data2;
-        res_T out_data3;
+        data_A in_data = beat_io<data_T>::read(data);
+        res_A out_data1;
+        res_A out_data2;
+        res_A out_data3;
         PRAGMA_DATA_PACK(out_data1)
         PRAGMA_DATA_PACK(out_data2)
         PRAGMA_DATA_PACK(out_data3)
 
     ClonePack:
-        for (int j = 0; j < data_T::size; j++) {
+        for (int j = 0; j < data_A::size; j++) {
             #pragma HLS UNROLL
             out_data1[j] = in_data[j];
             out_data2[j] = in_data[j];
             out_data3[j] = in_data[j];
         }
 
-        res1.write(out_data1);
-        res2.write(out_data2);
-        res3.write(out_data3);
+        beat_io<res_T>::write(res1, out_data1);
+        beat_io<res_T>::write(res2, out_data2);
+        beat_io<res_T>::write(res3, out_data3);
     }
 }
 
 template <class data_T, class res_T, int N>
-void clone_stream(hls::stream<data_T> &data, hls::stream<res_T> &res1, hls::stream<res_T> &res2, hls::stream<res_T> &res3,
-                  hls::stream<res_T> &res4) {
+void clone_stream(hls::stream<typename beat_io<data_T>::elem_t> &data, hls::stream<typename beat_io<res_T>::elem_t> &res1, hls::stream<typename beat_io<res_T>::elem_t> &res2, hls::stream<typename beat_io<res_T>::elem_t> &res3,
+                  hls::stream<typename beat_io<res_T>::elem_t> &res4) {
+    typedef typename beat_io<data_T>::array_t data_A;
+    typedef typename beat_io<res_T>::array_t res_A;
 CloneLoop:
-    for (int i = 0; i < N / data_T::size; i++) {
+    for (int i = 0; i < N / data_A::size; i++) {
         #pragma HLS PIPELINE
 
-        data_T in_data = data.read();
-        res_T out_data1;
-        res_T out_data2;
-        res_T out_data3;
-        res_T out_data4;
+        data_A in_data = beat_io<data_T>::read(data);
+        res_A out_data1;
+        res_A out_data2;
+        res_A out_data3;
+        res_A out_data4;
         PRAGMA_DATA_PACK(out_data1)
         PRAGMA_DATA_PACK(out_data2)
         PRAGMA_DATA_PACK(out_data3)
         PRAGMA_DATA_PACK(out_data4)
 
     ClonePack:
-        for (int j = 0; j < data_T::size; j++) {
+        for (int j = 0; j < data_A::size; j++) {
             #pragma HLS UNROLL
             out_data1[j] = in_data[j];
             out_data2[j] = in_data[j];
@@ -94,26 +101,28 @@ CloneLoop:
             out_data4[j] = in_data[j];
         }
 
-        res1.write(out_data1);
-        res2.write(out_data2);
-        res3.write(out_data3);
-        res4.write(out_data4);
+        beat_io<res_T>::write(res1, out_data1);
+        beat_io<res_T>::write(res2, out_data2);
+        beat_io<res_T>::write(res3, out_data3);
+        beat_io<res_T>::write(res4, out_data4);
     }
 }
 
 template <class data_T, class res_T, int N>
-void clone_stream(hls::stream<data_T> &data, hls::stream<res_T> &res1, hls::stream<res_T> &res2, hls::stream<res_T> &res3,
-                  hls::stream<res_T> &res4, hls::stream<res_T> &res5) {
+void clone_stream(hls::stream<typename beat_io<data_T>::elem_t> &data, hls::stream<typename beat_io<res_T>::elem_t> &res1, hls::stream<typename beat_io<res_T>::elem_t> &res2, hls::stream<typename beat_io<res_T>::elem_t> &res3,
+                  hls::stream<typename beat_io<res_T>::elem_t> &res4, hls::stream<typename beat_io<res_T>::elem_t> &res5) {
+    typedef typename beat_io<data_T>::array_t data_A;
+    typedef typename beat_io<res_T>::array_t res_A;
 CloneLoop:
-    for (int i = 0; i < N / data_T::size; i++) {
+    for (int i = 0; i < N / data_A::size; i++) {
         #pragma HLS PIPELINE
 
-        data_T in_data = data.read();
-        res_T out_data1;
-        res_T out_data2;
-        res_T out_data3;
-        res_T out_data4;
-        res_T out_data5;
+        data_A in_data = beat_io<data_T>::read(data);
+        res_A out_data1;
+        res_A out_data2;
+        res_A out_data3;
+        res_A out_data4;
+        res_A out_data5;
         PRAGMA_DATA_PACK(out_data1)
         PRAGMA_DATA_PACK(out_data2)
         PRAGMA_DATA_PACK(out_data3)
@@ -121,7 +130,7 @@ CloneLoop:
         PRAGMA_DATA_PACK(out_data5)
 
     ClonePack:
-        for (int j = 0; j < data_T::size; j++) {
+        for (int j = 0; j < data_A::size; j++) {
             #pragma HLS UNROLL
             out_data1[j] = in_data[j];
             out_data2[j] = in_data[j];
@@ -130,28 +139,30 @@ CloneLoop:
             out_data5[j] = in_data[j];
         }
 
-        res1.write(out_data1);
-        res2.write(out_data2);
-        res3.write(out_data3);
-        res4.write(out_data4);
-        res5.write(out_data5);
+        beat_io<res_T>::write(res1, out_data1);
+        beat_io<res_T>::write(res2, out_data2);
+        beat_io<res_T>::write(res3, out_data3);
+        beat_io<res_T>::write(res4, out_data4);
+        beat_io<res_T>::write(res5, out_data5);
     }
 }
 
 template <class data_T, class res_T, int N>
-void clone_stream(hls::stream<data_T> &data, hls::stream<res_T> &res1, hls::stream<res_T> &res2, hls::stream<res_T> &res3,
-                  hls::stream<res_T> &res4, hls::stream<res_T> &res5, hls::stream<res_T> &res6) {
+void clone_stream(hls::stream<typename beat_io<data_T>::elem_t> &data, hls::stream<typename beat_io<res_T>::elem_t> &res1, hls::stream<typename beat_io<res_T>::elem_t> &res2, hls::stream<typename beat_io<res_T>::elem_t> &res3,
+                  hls::stream<typename beat_io<res_T>::elem_t> &res4, hls::stream<typename beat_io<res_T>::elem_t> &res5, hls::stream<typename beat_io<res_T>::elem_t> &res6) {
+    typedef typename beat_io<data_T>::array_t data_A;
+    typedef typename beat_io<res_T>::array_t res_A;
 CloneLoop:
-    for (int i = 0; i < N / data_T::size; i++) {
+    for (int i = 0; i < N / data_A::size; i++) {
         #pragma HLS PIPELINE
 
-        data_T in_data = data.read();
-        res_T out_data1;
-        res_T out_data2;
-        res_T out_data3;
-        res_T out_data4;
-        res_T out_data5;
-        res_T out_data6;
+        data_A in_data = beat_io<data_T>::read(data);
+        res_A out_data1;
+        res_A out_data2;
+        res_A out_data3;
+        res_A out_data4;
+        res_A out_data5;
+        res_A out_data6;
         PRAGMA_DATA_PACK(out_data1)
         PRAGMA_DATA_PACK(out_data2)
         PRAGMA_DATA_PACK(out_data3)
@@ -160,7 +171,7 @@ CloneLoop:
         PRAGMA_DATA_PACK(out_data6)
 
     ClonePack:
-        for (int j = 0; j < data_T::size; j++) {
+        for (int j = 0; j < data_A::size; j++) {
             #pragma HLS UNROLL
             out_data1[j] = in_data[j];
             out_data2[j] = in_data[j];
@@ -170,30 +181,32 @@ CloneLoop:
             out_data6[j] = in_data[j];
         }
 
-        res1.write(out_data1);
-        res2.write(out_data2);
-        res3.write(out_data3);
-        res4.write(out_data4);
-        res5.write(out_data5);
-        res6.write(out_data6);
+        beat_io<res_T>::write(res1, out_data1);
+        beat_io<res_T>::write(res2, out_data2);
+        beat_io<res_T>::write(res3, out_data3);
+        beat_io<res_T>::write(res4, out_data4);
+        beat_io<res_T>::write(res5, out_data5);
+        beat_io<res_T>::write(res6, out_data6);
     }
 }
 
 template <class data_T, class res_T, int N>
-void clone_stream(hls::stream<data_T> &data, hls::stream<res_T> &res1, hls::stream<res_T> &res2, hls::stream<res_T> &res3,
-                  hls::stream<res_T> &res4, hls::stream<res_T> &res5, hls::stream<res_T> &res6, hls::stream<res_T> &res7) {
+void clone_stream(hls::stream<typename beat_io<data_T>::elem_t> &data, hls::stream<typename beat_io<res_T>::elem_t> &res1, hls::stream<typename beat_io<res_T>::elem_t> &res2, hls::stream<typename beat_io<res_T>::elem_t> &res3,
+                  hls::stream<typename beat_io<res_T>::elem_t> &res4, hls::stream<typename beat_io<res_T>::elem_t> &res5, hls::stream<typename beat_io<res_T>::elem_t> &res6, hls::stream<typename beat_io<res_T>::elem_t> &res7) {
+    typedef typename beat_io<data_T>::array_t data_A;
+    typedef typename beat_io<res_T>::array_t res_A;
 CloneLoop:
-    for (int i = 0; i < N / data_T::size; i++) {
+    for (int i = 0; i < N / data_A::size; i++) {
         #pragma HLS PIPELINE
 
-        data_T in_data = data.read();
-        res_T out_data1;
-        res_T out_data2;
-        res_T out_data3;
-        res_T out_data4;
-        res_T out_data5;
-        res_T out_data6;
-        res_T out_data7;
+        data_A in_data = beat_io<data_T>::read(data);
+        res_A out_data1;
+        res_A out_data2;
+        res_A out_data3;
+        res_A out_data4;
+        res_A out_data5;
+        res_A out_data6;
+        res_A out_data7;
         PRAGMA_DATA_PACK(out_data1)
         PRAGMA_DATA_PACK(out_data2)
         PRAGMA_DATA_PACK(out_data3)
@@ -203,7 +216,7 @@ CloneLoop:
         PRAGMA_DATA_PACK(out_data7)
 
     ClonePack:
-        for (int j = 0; j < data_T::size; j++) {
+        for (int j = 0; j < data_A::size; j++) {
             #pragma HLS UNROLL
             out_data1[j] = in_data[j];
             out_data2[j] = in_data[j];
@@ -214,13 +227,13 @@ CloneLoop:
             out_data7[j] = in_data[j];
         }
 
-        res1.write(out_data1);
-        res2.write(out_data2);
-        res3.write(out_data3);
-        res4.write(out_data4);
-        res5.write(out_data5);
-        res6.write(out_data6);
-        res7.write(out_data7);
+        beat_io<res_T>::write(res1, out_data1);
+        beat_io<res_T>::write(res2, out_data2);
+        beat_io<res_T>::write(res3, out_data3);
+        beat_io<res_T>::write(res4, out_data4);
+        beat_io<res_T>::write(res5, out_data5);
+        beat_io<res_T>::write(res6, out_data6);
+        beat_io<res_T>::write(res7, out_data7);
     }
 }
 

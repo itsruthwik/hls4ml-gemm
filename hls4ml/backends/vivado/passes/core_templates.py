@@ -390,6 +390,12 @@ class SoftmaxFunctionTemplate(FunctionCallTemplate):
         use_multidim = node.get_attr('n_inner', 1) > 1 or node.get_attr('n_outer', 1) > 1
         use_multidim = use_multidim and node.model.config.get_config_value('IOType') == 'io_parallel'
         params['activation'] = 'softmax' if not use_multidim else 'softmax_multidim'
+        if getattr(node.get_input_variable(), 'gemm_packed', False) or getattr(
+            node.get_output_variable(), 'gemm_packed', False
+        ):
+            # A packed GEMM edge (MarkGemmPackedEdges): call the one implementation that reads
+            # packed beats; the dispatcher would instantiate every implementation with them.
+            params['activation'] = 'softmax_stable'
         params['config'] = '{}_config{}'.format(node.get_attr('activation'), node.index)
 
         return self.template.format(**params)

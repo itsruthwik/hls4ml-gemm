@@ -136,14 +136,38 @@ gemm_const_weights_config_template = """struct config{index} : nnet::gemm_config
 # no helper around the call (Vitis drops the blackbox's ap_ctrl adapter when the call
 # arrives through an inlined function) -- with hls4ml's own pack/unpack processes
 # converting the array streams right around it (nnet_gemm_pack.h).
-gemm_stream_packed_function_template = """
-    hls::stream<ap_uint<nnet::gemm_packed_bits<{input_t}>::value> > {output}_a_bits("{output}_a_bits");
-    #pragma HLS STREAM variable={output}_a_bits depth=2
-    hls::stream<ap_uint<nnet::gemm_packed_bits<{output_t}>::value> > {output}_p_bits("{output}_p_bits");
-    #pragma HLS STREAM variable={output}_p_bits depth=2
-    nnet::pack_stream<{input_t}, {config}::gemm_m>({input}, {output}_a_bits);
-    gemm_stream_{name}({output}_a_bits, {output}_p_bits);
-    nnet::unpack_stream<{output_t}, {config}::gemm_m>({output}_p_bits, {output});"""
+def _gemm_stream_packed_call(node, operands, out_var, beats):
+    """The io_stream GEMM IP call, gemm_stream_<name>(a[, b], p), on packed bit streams.
+
+    An operand or result edge already kept packed (MarkGemmPackedEdges) is handed to the IP
+    as is; any other edge gets its pack/unpack process right here. *operands* is a list of
+    (input variable, beat-count expression, bits suffix); *beats* is the result beat count.
+    """
+    decls, pre, args = [], [], []
+    for var, n_beats, suffix in operands:
+        if getattr(var, 'gemm_packed', False):
+            args.append(var.name)
+            continue
+        bits = f'{out_var.name}_{suffix}_bits'
+        decls.append(
+            f'    hls::stream<ap_uint<nnet::gemm_packed_bits<{var.type.name}>::value> > {bits}("{bits}");\n'
+            f'    #pragma HLS STREAM variable={bits} depth=2'
+        )
+        pre.append(f'    nnet::pack_stream<{var.type.name}, {n_beats}>({var.name}, {bits});')
+        args.append(bits)
+    post = []
+    if getattr(out_var, 'gemm_packed', False):
+        args.append(out_var.name)
+    else:
+        bits = f'{out_var.name}_p_bits'
+        decls.append(
+            f'    hls::stream<ap_uint<nnet::gemm_packed_bits<{out_var.type.name}>::value> > {bits}("{bits}");\n'
+            f'    #pragma HLS STREAM variable={bits} depth=2'
+        )
+        post.append(f'    nnet::unpack_stream<{out_var.type.name}, {beats}>({bits}, {out_var.name});')
+        args.append(bits)
+    call = f'    gemm_stream_{node.name}({", ".join(args)});'
+    return '\n' + '\n'.join(decls + pre + [call] + post)
 
 
 # Bias, when this node has one, is read through the config (CONFIG_T::gemm_bias(),
@@ -304,22 +328,10 @@ gemm_stream_two_op_function_template = """
     }}
 """
 
-# n_inplace == 1 (the common attention-head case): no per-head loop around the
-# single call -- a bare call. Two-operand GEMM never has a real bias (bias is never
-# a function-signature parameter at all, on either path), so this and the n_inplace
-# > 1 template above are now identical in shape; both are what Vitis was flagging as
-# a non-canonical dataflow region (214-114 / 214-169 / 200-471).
-gemm_stream_two_op_single_function_template = """
-    hls::stream<ap_uint<nnet::gemm_packed_bits<{input0_t}>::value> > {output}_a_bits("{output}_a_bits");
-    #pragma HLS STREAM variable={output}_a_bits depth=2
-    hls::stream<ap_uint<nnet::gemm_packed_bits<{input1_t}>::value> > {output}_b_bits("{output}_b_bits");
-    #pragma HLS STREAM variable={output}_b_bits depth=2
-    hls::stream<ap_uint<nnet::gemm_packed_bits<{output_t}>::value> > {output}_p_bits("{output}_p_bits");
-    #pragma HLS STREAM variable={output}_p_bits depth=2
-    nnet::pack_stream<{input0_t}, config{index}::gemm_m>({input0}, {output}_a_bits);
-    nnet::pack_stream<{input1_t}, (config{index}::b_row_major ? config{index}::gemm_k : config{index}::gemm_n)>({input1}, {output}_b_bits);
-    gemm_stream_{name}({output}_a_bits, {output}_b_bits, {output}_p_bits);
-    nnet::unpack_stream<{output_t}, config{index}::gemm_m>({output}_p_bits, {output});"""
+# n_inplace == 1 (the common attention-head case) is not a template: it is the bare
+# gemm_stream_<name>(a, b, p) call built by _gemm_stream_packed_call, with no per-head loop
+# (the loop above is what Vitis flags as a non-canonical dataflow region, 214-114 / 214-169
+# / 200-471). Two-operand GEMM never has a real bias.
 
 
 def _format_two_operand(node):
@@ -467,7 +479,13 @@ class GemmFunctionTemplate(FunctionCallTemplate):
                 return gemm_array_two_op_function_template.format(**two_op)
             if node.get_attr('n_inplace', 1) == 1:
                 # Bare call: no bias array/port, no zero-fill, no per-head loop.
-                return gemm_stream_two_op_single_function_template.format(**two_op)
+                b_beats = f'(config{idx}::b_row_major ? config{idx}::gemm_k : config{idx}::gemm_n)'
+                return _gemm_stream_packed_call(
+                    node,
+                    [(inp0, f'config{idx}::gemm_m', 'a'), (inp1, b_beats, 'b')],
+                    out_var,
+                    f'config{idx}::gemm_m',
+                )
             # n_inplace > 1: unchanged, needs its own follow-up look (plan.md).
             return gemm_stream_two_op_function_template.format(**two_op)
 
@@ -501,7 +519,9 @@ class GemmFunctionTemplate(FunctionCallTemplate):
                 f"Gemm '{node.name}': row-varying bias is not supported on the io_stream GEMM-IP "
                 "path. Use io_parallel for EinsumDense layers whose bias varies across rows."
             )
-        return gemm_stream_packed_function_template.format(**params)
+        inp = node.get_input_variable(node.inputs[0])
+        beats = f'{params["config"]}::gemm_m'
+        return _gemm_stream_packed_call(node, [(inp, beats, 'a')], node.get_output_variable(), beats)
 
 
 def register_gemm_templates(backend):

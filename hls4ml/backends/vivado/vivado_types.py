@@ -37,12 +37,16 @@ class VivadoInplaceArrayVariableConverter(ArrayVariableConverter):
 
 class VivadoStreamVariableDefinition(VariableDefinition):
     def definition_cpp(self, name_suffix='', as_reference=False):
+        # An edge kept in the GEMM IP's packed form (MarkGemmPackedEdges) carries the raw
+        # ap_uint beat; self.type still names the array type that fixes its layout.
+        if getattr(self, 'gemm_packed', False):
+            elem = f'ap_uint<nnet::gemm_packed_bits<{self.type.name}>::value> '
+        else:
+            elem = self.type.name
         if as_reference:  # Function parameter
-            return f'hls::stream<{self.type.name}> &{self.name}{name_suffix}'
+            return f'hls::stream<{elem}> &{self.name}{name_suffix}'
         else:  # Declaration
-            return 'hls::stream<{type}> {name}{suffix}("{name}")'.format(
-                type=self.type.name, name=self.name, suffix=name_suffix
-            )
+            return 'hls::stream<{type}> {name}{suffix}("{name}")'.format(type=elem, name=self.name, suffix=name_suffix)
 
 
 class VivadoInplaceStreamVariableDefinition(VariableDefinition):

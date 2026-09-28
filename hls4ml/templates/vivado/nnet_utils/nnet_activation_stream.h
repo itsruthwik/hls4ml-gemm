@@ -6,6 +6,7 @@
 #include "nnet_activation.h"
 #include "nnet_common.h"
 #include "nnet_stream.h"
+#include "nnet_stream_beat.h"
 #include "nnet_types.h"
 #include <cmath>
 
@@ -14,39 +15,45 @@ namespace nnet {
 // *************************************************
 //       LINEAR Activation
 // *************************************************
-template <class data_T, class res_T, typename CONFIG_T> void linear(hls::stream<data_T> &data, hls::stream<res_T> &res) {
+template <class data_T, class res_T, typename CONFIG_T>
+void linear(hls::stream<typename beat_io<data_T>::elem_t> &data, hls::stream<typename beat_io<res_T>::elem_t> &res) {
+    typedef typename beat_io<data_T>::array_t data_A;
+    typedef typename beat_io<res_T>::array_t res_A;
 LinearActLoop:
-    for (int i = 0; i < CONFIG_T::n_in / res_T::size; i++) {
+    for (int i = 0; i < CONFIG_T::n_in / res_A::size; i++) {
         #pragma HLS PIPELINE
 
-        data_T in_data = data.read();
-        res_T out_data;
+        data_A in_data = beat_io<data_T>::read(data);
+        res_A out_data;
         PRAGMA_DATA_PACK(out_data)
 
     LinearPackLoop:
-        for (int j = 0; j < res_T::size; j++) {
+        for (int j = 0; j < res_A::size; j++) {
             #pragma HLS UNROLL
             out_data[j] = in_data[j];
         }
 
-        res.write(out_data);
+        beat_io<res_T>::write(res, out_data);
     }
 }
 
 // *************************************************
 //       RELU Activation
 // *************************************************
-template <class data_T, class res_T, typename CONFIG_T> void relu(hls::stream<data_T> &data, hls::stream<res_T> &res) {
+template <class data_T, class res_T, typename CONFIG_T>
+void relu(hls::stream<typename beat_io<data_T>::elem_t> &data, hls::stream<typename beat_io<res_T>::elem_t> &res) {
+    typedef typename beat_io<data_T>::array_t data_A;
+    typedef typename beat_io<res_T>::array_t res_A;
 ReLUActLoop:
-    for (int i = 0; i < CONFIG_T::n_in / res_T::size; i++) {
+    for (int i = 0; i < CONFIG_T::n_in / res_A::size; i++) {
         #pragma HLS PIPELINE
 
-        data_T in_data = data.read();
-        res_T out_data;
+        data_A in_data = beat_io<data_T>::read(data);
+        res_A out_data;
         PRAGMA_DATA_PACK(out_data)
 
     ReLUPackLoop:
-        for (int j = 0; j < res_T::size; j++) {
+        for (int j = 0; j < res_A::size; j++) {
             #pragma HLS UNROLL
             if (in_data[j] > 0)
                 out_data[j] = in_data[j];
@@ -54,7 +61,7 @@ ReLUActLoop:
                 out_data[j] = 0;
         }
 
-        res.write(out_data);
+        beat_io<res_T>::write(res, out_data);
     }
 }
 
@@ -166,7 +173,9 @@ SoftmaxExpLoop:
 }
 
 template <class data_T, class res_T, typename CONFIG_T>
-void softmax_stable(hls::stream<data_T> &data, hls::stream<res_T> &res) {
+void softmax_stable(hls::stream<typename beat_io<data_T>::elem_t> &data, hls::stream<typename beat_io<res_T>::elem_t> &res) {
+    typedef typename beat_io<data_T>::array_t data_A;
+    typedef typename beat_io<res_T>::array_t res_A;
     // Initialize the lookup tables
 #ifdef __HLS_SYN__
     bool initialized = false;
@@ -186,38 +195,38 @@ void softmax_stable(hls::stream<data_T> &data, hls::stream<res_T> &res) {
         initialized = true;
     }
 
-    constexpr unsigned multiplier_limit = DIV_ROUNDUP(data_T::size, CONFIG_T::reuse_factor);
-    constexpr unsigned ii = data_T::size / multiplier_limit;
+    constexpr unsigned multiplier_limit = DIV_ROUNDUP(data_A::size, CONFIG_T::reuse_factor);
+    constexpr unsigned ii = data_A::size / multiplier_limit;
 
-    typename data_T::value_type data_array[data_T::size];
+    typename data_A::value_type data_array[data_A::size];
 #pragma HLS ARRAY_PARTITION variable=data_array complete
 SoftmaxArrayLoop:
-    for (unsigned i = 0; i < CONFIG_T::n_in / data_T::size; i++) {
+    for (unsigned i = 0; i < CONFIG_T::n_in / data_A::size; i++) {
         #pragma HLS PIPELINE II=ii rewind
 
-        data_T in_pack = data.read();
+        data_A in_pack = beat_io<data_T>::read(data);
     SoftmaxArrayPackLoop:
-        for (unsigned j = 0; j < data_T::size; j++) {
+        for (unsigned j = 0; j < data_A::size; j++) {
             #pragma HLS UNROLL
             data_array[j] = in_pack[j];
         }
 
         // Find the max and compute all delta(x_i, x_max)
-        Op_max<typename data_T::value_type> op_max;
-        typename data_T::value_type x_max =
-            reduce<typename data_T::value_type, data_T::size, Op_max<typename data_T::value_type>>(data_array, op_max);
+        Op_max<typename data_A::value_type> op_max;
+        typename data_A::value_type x_max =
+            reduce<typename data_A::value_type, data_A::size, Op_max<typename data_A::value_type>>(data_array, op_max);
 
-        typename CONFIG_T::inp_norm_t d_xi_xmax[data_T::size];
-        for (unsigned j = 0; j < data_T::size; j++) {
+        typename CONFIG_T::inp_norm_t d_xi_xmax[data_A::size];
+        for (unsigned j = 0; j < data_A::size; j++) {
             #pragma HLS UNROLL
             d_xi_xmax[j] = x_max - data_array[j];
         }
 
         // Calculate all the e^x's
-        typename CONFIG_T::accum_t exp_res[data_T::size];
+        typename CONFIG_T::accum_t exp_res[data_A::size];
         #pragma HLS ARRAY_PARTITION variable=exp_res complete
         typename CONFIG_T::inv_inp_t exp_sum(0);
-        for (unsigned j = 0; j < data_T::size; j++) {
+        for (unsigned j = 0; j < data_A::size; j++) {
             #pragma HLS UNROLL
             unsigned x = softmax_idx_from_real_val<typename CONFIG_T::inp_norm_t, CONFIG_T::exp_table_size>(d_xi_xmax[j]);
             exp_res[j] = exp_table[x];
@@ -226,21 +235,21 @@ SoftmaxArrayLoop:
         // Explicitly sum the results with an adder tree.
         // Rounding & Saturation mode, which improve accuracy, prevent Vivado from expression balancing
         Op_add<typename CONFIG_T::accum_t> op_add;
-        exp_sum = reduce<typename CONFIG_T::accum_t, data_T::size, Op_add<typename CONFIG_T::accum_t>>(exp_res, op_add);
+        exp_sum = reduce<typename CONFIG_T::accum_t, data_A::size, Op_add<typename CONFIG_T::accum_t>>(exp_res, op_add);
 
         typename CONFIG_T::inv_table_t inv_exp_sum =
             invert_table[softmax_idx_from_real_val<typename CONFIG_T::inv_inp_t, CONFIG_T::inv_table_size>(exp_sum)];
 
-        res_T out_pack;
+        res_A out_pack;
         PRAGMA_DATA_PACK(out_pack)
 
     SoftmaxInvPackLoop:
-        for (unsigned j = 0; j < res_T::size; j++) {
+        for (unsigned j = 0; j < res_A::size; j++) {
             #pragma HLS UNROLL
             #pragma HLS ALLOCATION operation instances=mul limit=multiplier_limit
             out_pack[j] = exp_res[j] * inv_exp_sum;
         }
-        res.write(out_pack);
+        beat_io<res_T>::write(res, out_pack);
     }
 }
 
@@ -747,24 +756,27 @@ HardSigmoidActLoop:
 // *************************************************
 
 template <class data_T, class param_T, class res_T, typename CONFIG_T>
-void leaky_relu(hls::stream<data_T> &data, param_T alpha, hls::stream<res_T> &res) {
+void leaky_relu(hls::stream<typename beat_io<data_T>::elem_t> &data, param_T alpha,
+                hls::stream<typename beat_io<res_T>::elem_t> &res) {
+    typedef typename beat_io<data_T>::array_t data_A;
+    typedef typename beat_io<res_T>::array_t res_A;
 LeakyReLUActLoop:
-    for (int i = 0; i < CONFIG_T::n_in / res_T::size; i++) {
+    for (int i = 0; i < CONFIG_T::n_in / res_A::size; i++) {
         #pragma HLS PIPELINE
 
-        data_T in_data = data.read();
-        res_T out_data;
+        data_A in_data = beat_io<data_T>::read(data);
+        res_A out_data;
         PRAGMA_DATA_PACK(out_data)
 
     LeakyReLUPackLoop:
-        for (int j = 0; j < res_T::size; j++) {
+        for (int j = 0; j < res_A::size; j++) {
             #pragma HLS UNROLL
             if (in_data[j] > 0)
                 out_data[j] = in_data[j];
             else
                 out_data[j] = alpha * in_data[j];
         }
-        res.write(out_data);
+        beat_io<res_T>::write(res, out_data);
     }
 }
 

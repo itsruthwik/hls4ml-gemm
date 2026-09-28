@@ -11,6 +11,7 @@
 #include "hls_stream.h"
 #include "nnet_common.h"
 #include "nnet_conv_stream.h"
+#include "nnet_stream_beat.h"
 
 namespace nnet {
 
@@ -201,8 +202,10 @@ ReadInputHeight:
 //   a_row_T = nnet::array<input_scalar_t, filt_width * n_chan>
 // Flattening order: k = kw * n_chan + c
 // ---------------------------------------------------------------------------
-template <class data_T, class a_row_T, typename CONFIG_T>
-void im2col_1d_gemm_rows(hls::stream<data_T> &data, hls::stream<a_row_T> &a_rows) {
+template <class data_T, class a_row_io_T, typename CONFIG_T>
+void im2col_1d_gemm_rows(hls::stream<data_T> &data, hls::stream<typename beat_io<a_row_io_T>::elem_t> &a_rows) {
+    // a_row_io_T is the row type, or nnet::packed<row type> when the row feeds a GEMM IP packed.
+    typedef typename beat_io<a_row_io_T>::array_t a_row_T;
     #pragma HLS INLINE off
 
     static_assert(a_row_T::size == CONFIG_T::filt_width * CONFIG_T::n_chan,
@@ -247,7 +250,7 @@ ReadInputWidth:
                     #pragma HLS UNROLL
                     out_pack[i] = kernel_data[i];
                 }
-                a_rows.write(out_pack);
+                beat_io<a_row_io_T>::write(a_rows, out_pack);
             }
 
             if (pX + one == inWidthIdx) {
@@ -267,8 +270,10 @@ ReadInputWidth:
 //   a_row_T = nnet::array<input_scalar_t, filt_height * filt_width * n_chan>
 // Flattening order: k = ((kh * filt_width) + kw) * n_chan + c
 // ---------------------------------------------------------------------------
-template <class data_T, class a_row_T, typename CONFIG_T>
-void im2col_2d_gemm_rows(hls::stream<data_T> &data, hls::stream<a_row_T> &a_rows) {
+template <class data_T, class a_row_io_T, typename CONFIG_T>
+void im2col_2d_gemm_rows(hls::stream<data_T> &data, hls::stream<typename beat_io<a_row_io_T>::elem_t> &a_rows) {
+    // a_row_io_T is the row type, or nnet::packed<row type> when the row feeds a GEMM IP packed.
+    typedef typename beat_io<a_row_io_T>::array_t a_row_T;
     #pragma HLS INLINE off
 
     static_assert(a_row_T::size == CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan,
@@ -324,7 +329,7 @@ ReadInputHeight:
                         #pragma HLS UNROLL
                         out_pack[i] = kernel_data[i];
                     }
-                    a_rows.write(out_pack);
+                    beat_io<a_row_io_T>::write(a_rows, out_pack);
                 }
 
                 if (pX + one == inWidthIdx) {

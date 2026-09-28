@@ -1,6 +1,14 @@
 from hls4ml.model.optimizer.optimizer import OptimizerPass
 
 
+def stream_type_arg(var):
+    """Template argument naming *var*'s beat type: its array type, or ``nnet::packed<...>``
+    when the edge is kept in the GEMM IP's packed form (Vivado/Vitis io_stream only)."""
+    if getattr(var, 'gemm_packed', False):
+        return f'nnet::packed<{var.type.name}>'
+    return var.type.name
+
+
 class Template(OptimizerPass):
     """The Template base class, should not be instantiated directly
 
@@ -90,8 +98,8 @@ class FunctionCallTemplate(Template):
     def _default_function_params(self, layer):
         params = self._default_params(layer)
         params['config'] = f'config{layer.index}'
-        params['input_t'] = layer.get_input_variable().type.name
-        params['output_t'] = layer.get_output_variable().type.name
+        params['input_t'] = stream_type_arg(layer.get_input_variable())
+        params['output_t'] = stream_type_arg(layer.get_output_variable())
         params['input'] = layer.get_input_variable().name
         params['output'] = layer.get_output_variable().name
 

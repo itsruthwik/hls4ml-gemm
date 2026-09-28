@@ -288,6 +288,9 @@ class VivadoBackend(FPGABackend):
             # node.inputs[idx] already names the post-clone *_cpyN stream variable and
             # that variable already has a ('stream', depth) pragma to override.
             'vivado:configure_input_fifo_depth',
+            # After the stream types exist and before templates are formatted, which read
+            # the gemm_packed flag it sets on edge variables.
+            'vivado:mark_gemm_packed_edges',
         ]
         vivado_types_flow = register_flow('specific_types', vivado_types, requires=[init_flow], backend=self.name)
 
