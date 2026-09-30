@@ -301,6 +301,41 @@ template <class res_T, size_t SIZE> void print_result(hls::stream<res_T> &result
     out << std::endl;
 }
 
+// Raw integer code of a fixed-point value: its bit pattern read as a two's-complement (signed
+// types) or plain (unsigned types) integer, i.e. value * 2^frac_bits exactly, with no decimal
+// formatting. ap_fixed exposes its width but not its signedness, so signedness is read off the
+// all-ones pattern (negative only for a signed type).
+template <class T> long long fixed_raw_code(const T &v) {
+    T ones;
+    ones.range(T::width - 1, 0) = ~ap_uint<T::width>(0);
+    const bool is_signed = ones < 0;
+    const unsigned long long u = v.range(T::width - 1, 0).to_uint64();
+    if (is_signed && T::width < 64 && ((u >> (T::width - 1)) & 1ULL))
+        return (long long)u - (long long)(1ULL << T::width);
+    return (long long)u;
+}
+
+// print_result, but writing each output's raw integer code (fixed_raw_code). Used for the
+// tb_data/*.raw files, which compare exactly against integer golden codes.
+template <class res_T, size_t SIZE> void print_result_raw(res_T result[SIZE], std::ostream &out, bool keep = false) {
+    for (int i = 0; i < SIZE; i++) {
+        out << fixed_raw_code(result[i]) << " ";
+    }
+    out << std::endl;
+}
+
+template <class res_T, size_t SIZE> void print_result_raw(hls::stream<res_T> &result, std::ostream &out, bool keep = false) {
+    for (int i = 0; i < SIZE / res_T::size; i++) {
+        res_T res_pack = result.read();
+        for (int j = 0; j < res_T::size; j++) {
+            out << fixed_raw_code(res_pack[j]) << " ";
+        }
+        if (keep)
+            result.write(res_pack);
+    }
+    out << std::endl;
+}
+
 template <class data_T, size_t SIZE> void fill_zero(data_T data[SIZE]) { std::fill_n(data, SIZE, 0.); }
 
 template <class data_T, size_t SIZE> void fill_zero(hls::stream<data_T> &data) {

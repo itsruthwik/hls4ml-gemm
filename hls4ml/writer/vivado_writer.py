@@ -953,6 +953,9 @@ class VivadoWriter(Writer):
                 tb_stream = model.config.get_writer_config().get('TBOutputStream', 'both')
                 if tb_stream != 'stdout':
                     for out in model_outputs:
+                        newline += indent + 'nnet::print_result_raw<{}, {}>({}, fraw, true);\n'.format(
+                            out.type.name, out.size_cpp(), out.name
+                        )
                         newline += indent + 'nnet::print_result<{}, {}>({}, fout);\n'.format(
                             out.type.name, out.size_cpp(), out.name
                         )  # TODO enable this

@@ -870,6 +870,9 @@ class CatapultWriter(Writer):
             elif '// hls-fpga-machine-learning insert tb-output' in line:
                 newline = line
                 for out in model_outputs:
+                    newline += indent + 'nnet::print_result_raw<{}, {}>({}, fraw, true);\n'.format(
+                        out.type.name, out.size_cpp(), out.name
+                    )
                     newline += indent + 'nnet::print_result<{}, {}>({}, fout);\n'.format(
                         out.type.name, out.size_cpp(), out.name
                     )  # TODO enable this

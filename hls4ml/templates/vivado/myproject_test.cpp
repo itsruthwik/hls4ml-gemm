@@ -36,6 +36,9 @@ int main(int argc, char **argv) {
     std::string RESULTS_LOG = "tb_data/csim_results.log";
 #endif
     std::ofstream fout(RESULTS_LOG);
+    // The same outputs as raw integer codes (value * 2^frac_bits), for exact comparison.
+    std::string RAW_LOG = RESULTS_LOG.substr(0, RESULTS_LOG.size() - 4) + ".raw";
+    std::ofstream fraw(RAW_LOG);
 
     std::string iline;
     std::string pline;
@@ -92,6 +95,7 @@ int main(int argc, char **argv) {
     }
 
     fout.close();
+    fraw.close();
     std::cout << "INFO: Saved inference results to file: " << RESULTS_LOG << std::endl;
 
     return 0;

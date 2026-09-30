@@ -32,6 +32,44 @@ namespace nnet {
 bool trace_enabled = true;
 std::map<std::string, void *> *trace_outputs = NULL;
 size_t trace_type_size = sizeof(double);
+
+// Defined here rather than in nnet_helpers.h: Catapult puts its own bundled nnet_utils ahead of
+// the project's copy on the testbench include path, so helpers added to the project's
+// nnet_helpers.h are not seen.
+// Raw integer code of a fixed-point value: its bit pattern as a sign-extended (signed types) or
+// plain (unsigned types) integer, i.e. value * 2^frac_bits exactly, with no decimal formatting.
+template <class T> long long fixed_raw_code(const T &v) { return v.template slc<T::width>(0).to_int64(); }
+
+// print_result, but writing each output's raw integer code (fixed_raw_code). Used for the
+// tb_data/*.raw files, which compare exactly against integer golden codes.
+template <class res_T, size_t SIZE> void print_result_raw(res_T result[SIZE], std::ostream &out, bool keep = false) {
+    for (unsigned i = 0; i < SIZE; i++) {
+        out << fixed_raw_code(result[i]) << " ";
+    }
+    out << std::endl;
+}
+
+template <class res_T, size_t SIZE> void print_result_raw(ac_channel<res_T> &result, std::ostream &out, bool keep = false) {
+    if (!keep) {
+        while (result.available(1)) {
+            res_T res_pack = result.read();
+            for (unsigned int j = 0; j < res_T::size; j++) {
+                out << fixed_raw_code(res_pack[j]) << " ";
+            }
+        }
+        out << std::endl;
+    } else {
+        if (result.debug_size() >= SIZE / res_T::size) {
+            for (unsigned int i = 0; i < SIZE / res_T::size; i++) {
+                res_T res_pack = result[i]; // peek
+                for (unsigned int j = 0; j < res_T::size; j++) {
+                    out << fixed_raw_code(res_pack[j]) << " ";
+                }
+            }
+            out << std::endl;
+        }
+    }
+}
 } // namespace nnet
 
 CCS_MAIN(int argc, char *argv[]) {
@@ -78,6 +116,9 @@ CCS_MAIN(int argc, char *argv[]) {
     std::string RESULTS_LOG = "tb_data/csim_results.log";
 #endif
     std::ofstream fout(RESULTS_LOG);
+    // The same outputs as raw integer codes (value * 2^frac_bits), for exact comparison.
+    std::string RAW_LOG = RESULTS_LOG.substr(0, RESULTS_LOG.size() - 4) + ".raw";
+    std::ofstream fraw(RAW_LOG);
 
 #ifndef __SYNTHESIS__
     static bool loaded_weights = false;
@@ -158,6 +199,7 @@ CCS_MAIN(int argc, char *argv[]) {
     }
 
     fout.close();
+    fraw.close();
     std::cout << "INFO: Saved inference results to file: " << RESULTS_LOG << std::endl;
 
     return 0;
