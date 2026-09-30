@@ -296,6 +296,40 @@ class CatapultWriter(Writer):
         else:
             return ''
 
+    @staticmethod
+    def _ram_fifo_config_tcl(model, indent):
+        """Tcl settings for the RAM-backed channel pipe (ram_pipe.tcl).
+
+        Inter-block channels wider than RamFifoMinWidth bits and at least RamFifoMinDepth deep
+        map to a RAM instead of ccs_pipe registers. The width is known here (packed word of the
+        stream variable) but the depth is a build option too, so the depth test is done by
+        build_prj.tcl once the FIFO_DEPTH directives are set. HLSConfig Model keys:
+        RamFifo (default True; False disables), RamFifoMinWidth (32), RamFifoMinDepth (8).
+        The RAM library is the behavioural Altera one, so other technologies keep registers.
+        """
+        model_cfg = model.config.get_config_value('HLSConfig', {}).get('Model', {})
+        tech = model.config.get_config_value('Technology')
+        altera = tech not in ('asic', 'fpga') and not (
+            tech is None
+            and (model.config.get_config_value('Part') is not None or model.config.get_config_value('ASICLibs') is not None)
+        )
+        if not altera or not model_cfg.get('RamFifo', True):
+            return ''
+        widths = []
+        for var in model.output_vars.values():
+            if getattr(var, 'pragma', None) is None or var.pragma[0] != 'stream':
+                continue
+            t = var.type
+            n_elem = getattr(t, 'n_elem', var.shape[-1])
+            n_pack = getattr(t, 'n_pack', 1)
+            n_words = n_elem // n_pack if getattr(t, 'unpack', False) else n_elem * n_pack
+            widths.append(f'{var.name} {t.precision.width * n_words}')
+        line = indent + 'set ram_fifo 1\n'
+        line += indent + f"set ram_fifo_min_width {int(model_cfg.get('RamFifoMinWidth', 32))}\n"
+        line += indent + f"set ram_fifo_min_depth {int(model_cfg.get('RamFifoMinDepth', 8))}\n"
+        line += indent + 'set ram_fifo_widths {' + ' '.join(widths) + '}\n'
+        return line
+
     def write_project_cpp(self, model):
         """Write the main architecture source file (myproject.cpp)
 
@@ -1044,6 +1078,8 @@ class CatapultWriter(Writer):
                     else:
                         # Default Catapult target: behavioral Agilex library (see build_prj.tcl).
                         line = indent + 'setup_altera_lib\n'
+                elif '#hls-fpga-machine-learning insert ram-fifo-config' in line:
+                    line = self._ram_fifo_config_tcl(model, indent)
                 elif '#hls-fpga-machine-learning insert invoke_args' in line:
                     # The writer copies InputData/OutputPredictions into tb_data/ under
                     # canonical names, so the testbench args must reference those names —
@@ -1140,6 +1176,10 @@ class CatapultWriter(Writer):
                             + f'directive set -match glob "$design/{var.name}:cns/FIFO_DEPTH" {depth}\n'
                         )
                 dst.write(line)
+
+        # RAM-backed channel pipe (ram_pipe.tcl, rp_ram.v): sourced by build_prj.tcl when enabled.
+        for fname in ('ram_pipe.tcl', 'rp_ram.v'):
+            copyfile((filedir / f'../templates/catapult/{fname}').resolve(), Path(f'{model.config.get_output_dir()}/{fname}'))
 
         # Optional bottom-up Tcl script
         build_bup_tcl_src = (filedir / '../templates/catapult/build_prj_bup.tcl').resolve()

@@ -43,6 +43,14 @@ if { [info exists ::argv] } {
 # "not set" -> fall back to fifo_depth so existing single-knob builds are unchanged.
 if { $opt(fifo_depth_bypass) == 0 } { set opt(fifo_depth_bypass) $opt(fifo_depth) }
 
+# RAM-backed channel pipes (ram_pipe.tcl). The writer replaces this block; without it the
+# feature stays off. widths maps each stream channel to its packed width in bits.
+set ram_fifo 0
+set ram_fifo_min_width 32
+set ram_fifo_min_depth 8
+set ram_fifo_widths {}
+#hls-fpga-machine-learning insert ram-fifo-config
+
 puts "***** INVOKE OPTIONS *****"
 foreach x [lsort [array names opt]] {
   puts "[format {   %-20s %s} $x $opt($x)]"
@@ -94,6 +102,7 @@ proc setup_altera_lib { } {
   solution library add Altera_MLAB
   solution library add Altera_DIST
   solution library add Altera_ROMS
+  if { $::ram_fifo_lib } { solution library add rp_ram }
 }
 
 
@@ -194,6 +203,17 @@ options set Input/CppStandard {c++17}
 options set Input/CompilerFlags -DRANDOM_FRAMES=$opt(ran_frame)
 options set Input/SearchPath {$MGC_HOME/shared/include/nnet_utils} -append
 options set ComponentLibs/SearchPath {$MGC_HOME/shared/pkgs/ccs_hls4ml} -append
+
+# The RAM pipe library must exist before the project is created. It is only built when some
+# channel is wide enough to use it.
+set ram_fifo_lib 0
+if { $ram_fifo } {
+  source $sfd/ram_pipe.tcl
+  foreach {ch w} $ram_fifo_widths {
+    if { $w > $ram_fifo_min_width } { set ram_fifo_lib 1 }
+  }
+  if { $ram_fifo_lib } { build_ram_pipe_lib $sfd [file join [pwd] ram_pipe_lib] }
+}
 
 if {$opt(reset) && [file exists CATAPULT_DIR.ccs]} {
   project load CATAPULT_DIR.ccs
@@ -331,6 +351,7 @@ if {$opt(synth)} {
   #hls-fpga-machine-learning insert fifo-depth-overrides
   map_partitioned_arrays_to_registers $design
   keep_stream_packets_out_of_memory $design
+  if { $ram_fifo_lib } { map_ram_pipes $design $ram_fifo_widths $ram_fifo_min_width $ram_fifo_min_depth }
 
   go architect
 
@@ -427,6 +448,7 @@ if {$opt(synth)} {
   #hls-fpga-machine-learning insert fifo-depth-overrides
   map_partitioned_arrays_to_registers $design
   keep_stream_packets_out_of_memory $design
+  if { $ram_fifo_lib } { map_ram_pipes $design $ram_fifo_widths $ram_fifo_min_width $ram_fifo_min_depth }
   go architect
   go allocate
   go schedule
