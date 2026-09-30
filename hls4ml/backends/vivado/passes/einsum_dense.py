@@ -68,6 +68,10 @@ struct config{index} {{
     // purely from the equation's index letters -- see equation_row_plan() in the Vivado Einsum
     // pass.
     static const bool row_major_i_outer = {row_major_i_outer};
+    // io_stream Latency only: true when the input stream already delivers each row's n_contract
+    // values contiguously, in row order, as whole beats, and rows leave in that same order -- then
+    // the kernel computes each row as its beats arrive, with no frame buffer or transpose.
+    static const bool direct_rows = {direct_rows};
 
     template<class x_T, class y_T>
     using product = nnet::product::{product_type}<x_T, y_T>;
@@ -169,7 +173,8 @@ class EinsumDenseConfigTemplate(LayerConfigTemplate):
             pf = params['n_inplace']
         params['parallelization_factor'] = pf
 
-        if io_type == 'io_stream' and strategy.lower() == 'resource':
+        params['direct_rows'] = 'false'
+        if io_type == 'io_stream' and strategy.lower() in ('resource', 'latency'):
             # init_einsum_dense already ran equation_row_plan and raised at conversion if it
             # failed (and required row_op == 0: the data operand supplies rows), so this must
             # succeed here.
@@ -177,6 +182,21 @@ class EinsumDenseConfigTemplate(LayerConfigTemplate):
                 node.attributes['equation'], node.attributes['inp_shape'], node.attributes['kernel_shape']
             )
             params['row_major_i_outer'] = 'true' if plan['row_major_i_outer'] else 'false'
+            if strategy.lower() == 'latency':
+                # Direct rows: the input needs no transpose into canonical (I, L0, C) order, rows
+                # leave i-outer (the order they arrive in), and a row is a whole number of beats
+                # in and out (a stream beat is the tensor's last dimension).
+                idx = list(node.attributes['inp_tpose_idxs'])
+                in_pack = int(node.get_input_variable().shape[-1])
+                out_pack = int(node.get_output_variable().shape[-1])
+                C, L1 = node.attributes['n_contract'], node.attributes['n_free_kernel']
+                direct = (
+                    idx == sorted(idx)
+                    and (plan['row_major_i_outer'] or node.attributes['n_inplace'] == 1)
+                    and C % in_pack == 0
+                    and L1 % out_pack == 0
+                )
+                params['direct_rows'] = 'true' if direct else 'false'
         else:
             # io_parallel and/or Latency/DA don't use nnet_einsum_dense_stream.h's kernel; this
             # field is unused but must still be defined (referenced as a static class member).

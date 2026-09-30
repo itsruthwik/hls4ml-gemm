@@ -1004,14 +1004,11 @@ class VivadoBackend(FPGABackend):
             layer.set_attr('strategy', strategy)
 
         io_type = layer.model.config.get_config_value('IOType')
-        if not is_gemm_strategy(layer) and io_type == 'io_stream' and layer.get_attr('strategy') in (
-            'latency',
-            'distributed_arithmetic',
-        ):
+        if not is_gemm_strategy(layer) and io_type == 'io_stream' and layer.get_attr('strategy') == 'distributed_arithmetic':
             raise Exception(
-                f'Layer "{layer.name}": io_stream EinsumDense requires Strategy=Resource. '
-                'The io_stream kernel (nnet::einsum_dense in nnet_einsum_dense_stream.h) only '
-                'implements the Resource contraction core; there is no io_stream Latency/DA path.'
+                f'Layer "{layer.name}": io_stream EinsumDense supports Strategy=Latency or Resource. '
+                'The io_stream kernel (nnet::einsum_dense in nnet_einsum_dense_stream.h) has no '
+                'distributed-arithmetic path.'
             )
 
         # Free-index parallelism. Latency keeps the historical full unroll (the array core is written
@@ -1024,22 +1021,23 @@ class VivadoBackend(FPGABackend):
             pf = recipe['L0']
         layer.attributes['parallelization_factor'] = pf
 
+        if io_type == 'io_stream' and layer.get_attr('strategy') in ('latency', 'resource'):
+            # The io_stream kernel (nnet_einsum_dense_stream.h) streams each row out as it's
+            # computed, with weights buffered (constant) rather than streamed -- see
+            # equation_row_plan in the Vivado Einsum pass. Both strategies need the equation's
+            # output to end with all of the kernel's free indices, i.e. the data operand supplies rows.
+            from hls4ml.backends.fpga.einsum_utils import equation_row_plan
+
+            plan = equation_row_plan(equation, inp_shape, kernel_shape)
+            if plan['row_op'] != 0:
+                raise Exception(
+                    f'Layer "{layer.name}": io_stream EinsumDense requires the equation\'s output to '
+                    'end with all of the kernel\'s free indices, so the data operand can be streamed '
+                    f'out row by row. Equation "{equation}" does not satisfy this.'
+                )
+
         if layer.get_attr('strategy') == 'resource':
             if io_type == 'io_stream':
-                # The io_stream kernel (nnet_einsum_dense_stream.h) streams each row out as it's
-                # computed, with weights buffered (constant) rather than streamed -- see
-                # equation_row_plan in the Vivado Einsum pass. It raises a clear error itself if the
-                # equation's output doesn't end with all of the kernel's free indices, i.e. if the
-                # data operand can't supply rows directly.
-                from hls4ml.backends.fpga.einsum_utils import equation_row_plan
-
-                plan = equation_row_plan(equation, inp_shape, kernel_shape)
-                if plan['row_op'] != 0:
-                    raise Exception(
-                        f'Layer "{layer.name}": io_stream EinsumDense requires the equation\'s output to '
-                        'end with all of the kernel\'s free indices, so the data operand can be streamed '
-                        f'out row by row. Equation "{equation}" does not satisfy this.'
-                    )
                 # einsum_dense's row loop gives each multiplier lane a fixed partial sum and walks
                 # the contraction axis with the reuse counter (same scheme as einsum_resource /
                 # nnet_einsum_stream.h), so RF must divide n_contract, not n_in*n_out.
