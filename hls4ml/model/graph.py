@@ -1110,6 +1110,14 @@ class MultiModelGraph:
             subgraph.graph = graph_dict
             subgraph.inputs = input_layer.outputs if idx > 0 else base_model.inputs
             subgraph.outputs = slice_[-1].outputs if idx < len(node_slices) - 1 else base_model.outputs
+            # A cut edge becomes a subgraph's top-level output. Packed GEMM edges (GemmPackedStreams)
+            # were marked on the whole graph, but a top-level port is never packed: the testbench and
+            # the next subgraph read values, not raw beats, so the producer re-renders unpacked.
+            if idx < len(node_slices) - 1:
+                for out_name in subgraph.outputs:
+                    var = subgraph.output_vars[out_name]
+                    if getattr(var, 'gemm_packed', False):
+                        var.gemm_packed = False
             subgraph._applied_flows = base_model._applied_flows
 
             # NOTE might need to examine other subgraph-related flows (i.e., fifo_optimizer)

@@ -37,7 +37,8 @@ def block_major_weight_keys(node):
     weight = node.get_weights('weight')
     n_calls = weight.data.shape[0] if isinstance(node, EinsumDense) else 1
     per_call, rf = weight.data_length // n_calls, node.get_attr('reuse_factor', 1)
-    if weight.data_length % n_calls or not rf or per_call % rf:
+    # RF 1 reads the whole array in one iteration, so it stays flat (the writer never packs it).
+    if weight.data_length % n_calls or not rf or rf <= 1 or per_call % rf:
         return ()
     return ('weight',)
 

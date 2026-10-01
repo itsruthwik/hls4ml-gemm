@@ -393,9 +393,10 @@ class SoftmaxFunctionTemplate(FunctionCallTemplate):
         if getattr(node.get_input_variable(), 'gemm_packed', False) or getattr(
             node.get_output_variable(), 'gemm_packed', False
         ):
-            # A packed GEMM edge (MarkGemmPackedEdges): call the one implementation that reads
-            # packed beats; the dispatcher would instantiate every implementation with them.
-            params['activation'] = 'softmax_stable'
+            # A packed GEMM edge (MarkGemmPackedEdges): call the stable implementation that reads
+            # packed beats directly; the dispatcher would instantiate every implementation with them.
+            resource = str(node.get_attr('strategy', '')).lower() == 'resource'
+            params['activation'] = 'softmax_stable_resource' if resource else 'softmax_stable'
         params['config'] = '{}_config{}'.format(node.get_attr('activation'), node.index)
 
         return self.template.format(**params)

@@ -348,6 +348,31 @@ def test_catapult_dense_gemm_codegen_transposes_weights(test_case_id):
     ]
 
 
+def test_catapult_resource_dense_pins_packed_weight_rom_width(test_case_id):
+    # Resource RF 2 stores the 4x3 kernel as 2 packed words of 6 weights; the build script must
+    # pin that ROM's WORD_WIDTH to one word, or Catapult may split it and replicate the ROM.
+    model = _make_dense_model()
+    config = hls4ml.utils.config_from_keras_model(model, granularity='name')
+    config['Model']['Strategy'] = 'Resource'
+    config['Model']['ReuseFactor'] = 2
+    config['LayerName']['dense']['Strategy'] = 'Resource'
+    config['LayerName']['dense']['ReuseFactor'] = 2
+    config['LayerName']['dense']['Precision']['weight'] = 'fixed<8,1>'
+
+    output_dir = test_root_path / test_case_id
+    hls_model = hls4ml.converters.convert_from_keras_model(
+        model, hls_config=config, output_dir=str(output_dir), io_type='io_stream', backend='Catapult'
+    )
+    hls_model.write()
+
+    weight_name = hls_model.graph['dense'].get_weights('weight').name
+    header = (output_dir / 'firmware' / 'weights' / f'{weight_name}.h').read_text()
+    assert 'nnet::array<' in header and f'{weight_name}[2]' in header
+    tcl = (output_dir / 'build_prj.tcl').read_text()
+    assert f'set packed_weight_roms {{{weight_name} 48}}' in tcl
+    assert 'keep_packed_weight_roms_wide $design $packed_weight_roms' in tcl
+
+
 def test_catapult_pointwise_conv1d_gemm_ip_codegen(test_case_id):
     model = _make_pointwise_conv1d_model()
     config = hls4ml.utils.config_from_keras_model(model)

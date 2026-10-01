@@ -177,6 +177,9 @@ class QConvHandler(QLayerHandler, ConvHandler):
     handles = (
         'hgq.layers.conv.QConv1D',
         'hgq.layers.conv.QConv2D',
+        # batch norm folded into the kernel and bias: converts as a plain Conv2D (load_weight reads
+        # the folded qkernel / qbias)
+        'hgq.layers.conv.QConv2DBatchnorm',
         # 'hgq.layers.conv.QConv3D',
     )
 
@@ -195,11 +198,14 @@ class QConvHandler(QLayerHandler, ConvHandler):
             else:
                 pf = prod(out_shape[1:])
         conf['parallelization_factor'] = pf
+        if layer.__class__.__name__ == 'QConv2DBatchnorm':
+            conf['class_name'] = 'Conv2D'
         return conf
 
 
 class QDenseHandler(QLayerHandler, DenseHandler):
-    handles = ('hgq.layers.core.dense.QDense', 'hgq.layers.core.dense.QBatchNormDense')
+    handles = ('hgq.layers.core.dense.QDense', 'hgq.layers.core.dense.QBatchNormDense',
+               'hgq.layers.core.dense.QDenseBatchnorm')
 
     def handle(
         self,

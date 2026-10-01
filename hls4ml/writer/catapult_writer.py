@@ -330,6 +330,25 @@ class CatapultWriter(Writer):
         line += indent + 'set ram_fifo_widths {' + ' '.join(widths) + '}\n'
         return line
 
+    def _packed_weight_roms_tcl(self, model, indent):
+        """Tcl list of block-major weight ROMs and their packed word width in bits.
+
+        build_prj.tcl pins each ROM's WORD_WIDTH to one packed word (block_factor weights), so
+        Catapult keeps the RF-deep layout nnet::weight_store reads. Without it Catapult may
+        flatten the array to one weight per word and replicate the ROM once per lane read in an
+        iteration; whether it does depends on the weight values (it kept the wide word only
+        while constant lanes let it compact the word)."""
+        if self._weight_rom_component(model) is None:
+            return ''
+        roms = []
+        for layer in model.get_layers():
+            for weights in layer.get_weights():
+                plan = self._dense_resource_reorder_plan(layer, weights)
+                if plan is not None:
+                    n_per_chunk, rf, _ = plan
+                    roms.append(f'{weights.name} {(n_per_chunk // rf) * weights.type.precision.width}')
+        return indent + 'set packed_weight_roms {' + ' '.join(roms) + '}\n'
+
     def write_project_cpp(self, model):
         """Write the main architecture source file (myproject.cpp)
 
@@ -1080,6 +1099,8 @@ class CatapultWriter(Writer):
                         line = indent + 'setup_altera_lib\n'
                 elif '#hls-fpga-machine-learning insert ram-fifo-config' in line:
                     line = self._ram_fifo_config_tcl(model, indent)
+                elif '#hls-fpga-machine-learning insert packed-weight-roms' in line:
+                    line = self._packed_weight_roms_tcl(model, indent)
                 elif '#hls-fpga-machine-learning insert invoke_args' in line:
                     # The writer copies InputData/OutputPredictions into tb_data/ under
                     # canonical names, so the testbench args must reference those names —

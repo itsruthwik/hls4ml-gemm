@@ -376,30 +376,32 @@ template <class data_T, typename CONFIG_T> struct fold {
 };
 
 template <class data_T, typename CONFIG_T>
-void row_max(hls::stream<data_T> &data, hls::stream<typename fold<data_T, CONFIG_T>::x_group_t> &xs,
-             hls::stream<typename data_T::value_type> &maxs) {
-    typedef fold<data_T, CONFIG_T> F;
-    data_T x;
-    typename data_T::value_type mx[F::lanes];
+void row_max(hls::stream<typename beat_io<data_T>::elem_t> &data,
+             hls::stream<typename fold<typename beat_io<data_T>::array_t, CONFIG_T>::x_group_t> &xs,
+             hls::stream<typename beat_io<data_T>::array_t::value_type> &maxs) {
+    typedef typename beat_io<data_T>::array_t data_A;
+    typedef fold<data_A, CONFIG_T> F;
+    data_A x;
+    typename data_A::value_type mx[F::lanes];
     #pragma HLS ARRAY_PARTITION variable=mx complete
     unsigned s = 0;
 SoftmaxMaxLoop:
     for (unsigned n = 0; n < F::rows * F::steps; n++) {
         #pragma HLS PIPELINE II=1
         if (s == 0)
-            x = data.read();
+            x = beat_io<data_T>::read(data);
         typename F::x_group_t g;
         for (unsigned l = 0; l < F::lanes; l++) {
             #pragma HLS UNROLL
             unsigned j = s * F::lanes + l;
-            typename data_T::value_type v = (j < data_T::size) ? x[j] : x[0];
+            typename data_A::value_type v = (j < data_A::size) ? x[j] : x[0];
             g[l] = v;
             if (s == 0 || v > mx[l])
                 mx[l] = v;
         }
         xs.write(g);
         if (s == F::steps - 1) {
-            typename data_T::value_type m = mx[0];
+            typename data_A::value_type m = mx[0];
             for (unsigned l = 1; l < F::lanes; l++) {
                 #pragma HLS UNROLL
                 if (mx[l] > m)
@@ -481,9 +483,11 @@ SoftmaxExpLoop:
 
 template <class data_T, class res_T, typename CONFIG_T>
 void row_normalize(hls::stream<typename fold<data_T, CONFIG_T>::e_group_t> &es,
-                   hls::stream<typename CONFIG_T::inv_table_t> &invs, hls::stream<res_T> &res) {
+                   hls::stream<typename CONFIG_T::inv_table_t> &invs,
+                   hls::stream<typename beat_io<res_T>::elem_t> &res) {
     typedef fold<data_T, CONFIG_T> F;
-    res_T y;
+    typedef typename beat_io<res_T>::array_t res_A;
+    res_A y;
     PRAGMA_DATA_PACK(y)
     typename CONFIG_T::inv_table_t inv = 0;
     unsigned s = 0;
@@ -496,11 +500,11 @@ SoftmaxNormalizeLoop:
         for (unsigned l = 0; l < F::lanes; l++) {
             #pragma HLS UNROLL
             unsigned j = s * F::lanes + l;
-            if (j < res_T::size)
+            if (j < res_A::size)
                 y[j] = eg[l] * inv;
         }
         if (s == F::steps - 1) {
-            res.write(y);
+            beat_io<res_T>::write(res, y);
             s = 0;
         } else {
             s++;
@@ -511,9 +515,13 @@ SoftmaxNormalizeLoop:
 } // namespace softmax_resource
 
 template <class data_T, class res_T, typename CONFIG_T>
-void softmax_stable_resource(hls::stream<data_T> &data, hls::stream<res_T> &res) {
+void softmax_stable_resource(hls::stream<typename beat_io<data_T>::elem_t> &data,
+                             hls::stream<typename beat_io<res_T>::elem_t> &res) {
     #pragma HLS DATAFLOW
-    typedef softmax_resource::fold<data_T, CONFIG_T> F;
+    // data_T / res_T may be nnet::packed<> tags on a packed GEMM edge; only row_max reads and
+    // row_normalize writes the beat, the stages in between see lane groups.
+    typedef typename beat_io<data_T>::array_t data_A;
+    typedef softmax_resource::fold<data_A, CONFIG_T> F;
     // A row's lane groups are written early in each stage's pipeline, but the row's scalar
     // (max / inverse sum) is written at the row's last step, several pipeline stages later.
     // A blocked group write stalls the whole pipeline, including that pending scalar write
@@ -521,7 +529,7 @@ void softmax_stable_resource(hls::stream<data_T> &data, hls::stream<res_T> &res)
     static const unsigned group_depth = 2 * F::steps + 16;
 
     hls::stream<typename F::x_group_t> x_stream("softmax_x");
-    hls::stream<typename data_T::value_type> max_stream("softmax_max");
+    hls::stream<typename data_A::value_type> max_stream("softmax_max");
     hls::stream<typename F::e_group_t> e_stream("softmax_e");
     hls::stream<typename CONFIG_T::inv_table_t> inv_stream("softmax_inv");
     #pragma HLS STREAM variable=x_stream depth=group_depth
@@ -530,8 +538,8 @@ void softmax_stable_resource(hls::stream<data_T> &data, hls::stream<res_T> &res)
     #pragma HLS STREAM variable=inv_stream depth=2
 
     softmax_resource::row_max<data_T, CONFIG_T>(data, x_stream, max_stream);
-    softmax_resource::row_exp<data_T, CONFIG_T>(x_stream, max_stream, e_stream, inv_stream);
-    softmax_resource::row_normalize<data_T, res_T, CONFIG_T>(e_stream, inv_stream, res);
+    softmax_resource::row_exp<data_A, CONFIG_T>(x_stream, max_stream, e_stream, inv_stream);
+    softmax_resource::row_normalize<data_A, res_T, CONFIG_T>(e_stream, inv_stream, res);
 }
 
 template <class data_T, class res_T, typename CONFIG_T> void softmax(hls::stream<data_T> &data, hls::stream<res_T> &res) {

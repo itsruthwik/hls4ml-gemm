@@ -76,31 +76,39 @@ LayerNormSeqLoop:
 // the exact expansion sum(x^2) - 2*mean_q*sum(x) + dim*mean_q^2. sum_t and sum2_t hold the
 // sums exactly and ap_fixed carries each product at full width, so nothing is rounded
 // until the same accum_t assignment the two-pass kernel makes.
+//
+// stats hands the token to normalize one lanes-wide chunk per cycle through a BRAM FIFO,
+// rather than carrying the whole token through the scalar stage: a full token in a message
+// costs a register copy per stage plus the FIFOs between them, which dominates the kernel's
+// flip-flops when the token is wide and reuse_factor is high.
 
 namespace layernorm_resource {
 
-template <class data_T, typename CONFIG_T> struct stat_msg {
-    data_T x;
+template <class data_T, typename CONFIG_T> struct chunk {
+    typename data_T::value_type v[DIV_ROUNDUP(CONFIG_T::n_in / CONFIG_T::seq_len, CONFIG_T::reuse_factor)];
+};
+
+template <typename CONFIG_T> struct stat_msg {
     typename CONFIG_T::sum_t sum;
     typename CONFIG_T::sum2_t sum2;
 };
 
-template <class data_T, typename CONFIG_T> struct norm_msg {
-    data_T x;
+template <typename CONFIG_T> struct norm_msg {
     typename CONFIG_T::mean_t mean_q;
     typename CONFIG_T::table_t deno;
 };
 
 template <class data_T, typename CONFIG_T>
-void stats(hls::stream<data_T> &data, hls::stream<stat_msg<data_T, CONFIG_T>> &out) {
+void stats(hls::stream<data_T> &data, hls::stream<chunk<data_T, CONFIG_T>> &xs,
+           hls::stream<stat_msg<CONFIG_T>> &out) {
     static const unsigned dim = CONFIG_T::n_in / CONFIG_T::seq_len;
     static const unsigned rf = CONFIG_T::reuse_factor;
     static const unsigned lanes = DIV_ROUNDUP(dim, rf);
+    static const unsigned nchunks = DIV_ROUNDUP(dim, lanes);
 
 LayerNormStatsSeq:
     for (int j = 0; j < CONFIG_T::seq_len; ++j) {
-        stat_msg<data_T, CONFIG_T> m;
-        m.x = data.read();
+        data_T x = data.read();
 
         typename CONFIG_T::sum_t acc[lanes];
         typename CONFIG_T::sum2_t acc2[lanes];
@@ -115,17 +123,21 @@ LayerNormStatsSeq:
     LayerNormStats:
         for (int c = 0; c < rf; ++c) {
             #pragma HLS PIPELINE II=1
+            chunk<data_T, CONFIG_T> ch;
+            #pragma HLS ARRAY_PARTITION variable=ch.v complete
             for (int l = 0; l < lanes; ++l) {
                 #pragma HLS UNROLL
                 int i = c * lanes + l;
-                if (i < dim) {
-                    typename data_T::value_type v = m.x[i];
-                    acc[l] += v;
-                    acc2[l] += v * v;
-                }
+                typename data_T::value_type v = (i < dim) ? x[i] : (typename data_T::value_type)0;
+                ch.v[l] = v;
+                acc[l] += v;
+                acc2[l] += v * v;
             }
+            if (c < nchunks)
+                xs.write(ch);
         }
 
+        stat_msg<CONFIG_T> m;
         m.sum = 0;
         m.sum2 = 0;
         for (int l = 0; l < lanes; ++l) {
@@ -137,14 +149,17 @@ LayerNormStatsSeq:
     }
 }
 
-template <class data_T, typename CONFIG_T>
-void scalar(hls::stream<stat_msg<data_T, CONFIG_T>> &in, hls::stream<norm_msg<data_T, CONFIG_T>> &out,
+template <typename CONFIG_T>
+void scalar(hls::stream<stat_msg<CONFIG_T>> &in, hls::stream<norm_msg<CONFIG_T>> &out,
             typename CONFIG_T::table_t rsqrt_table[CONFIG_T::table_size]) {
     static const unsigned dim = CONFIG_T::n_in / CONFIG_T::seq_len;
 
 LayerNormScalarSeq:
     for (int j = 0; j < CONFIG_T::seq_len; ++j) {
-        stat_msg<data_T, CONFIG_T> m = in.read();
+        // Flushable: token j must drain without waiting for token j+1's stats, which stats
+        // can only send once normalize has drained token j from the chunk FIFO.
+        #pragma HLS PIPELINE II=1 style=flp
+        stat_msg<CONFIG_T> m = in.read();
 
         // Same divide-and-round as layernorm_1d (see the notes there on why it stays a divide).
         typename CONFIG_T::accum_t mean = static_cast<typename CONFIG_T::accum_t>(m.sum) / (int)dim;
@@ -164,8 +179,7 @@ LayerNormScalarSeq:
         if (index > (int)CONFIG_T::table_size - 1)
             index = CONFIG_T::table_size - 1;
 
-        norm_msg<data_T, CONFIG_T> o;
-        o.x = m.x;
+        norm_msg<CONFIG_T> o;
         o.mean_q = mean_q;
         o.deno = rsqrt_table[index];
         out.write(o);
@@ -173,32 +187,36 @@ LayerNormScalarSeq:
 }
 
 template <class data_T, class res_T, typename CONFIG_T>
-void normalize(hls::stream<norm_msg<data_T, CONFIG_T>> &in, hls::stream<res_T> &res,
-               typename CONFIG_T::scale_t scale[CONFIG_T::n_in / CONFIG_T::seq_len],
+void normalize(hls::stream<chunk<data_T, CONFIG_T>> &xs, hls::stream<norm_msg<CONFIG_T>> &in,
+               hls::stream<res_T> &res, typename CONFIG_T::scale_t scale[CONFIG_T::n_in / CONFIG_T::seq_len],
                typename CONFIG_T::bias_t bias[CONFIG_T::n_in / CONFIG_T::seq_len]) {
     static const unsigned dim = CONFIG_T::n_in / CONFIG_T::seq_len;
     static const unsigned rf = CONFIG_T::reuse_factor;
     static const unsigned lanes = DIV_ROUNDUP(dim, rf);
+    static const unsigned nchunks = DIV_ROUNDUP(dim, lanes);
 
     #pragma HLS ARRAY_PARTITION variable=scale cyclic factor=lanes
     #pragma HLS ARRAY_PARTITION variable=bias cyclic factor=lanes
 
 LayerNormNormalizeSeq:
     for (int j = 0; j < CONFIG_T::seq_len; ++j) {
-        norm_msg<data_T, CONFIG_T> m = in.read();
+        norm_msg<CONFIG_T> m = in.read();
         res_T out_pack;
         PRAGMA_DATA_PACK(out_pack)
 
     LayerNormNormalize:
         for (int c = 0; c < rf; ++c) {
             #pragma HLS PIPELINE II=1
-            for (int l = 0; l < lanes; ++l) {
-                #pragma HLS UNROLL
-                int i = c * lanes + l;
-                if (i < dim) {
-                    typename CONFIG_T::norm_t data_diff = static_cast<typename CONFIG_T::norm_t>(
-                        static_cast<typename CONFIG_T::accum_t>(m.x[i]) - m.mean_q);
-                    out_pack[i] = data_diff * m.deno * scale[i] + bias[i];
+            if (c < nchunks) {
+                chunk<data_T, CONFIG_T> ch = xs.read();
+                for (int l = 0; l < lanes; ++l) {
+                    #pragma HLS UNROLL
+                    int i = c * lanes + l;
+                    if (i < dim) {
+                        typename CONFIG_T::norm_t data_diff = static_cast<typename CONFIG_T::norm_t>(
+                            static_cast<typename CONFIG_T::accum_t>(ch.v[l]) - m.mean_q);
+                        out_pack[i] = data_diff * m.deno * scale[i] + bias[i];
+                    }
                 }
             }
         }
@@ -214,15 +232,22 @@ void layernormalize_resource(hls::stream<data_T> &data, hls::stream<res_T> &res,
                              typename CONFIG_T::bias_t bias[CONFIG_T::n_in / CONFIG_T::seq_len],
                              typename CONFIG_T::table_t rsqrt_table[CONFIG_T::table_size]) {
     #pragma HLS DATAFLOW
+    static const unsigned dim = CONFIG_T::n_in / CONFIG_T::seq_len;
+    static const unsigned nchunks = DIV_ROUNDUP(dim, DIV_ROUNDUP(dim, CONFIG_T::reuse_factor));
 
-    hls::stream<layernorm_resource::stat_msg<data_T, CONFIG_T>> stat_stream("layernorm_stat");
-    hls::stream<layernorm_resource::norm_msg<data_T, CONFIG_T>> norm_stream("layernorm_norm");
+    hls::stream<layernorm_resource::chunk<data_T, CONFIG_T>> x_stream("layernorm_x");
+    hls::stream<layernorm_resource::stat_msg<CONFIG_T>> stat_stream("layernorm_stat");
+    hls::stream<layernorm_resource::norm_msg<CONFIG_T>> norm_stream("layernorm_norm");
+    // Two tokens (stats fills token j+1 while normalize drains token j), plus slack for the
+    // stats -> scalar -> normalize latency, which outlasts a token at low reuse_factor.
+    #pragma HLS STREAM variable=x_stream depth=2*nchunks+32
+    #pragma HLS BIND_STORAGE variable=x_stream type=fifo impl=bram
     #pragma HLS STREAM variable=stat_stream depth=2
     #pragma HLS STREAM variable=norm_stream depth=2
 
-    layernorm_resource::stats<data_T, CONFIG_T>(data, stat_stream);
-    layernorm_resource::scalar<data_T, CONFIG_T>(stat_stream, norm_stream, rsqrt_table);
-    layernorm_resource::normalize<data_T, res_T, CONFIG_T>(norm_stream, res, scale, bias);
+    layernorm_resource::stats<data_T, CONFIG_T>(data, x_stream, stat_stream);
+    layernorm_resource::scalar<CONFIG_T>(stat_stream, norm_stream, rsqrt_table);
+    layernorm_resource::normalize<data_T, res_T, CONFIG_T>(x_stream, norm_stream, res, scale, bias);
 }
 
 template <class data_T, class res_T, typename CONFIG_T>

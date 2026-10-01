@@ -1020,7 +1020,11 @@ def default_register_precision(layer: Layer):
             data = weight_var.data
             if not isinstance(data, np.ndarray):
                 raise ValueError(f'Expected data to be np.ndarray, got {type(data)} on layer {layer.name}')
-            k, i, f = kif_arrs_to_ints(minimal_kif(data))
+            # minimal_kif gives a zero entry i = 0, so one zero weight would widen the whole
+            # tensor's integer part to I >= 1 (an 8-bit fixed<8,-2> kernel became fixed<11,1>).
+            # A zero fits any type, so only the nonzero entries set it.
+            nonzero = data[data != 0]
+            k, i, f = kif_arrs_to_ints(minimal_kif(nonzero if nonzero.size else data))
             precision = to_hls4ml_fixed(k, i, f, f'{layer.name}_{w_name_t}')
         overrides[w_name_t] = precision
 

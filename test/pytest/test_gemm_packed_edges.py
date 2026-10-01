@@ -93,3 +93,54 @@ def test_on_bit_exact_vs_off(tmp_path):
     # Only the model's own input keeps a pack process and its output an unpack process.
     assert cpp.count('nnet::pack_stream<') <= 1
     assert cpp.count('nnet::unpack_stream<') <= 1
+
+
+def _softmax_model():
+    import keras
+
+    rng = np.random.default_rng(5)
+    inp = keras.layers.Input((6, 8))
+    x = keras.layers.Dense(12, use_bias=True, name='dense')(inp)
+    x = keras.layers.Activation('softmax', name='sm')(x)
+    out = keras.layers.Dense(5, use_bias=True, name='out')(x)
+    model = keras.Model(inp, out)
+    model.set_weights([rng.standard_normal(w.shape).astype(np.float32) * 0.5 for w in model.get_weights()])
+    return model
+
+
+# GEMM -> stable softmax -> GEMM: both softmax edges stay packed for either strategy; the
+# Resource kernel folds the row over reuse_factor (5 lanes groups of 3, the last one partial).
+@pytest.mark.parametrize('strategy', ['Latency', 'Resource'])
+def test_softmax_packed_bit_exact_vs_off(strategy, tmp_path):
+    model = _softmax_model()
+    x = np.random.default_rng(6).standard_normal((4, 6, 8)).astype(np.float32)
+    y = {}
+    for packed in (False, True):
+        hls_model = hls4ml.converters.convert_from_keras_model(
+            model,
+            backend='Vitis',
+            io_type='io_stream',
+            output_dir=str(tmp_path / f'sm_{strategy}_{packed}'),
+            hls_config={
+                'Model': {
+                    'Precision': 'ap_fixed<16,6>',
+                    'ReuseFactor': 1,
+                    'Strategy': 'Latency',
+                    'GemmPackedStreams': packed,
+                },
+                'LayerType': {'Dense': {'Strategy': 'GEMM'}},
+                'LayerName': {'sm': {'Implementation': 'stable', 'Strategy': strategy, 'ReuseFactor': 5}},
+            },
+        )
+        hls_model.compile()
+        y[packed] = hls_model.predict(x)
+        if packed:
+            sm = hls_model.graph['sm']
+            assert getattr(sm.get_input_variable(), 'gemm_packed', False)
+            assert getattr(sm.get_output_variable(), 'gemm_packed', False)
+    np.testing.assert_array_equal(y[True], y[False])
+    cpp = (tmp_path / f'sm_{strategy}_True' / 'firmware' / 'myproject.cpp').read_text()
+    call = 'softmax_stable_resource<' if strategy == 'Resource' else 'softmax_stable<'
+    assert call in cpp
+    assert cpp.count('nnet::pack_stream<') <= 1
+    assert cpp.count('nnet::unpack_stream<') <= 1

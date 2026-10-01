@@ -71,12 +71,8 @@ def _packed_activation(node):
     if _packed_quantizer(node):
         return True
     if isinstance(node, Softmax):
-        # Only softmax_stable (Latency strategy) reads packed beats; the template calls it directly.
-        return (
-            str(node.get_attr('implementation', '')).lower() == 'stable'
-            and str(node.get_attr('strategy', '')).lower() != 'resource'
-            and node.get_attr('n_inner', 1) == 1
-        )
+        # The stable softmax (both strategies) reads packed beats; the template calls it directly.
+        return str(node.get_attr('implementation', '')).lower() == 'stable' and node.get_attr('n_inner', 1) == 1
     activation = str(node.get_attr('activation', '')).lower()
     if isinstance(node, ParametrizedActivation):
         return activation in _PACKED_PARAM_ACTIVATIONS

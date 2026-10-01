@@ -1340,6 +1340,15 @@ class VivadoWriter(Writer):
                 else:
                     dst.write(line)
 
+    @staticmethod
+    def _fabric_multipliers(model):
+        # HLSConfig: Model: FabricMultipliers. A config file or a command-line override can
+        # carry the knob as a string, so 'False' must read as off.
+        value = model.config.config.get('HLSConfig', {}).get('Model', {}).get('FabricMultipliers', False)
+        if isinstance(value, str):
+            return value.strip().lower() in ('1', 'true', 'yes', 'on')
+        return bool(value)
+
     def write_build_script(self, model):
         """Write the TCL/Shell build scripts (project.tcl, build_prj.tcl, vivado_synth.tcl, build_lib.sh)
 
@@ -1366,6 +1375,8 @@ class VivadoWriter(Writer):
             f.write('set version "{}"\n'.format(model.config.get_config_value('Version', '1.0.0')))
             f.write('variable maximum_size\n')
             f.write('set maximum_size {}\n'.format(model.config.get_config_value('MaximumSize', '4096')))
+            f.write('variable fabric_multipliers\n')
+            f.write('set fabric_multipliers {}\n'.format(int(self._fabric_multipliers(model))))
 
         # build_prj.tcl
         srcpath = (filedir / '../templates/vivado/build_prj.tcl').resolve()
