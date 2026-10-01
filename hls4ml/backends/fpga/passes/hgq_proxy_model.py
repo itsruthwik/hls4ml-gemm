@@ -107,6 +107,33 @@ def _beat_lane_body(beat_exprs: list[str | None], indent: str) -> str:
     )
 
 
+def _absorb_zero_lanes(beats: list[list[str | None]]) -> list[list[str | None]]:
+    """Give a lane whose mask is zero in some beats (the element is known to be exactly zero
+    there, e.g. the border of a zero-padded frame) the conversion the same lane has in the
+    other beats. Converting a zero gives zero under every rounding and overflow mode, so the
+    stream is unchanged, and beats that differed only in their zero lanes become identical
+    (one body, no beat-index switch)."""
+    if not beats:
+        return beats
+    lanes = len(beats[0])
+    fill: list[str | None] = []
+    for p in range(lanes):
+        seen = {beat[p] for beat in beats if beat[p] is not None}
+        fill.append(seen.pop() if len(seen) == 1 else None)
+    return [[fill[p] if (lane is None and fill[p] is not None) else lane for p, lane in enumerate(beat)] for beat in beats]
+
+
+def _index_runs(idxs: list[int]) -> list[tuple[int, int]]:
+    """Sorted indices as inclusive (first, last) runs of consecutive values."""
+    runs: list[tuple[int, int]] = []
+    for t in sorted(idxs):
+        if runs and runs[-1][1] + 1 == t:
+            runs[-1] = (runs[-1][0], t)
+        else:
+            runs.append((t, t))
+    return runs
+
+
 def _generate_mask_fn_stream_beatwise(
     name: str,
     shape: tuple[int, ...],
@@ -122,6 +149,7 @@ def _generate_mask_fn_stream_beatwise(
     exprs, n = _mask_lanes(shape, k, b, i, RND, SAT, backend)
     n_beats = n // beat_size
     beats = [exprs[t * beat_size : (t + 1) * beat_size] for t in range(n_beats)]
+    beats = _absorb_zero_lanes(beats)
 
     if all(beat == beats[0] for beat in beats):
         # Stream-invariant: the same conversion applies to every beat, so no beat counter
@@ -130,13 +158,15 @@ def _generate_mask_fn_stream_beatwise(
     else:
         # Heterogeneous along a streamed axis: still beat-wise, but select the lane types on
         # the beat index. Identical beats share a case, so the mux is over the DISTINCT
-        # patterns, not over n_beats. Storage stays O(1) either way.
+        # patterns, not over n_beats. Storage stays O(1) either way. Runs of consecutive
+        # beat indices are one `case a ... b:` range label: a label per beat index made the
+        # HLS front end spend minutes per quantizer on a frame of a thousand beats.
         groups: dict[tuple, list[int]] = {}
         for t, beat in enumerate(beats):
             groups.setdefault(tuple(beat), []).append(t)
         cases = []
         for beat, idxs in groups.items():
-            labels = '\n'.join(f'        case {t}:' for t in idxs)
+            labels = '\n'.join(f'        case {a}:' if a == z else f'        case {a} ... {z}:' for a, z in _index_runs(idxs))
             cases.append(labels + '\n' + _beat_lane_body(list(beat), ' ' * 12) + '\n            break;')
         compute = '        switch (i) {\n' + '\n'.join(cases) + '\n            default: break;\n        }'
 

@@ -26,56 +26,53 @@ template <class data_T, class res_T, typename CONFIG_T> void fill_data(hls::stre
     res.write(res_part);
 }
 
+// One flat loop over the output grid, one beat per cycle: a border position writes zeros, an
+// interior one copies the next input beat. The nested per-region loops this replaces had no
+// pipeline pragma, so Vitis auto-pipelined the row loop and unrolled a whole padded row of
+// stream reads and writes into one body (thousands of instructions per instance), which made
+// its front-end optimisation the long pole of every conv design's csynth.
 template <class data_T, class res_T, typename CONFIG_T>
 void zeropad1d_cl(hls::stream<data_T> &data, hls::stream<res_T> &res) {
-PadLeft:
-    for (int i = 0; i < CONFIG_T::pad_left; i++) {
-        fill_zero<res_T, CONFIG_T>(res);
-    }
-
-CopyMain:
-    for (int i = 0; i < CONFIG_T::in_width; i++) {
-        fill_data<data_T, res_T, CONFIG_T>(data, res);
-    }
-
-PadRight:
-    for (int i = 0; i < CONFIG_T::pad_right; i++) {
-        fill_zero<res_T, CONFIG_T>(res);
+    #pragma HLS INLINE off
+PadWidth:
+    for (unsigned j = 0; j < CONFIG_T::out_width; j++) {
+        #pragma HLS PIPELINE II=1
+        const bool inside = j >= CONFIG_T::pad_left && j < CONFIG_T::pad_left + CONFIG_T::in_width;
+        data_T data_part;
+        if (inside) {
+            data_part = data.read();
+        }
+        res_T res_part;
+    PadChannels:
+        for (unsigned c = 0; c < CONFIG_T::n_chan; c++) {
+            #pragma HLS UNROLL
+            res_part[c] = inside ? typename res_T::value_type(data_part[c]) : typename res_T::value_type(0);
+        }
+        res.write(res_part);
     }
 }
 
 template <class data_T, class res_T, typename CONFIG_T>
 void zeropad2d_cl(hls::stream<data_T> &data, hls::stream<res_T> &res) {
-
-PadTop:
-    for (int i = 0; i < CONFIG_T::pad_top; i++) {
-    PadTopWidth:
-        for (int j = 0; j < CONFIG_T::out_width; j++) {
-            fill_zero<res_T, CONFIG_T>(res);
-        }
-    }
-
-PadMain:
-    for (int i = 0; i < CONFIG_T::in_height; i++) {
-    PadLeft:
-        for (int j = 0; j < CONFIG_T::pad_left; j++) {
-            fill_zero<res_T, CONFIG_T>(res);
-        }
-    CopyMain:
-        for (int j = 0; j < CONFIG_T::in_width; j++) {
-            fill_data<data_T, res_T, CONFIG_T>(data, res);
-        }
-    PadRight:
-        for (int j = 0; j < CONFIG_T::pad_right; j++) {
-            fill_zero<res_T, CONFIG_T>(res);
-        }
-    }
-
-PadBottom:
-    for (int i = 0; i < CONFIG_T::pad_bottom; i++) {
-    PadBottomWidth:
-        for (int j = 0; j < CONFIG_T::out_width; j++) {
-            fill_zero<res_T, CONFIG_T>(res);
+    #pragma HLS INLINE off
+PadHeight:
+    for (unsigned i = 0; i < CONFIG_T::out_height; i++) {
+        const bool row_inside = i >= CONFIG_T::pad_top && i < CONFIG_T::pad_top + CONFIG_T::in_height;
+    PadWidth:
+        for (unsigned j = 0; j < CONFIG_T::out_width; j++) {
+            #pragma HLS PIPELINE II=1
+            const bool inside = row_inside && j >= CONFIG_T::pad_left && j < CONFIG_T::pad_left + CONFIG_T::in_width;
+            data_T data_part;
+            if (inside) {
+                data_part = data.read();
+            }
+            res_T res_part;
+        PadChannels:
+            for (unsigned c = 0; c < CONFIG_T::n_chan; c++) {
+                #pragma HLS UNROLL
+                res_part[c] = inside ? typename res_T::value_type(data_part[c]) : typename res_T::value_type(0);
+            }
+            res.write(res_part);
         }
     }
 }

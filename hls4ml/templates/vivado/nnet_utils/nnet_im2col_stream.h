@@ -219,7 +219,11 @@ void im2col_1d_gemm_rows(hls::stream<data_T> &data, hls::stream<typename beat_io
     // always zero. Narrowing to just enough bits removes that dead width.
     constexpr int idxBits = im2col_idx_bits<CONFIG_T::in_width>::value;
     ap_int<idxBits> pX = 0, sX = 0;
-    data_element_t kernel_data[CONFIG_T::filt_width * CONFIG_T::n_chan] = {};
+    // Static and not initialised: a "= {}" here is a per-call loop that zeroes one
+    // element per cycle (K cycles) before the first read of every frame, stalling the
+    // producer chain each frame. No row is emitted until the window has been refilled
+    // from the current frame (the pX / pY guards below), so the old contents never leak.
+    static data_element_t kernel_data[CONFIG_T::filt_width * CONFIG_T::n_chan];
     #pragma HLS ARRAY_PARTITION variable=kernel_data complete dim=1
     // Keep the shift-window bound and stride/width constants the same narrow
     // width as pX/sX, so mixing them in the compares/updates below does not
@@ -292,7 +296,11 @@ void im2col_2d_gemm_rows(hls::stream<data_T> &data, hls::stream<typename beat_io
     // recurrence.
     constexpr int idxBits = im2col_idx_bits<MAX(CONFIG_T::in_height, CONFIG_T::in_width)>::value;
     ap_int<idxBits> pX = 0, pY = 0, sX = 0, sY = 0;
-    data_element_t kernel_data[CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan] = {};
+    // Static and not initialised: a "= {}" here is a per-call loop that zeroes one
+    // element per cycle (K cycles) before the first read of every frame, stalling the
+    // producer chain each frame. No row is emitted until the window has been refilled
+    // from the current frame (the pX / pY guards below), so the old contents never leak.
+    static data_element_t kernel_data[CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan];
     #pragma HLS ARRAY_PARTITION variable=kernel_data complete dim=1
     // Keep the shift-window bounds and stride/dimension constants the same
     // narrow width as pX/pY/sX/sY, so mixing them in the compares/updates
