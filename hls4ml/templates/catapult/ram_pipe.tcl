@@ -64,12 +64,12 @@ proc build_ram_pipe_lib { sfd libdir } {
   options set ComponentLibs/SearchPath $libdir/memgenout -append
 }
 
-# Map every internal channel that is wider than min_width bits and at least min_depth deep to
-# the RAM pipe. Runs after the FIFO_DEPTH directives (the depth is a build option as well as a
+# Map every internal channel at least min_depth deep to the RAM pipe, whatever its width (a
+# ccs_pipe cannot be deeper than 128, HIER-58). Runs after the FIFO_DEPTH directives (the depth is a build option as well as a
 # per-boundary override, so it is only known here) and after keep_stream_packets_out_of_memory.
 # Only channels still on the default ccs_pipe are remapped: a channel mapped explicitly to
 # anything else keeps its mapping.
-proc map_ram_pipes { design widths min_width min_depth } {
+proc map_ram_pipes { design widths min_depth } {
   global ram_pipe_max_width ram_pipe_max_depth
   foreach m2m [directive get -match glob -checkpath 0 -ret p $design/*:cns/MAP_TO_MODULE] {
     set rsc [join [lrange [split $m2m /] 0 end-1] /]
@@ -80,8 +80,8 @@ proc map_ram_pipes { design widths min_width min_depth } {
     if { $cur ne "" && $cur ne "ccs_ioport.ccs_pipe" } { continue }
     set depth [directive get $rsc/FIFO_DEPTH]
     if { ![string is integer -strict $depth] } { continue }
-    if { $width <= $min_width || $depth < $min_depth } { continue }
-    if { $width > $ram_pipe_max_width || $depth > $ram_pipe_max_depth } {
+    if { $depth < $min_depth } { continue }
+    if { $width < 2 || $width > $ram_pipe_max_width || $depth > $ram_pipe_max_depth } {
       logfile message "$name ($width bits x $depth) is outside the RAM pipe range, kept on ccs_pipe\n" warning
       continue
     }

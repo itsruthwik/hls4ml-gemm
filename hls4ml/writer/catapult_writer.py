@@ -328,11 +328,11 @@ class CatapultWriter(Writer):
     def _ram_fifo_config_tcl(model, indent):
         """Tcl settings for the RAM-backed channel pipe (ram_pipe.tcl).
 
-        Inter-block channels wider than RamFifoMinWidth bits and at least RamFifoMinDepth deep
-        map to a RAM instead of ccs_pipe registers. The width is known here (packed word of the
-        stream variable) but the depth is a build option too, so the depth test is done by
-        build_prj.tcl once the FIFO_DEPTH directives are set. HLSConfig Model keys:
-        RamFifo (default True; False disables), RamFifoMinWidth (32), RamFifoMinDepth (8).
+        Inter-block channels at least RamFifoMinDepth deep map to a RAM instead of ccs_pipe
+        registers, whatever their width (a ccs_pipe cannot exceed depth 128 anyway). The width is
+        known here (packed word of the stream variable) but the depth is a build option too, so the
+        depth test is done by build_prj.tcl once the FIFO_DEPTH directives are set. HLSConfig Model
+        keys: RamFifo (default True; False disables), RamFifoMinDepth (8).
         The RAM library is the behavioural Altera one, so other technologies keep registers.
         """
         model_cfg = model.config.get_config_value('HLSConfig', {}).get('Model', {})
@@ -353,7 +353,6 @@ class CatapultWriter(Writer):
             n_words = n_elem // n_pack if getattr(t, 'unpack', False) else n_elem * n_pack
             widths.append(f'{var.name} {t.precision.width * n_words}')
         line = indent + 'set ram_fifo 1\n'
-        line += indent + f"set ram_fifo_min_width {int(model_cfg.get('RamFifoMinWidth', 32))}\n"
         line += indent + f"set ram_fifo_min_depth {int(model_cfg.get('RamFifoMinDepth', 8))}\n"
         line += indent + 'set ram_fifo_widths {' + ' '.join(widths) + '}\n'
         return line
