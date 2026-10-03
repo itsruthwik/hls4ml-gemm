@@ -348,9 +348,12 @@ def test_catapult_dense_gemm_codegen_transposes_weights(test_case_id):
     ]
 
 
-def test_catapult_resource_dense_pins_packed_weight_rom_width(test_case_id):
-    # Resource RF 2 stores the 4x3 kernel as 2 packed words of 6 weights; the build script must
-    # pin that ROM's WORD_WIDTH to one word, or Catapult may split it and replicate the ROM.
+@pytest.mark.parametrize('rom_min_depth', [None, 2])
+def test_catapult_resource_dense_packs_weight_rows_as_wide_words(test_case_id, rom_min_depth):
+    # Resource RF 2 stores the 4x3 kernel block-major as 2 words of 6 weights; each word is one
+    # unsigned ac_int (lane im at bits [8*im, 8*im+8)), so Catapult maps one ROM row per word
+    # instead of splitting a struct of weights and copying the ROM per lane. The table maps to a
+    # ROM only when it is at least RomMinDepth rows deep (default 64); 2 rows stay as logic.
     model = _make_dense_model()
     config = hls4ml.utils.config_from_keras_model(model, granularity='name')
     config['Model']['Strategy'] = 'Resource'
@@ -358,8 +361,10 @@ def test_catapult_resource_dense_pins_packed_weight_rom_width(test_case_id):
     config['LayerName']['dense']['Strategy'] = 'Resource'
     config['LayerName']['dense']['ReuseFactor'] = 2
     config['LayerName']['dense']['Precision']['weight'] = 'fixed<8,1>'
+    if rom_min_depth is not None:
+        config['Model']['RomMinDepth'] = rom_min_depth
 
-    output_dir = test_root_path / test_case_id
+    output_dir = test_root_path / f'{test_case_id}_{rom_min_depth}'
     hls_model = hls4ml.converters.convert_from_keras_model(
         model, hls_config=config, output_dir=str(output_dir), io_type='io_stream', backend='Catapult'
     )
@@ -367,11 +372,11 @@ def test_catapult_resource_dense_pins_packed_weight_rom_width(test_case_id):
 
     weight_name = hls_model.graph['dense'].get_weights('weight').name
     header = (output_dir / 'firmware' / 'weights' / f'{weight_name}.h').read_text()
-    assert 'nnet::array<' in header and f'{weight_name}[2]' in header
-    tcl = (output_dir / 'build_prj.tcl').read_text()
-    assert f'set packed_weight_roms {{{weight_name} 48}}' in tcl
-    assert 'keep_packed_weight_roms_wide $design $packed_weight_roms' in tcl
-
+    assert f'ac_int<48, false> {weight_name}[2]' in header
+    assert 'nnet::array<' not in header
+    assert ('map_to_module="Altera_ROMS.mgc_rom_sync"' in header) == (rom_min_depth == 2)
+    cpp = (output_dir / 'firmware' / 'myproject.cpp').read_text()
+    assert f'nnet::load_packed_weights_from_txt<' in cpp and f', 6, 2>({weight_name}, "{weight_name}.txt")' in cpp
 
 def test_catapult_pointwise_conv1d_gemm_ip_codegen(test_case_id):
     model = _make_pointwise_conv1d_model()

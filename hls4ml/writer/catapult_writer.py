@@ -139,24 +139,51 @@ class CatapultWriter(Writer):
         return out
 
     @staticmethod
-    def _packed_weight_decl(var, plan):
-        """Declaration of a block-major weight array as packed words, nnet::weight_store's packed
-        layout: reuse_factor words of block_factor weights per dense_resource call."""
+    def _packed_lanes_rows(plan):
+        """(lanes per word, words) of a block-major weight array: block_factor weights per word,
+        reuse_factor words per dense_resource call."""
         n_per_chunk, rf, n_chunks = plan
-        return f'nnet::array<{var.type.name}, {n_per_chunk // rf}> {var.name}[{rf * n_chunks}]'
+        return n_per_chunk // rf, rf * n_chunks
+
+    @classmethod
+    def _packed_weight_decl(cls, var, plan):
+        """Declaration of a block-major weight array as packed words, nnet::weight_store's packed
+        layout: one unsigned ac_int per word, lane im at bits [im*width, (im+1)*width)."""
+        lanes, rows = cls._packed_lanes_rows(plan)
+        return f'ac_int<{lanes * var.type.precision.width}, false> {var.name}[{rows}]'
+
+    @staticmethod
+    def _weight_code(value, precision):
+        """Two's-complement bit pattern of `value` in a fixed or integer weight type."""
+        width = precision.width
+        frac = width - precision.integer
+        return int(round(float(value) * (1 << frac))) & ((1 << width) - 1)
+
+    @classmethod
+    def _packed_word_init(cls, codes, lane_width):
+        """C++ initialiser of one packed word: an ac_int built from 64-bit parts, since an
+        integer literal cannot be wider than 64 bits."""
+        width = len(codes) * lane_width
+        bits = 0
+        for im, code in enumerate(codes):
+            bits |= code << (im * lane_width)
+        parts = [(bits >> (64 * k)) & ((1 << 64) - 1) for k in range((width + 63) // 64)]
+        terms = ' | '.join(f'(ac_int<{width}, false>(0x{p:016x}ULL) << {64 * k})' for k, p in enumerate(parts) if p)
+        return f'ac_int<{width}, false>({terms or 0})'
+
+    def _packed_weight_load(self, layer, var, indent):
+        """csim loader call for a packed weight array, or None when the array is flat."""
+        plan = self._dense_resource_reorder_plan(layer, var)
+        if plan is None:
+            return None
+        lanes, rows = self._packed_lanes_rows(plan)
+        return indent + f'    nnet::load_packed_weights_from_txt<{var.type.name}, {lanes}, {rows}>({var.name}, "{var.name}.txt");\n'
 
     def _weight_decl(self, layer, var):
         """C++ declaration of a weight array (packed words when stored block-major)."""
         plan = self._dense_resource_reorder_plan(layer, var)
         return var.definition_cpp() if plan is None else self._packed_weight_decl(var, plan)
 
-    def _weight_load_target(self, layer, var):
-        """Pointer the csim weight loader fills. A packed array (nnet::array words) is loaded
-        through its flat element view: each word is exactly block_factor contiguous weights, and
-        the .txt holds them in the same block-major order."""
-        if self._dense_resource_reorder_plan(layer, var) is None:
-            return var.name
-        return f'reinterpret_cast<{var.type.name} *>({var.name})'
 
     def print_array_to_cpp(self, var, odir, write_txt_file=True, reorder_block_major=None, rom_component=None):
         """Write a weights array to C++ header files.
@@ -209,9 +236,10 @@ class CatapultWriter(Writer):
         values = list(var)
         if reorder_block_major is not None:
             values = self._dense_resource_block_reorder(values, *reorder_block_major)
-            block = reorder_block_major[0] // reorder_block_major[1]
-            words = [values[i : i + block] for i in range(0, len(values), block)]
-            h_file.write(', '.join('{{' + ', '.join(word) + '}}' for word in words))
+            lanes, _ = self._packed_lanes_rows(reorder_block_major)
+            codes = [self._weight_code(v, var.type.precision) for v in values]
+            words = [codes[i : i + lanes] for i in range(0, len(codes), lanes)]
+            h_file.write(', '.join(self._packed_word_init(w, var.type.precision.width) for w in words))
         else:
             h_file.write(', '.join(values))
         if write_txt_file:
@@ -329,25 +357,6 @@ class CatapultWriter(Writer):
         line += indent + f"set ram_fifo_min_depth {int(model_cfg.get('RamFifoMinDepth', 8))}\n"
         line += indent + 'set ram_fifo_widths {' + ' '.join(widths) + '}\n'
         return line
-
-    def _packed_weight_roms_tcl(self, model, indent):
-        """Tcl list of block-major weight ROMs and their packed word width in bits.
-
-        build_prj.tcl pins each ROM's WORD_WIDTH to one packed word (block_factor weights), so
-        Catapult keeps the RF-deep layout nnet::weight_store reads. Without it Catapult may
-        flatten the array to one weight per word and replicate the ROM once per lane read in an
-        iteration; whether it does depends on the weight values (it kept the wide word only
-        while constant lanes let it compact the word)."""
-        if self._weight_rom_component(model) is None:
-            return ''
-        roms = []
-        for layer in model.get_layers():
-            for weights in layer.get_weights():
-                plan = self._dense_resource_reorder_plan(layer, weights)
-                if plan is not None:
-                    n_per_chunk, rf, _ = plan
-                    roms.append(f'{weights.name} {(n_per_chunk // rf) * weights.type.precision.width}')
-        return indent + 'set packed_weight_roms {' + ' '.join(roms) + '}\n'
 
     def write_project_cpp(self, model):
         """Write the main architecture source file (myproject.cpp)
@@ -499,9 +508,11 @@ class CatapultWriter(Writer):
                             newline += indent + '    nnet::load_exponent_weights_from_txt<{}, {}>({}, "{}.txt");\n'.format(
                                 w.type.name, w.data_length, w.name, w.name
                             )
+                        elif self._packed_weight_load(layer, w, indent):
+                            newline += self._packed_weight_load(layer, w, indent)
                         else:
                             newline += indent + '    nnet::load_weights_from_txt<{}, {}>({}, "{}.txt");\n'.format(
-                                w.type.name, w.data_length, self._weight_load_target(layer, w), w.name
+                                w.type.name, w.data_length, w.name, w.name
                             )
 
             # Add Interface Synthesis resource pragmas
@@ -761,11 +772,19 @@ class CatapultWriter(Writer):
             model (ModelGraph): the hls4ml model.
         """
         rom_component = self._weight_rom_component(model)
+        # A packed weight table goes to a ROM only when it is at least RomMinDepth rows deep
+        # (HLSConfig Model key, default 64). A shallower table is cheaper as logic on the
+        # VTR fabric: with at most 6 address bits each output bit is one LUT6, and constant
+        # columns cost nothing, whereas a ROM costs whole memory blocks plus a read cycle.
+        model_cfg = model.config.get_config_value('HLSConfig', {}).get('Model', {})
+        rom_min_depth = int(model_cfg.get('RomMinDepth', 64))
 
         for layer in model.get_layers():
             for weights in layer.get_weights():
                 plan = self._dense_resource_reorder_plan(layer, weights)
-                rom = rom_component if plan is not None else None
+                rom = None
+                if plan is not None and self._packed_lanes_rows(plan)[1] >= rom_min_depth:
+                    rom = rom_component
                 self.print_array_to_cpp(
                     weights, model.config.get_output_dir(), reorder_block_major=plan, rom_component=rom
                 )
@@ -870,9 +889,11 @@ class CatapultWriter(Writer):
                             newline += indent + '    nnet::load_exponent_weights_from_txt<{}, {}>({}, "{}.txt");\n'.format(
                                 w.type.name, w.data_length, w.name, w.name
                             )
+                        elif self._packed_weight_load(layer, w, indent):
+                            newline += self._packed_weight_load(layer, w, indent)
                         else:
                             newline += indent + '    nnet::load_weights_from_txt<{}, {}>({}, "{}.txt");\n'.format(
-                                w.type.name, w.data_length, self._weight_load_target(layer, w), w.name
+                                w.type.name, w.data_length, w.name, w.name
                             )
 
             elif '// hls-fpga-machine-learning insert data' in line:
@@ -1099,8 +1120,6 @@ class CatapultWriter(Writer):
                         line = indent + 'setup_altera_lib\n'
                 elif '#hls-fpga-machine-learning insert ram-fifo-config' in line:
                     line = self._ram_fifo_config_tcl(model, indent)
-                elif '#hls-fpga-machine-learning insert packed-weight-roms' in line:
-                    line = self._packed_weight_roms_tcl(model, indent)
                 elif '#hls-fpga-machine-learning insert invoke_args' in line:
                     # The writer copies InputData/OutputPredictions into tb_data/ under
                     # canonical names, so the testbench args must reference those names —

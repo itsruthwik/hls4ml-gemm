@@ -25,19 +25,21 @@ template <class T> struct tree_sum_t<T, 1> {
 // elaboration) on such pragmas once this code is inlined into the conv stream path.
 
 // The weights ReuseLoop iteration ir uses, from either weight_store layout (nnet_types.h);
-// weight_lane(row, ir, im, rufactor) is logical weight ir + rufactor*im. Packed storage fetches
-// word ir once: one wide read per iteration, as the Vivado ARRAY_RESHAPE gives. Reading each lane
-// separately lets Catapult regroup the lanes into narrower words and replicate the ROM to serve
-// the extra reads.
+// weight_get<T>(row, ir, im, rufactor) is logical weight ir + rufactor*im. Packed storage fetches
+// word ir once: one wide read per iteration, as the Vivado ARRAY_RESHAPE gives, and takes lane im
+// out of it by bit slice. Reading each lane separately lets Catapult regroup the lanes into
+// narrower words and replicate the ROM to serve the extra reads.
 template <class T> inline T *weight_row(T *weights, unsigned, unsigned) { return weights; }
-template <class T, unsigned N> inline array<T, N> weight_row(array<T, N> *weights, unsigned ir, unsigned) {
+template <int B> inline ac_int<B, false> weight_row(ac_int<B, false> *weights, unsigned ir, unsigned) {
     return weights[ir];
 }
-template <class T> inline T weight_lane(T *row, unsigned ir, unsigned im, unsigned rufactor) {
+template <class T> inline T weight_get(const T *row, unsigned ir, unsigned im, unsigned rufactor) {
     return row[ir + rufactor * im];
 }
-template <class T, unsigned N> inline T weight_lane(const array<T, N> &row, unsigned, unsigned im, unsigned) {
-    return row[im];
+template <class T, int B> inline T weight_get(const ac_int<B, false> &row, unsigned, unsigned im, unsigned) {
+    T w;
+    w.set_slc(0, row.template slc<T::width>(int(im * T::width)));
+    return w;
 }
 
 template <class data_T, class res_T, typename CONFIG_T>
@@ -93,11 +95,11 @@ ReuseLoop:
             if (rufactor == 1) {
                 acc[out_index] += static_cast<typename CONFIG_T::accum_t>(
                     CONFIG_T::template product<data_T, typename CONFIG_T::weight_t>::product(
-                        data[in_index], weight_lane(w_row, ir, im, rufactor)));
+                        data[in_index], weight_get<typename CONFIG_T::weight_t>(w_row, ir, im, rufactor)));
             } else {
                 acc_part[out_index][acc_step] += static_cast<typename CONFIG_T::accum_t>(
                     CONFIG_T::template product<data_T, typename CONFIG_T::weight_t>::product(
-                        data[in_index], weight_lane(w_row, ir, im, rufactor)));
+                        data[in_index], weight_get<typename CONFIG_T::weight_t>(w_row, ir, im, rufactor)));
             }
 
             // Increment in_index
@@ -183,7 +185,7 @@ ReuseLoop:
         for (unsigned int im = 0; im < block_factor; im++) {
             acc[out_index] += static_cast<typename CONFIG_T::accum_t>(
                 CONFIG_T::template product<data_T, typename CONFIG_T::weight_t>::product(
-                    data[in_index], weight_lane(w_row, ir, im, rufactor)));
+                    data[in_index], weight_get<typename CONFIG_T::weight_t>(w_row, ir, im, rufactor)));
 
             w_index += rufactor;
             if (w_index >= CONFIG_T::n_in * CONFIG_T::n_out)
@@ -245,7 +247,7 @@ ReuseLoop:
                 continue; // check out of bounds
             tmpmult[im] =
                 CONFIG_T::template product<data_T, typename CONFIG_T::weight_t>::product(
-                    data[in_index], weight_lane(w_row, ir, im, rufactor));
+                    data[in_index], weight_get<typename CONFIG_T::weight_t>(w_row, ir, im, rufactor));
         }
 
         typename CONFIG_T::accum_t mult[multiplier_limit];

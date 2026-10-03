@@ -55,6 +55,21 @@ template <class T, size_t SIZE> void load_weights_from_txt(T *w, const char *fna
     }
 }
 
+// Block-major weights stored as wide words (nnet::weight_store): read the .txt's LANES*ROWS values
+// (already in block-major order) as T, then place lane im of word r at bits [im*width, (im+1)*width).
+template <class T, size_t LANES, size_t ROWS, int B> void load_packed_weights_from_txt(ac_int<B, false> *w, const char *fname) {
+    static_assert(B == int(LANES) * T::width, "packed weight word width must be LANES * weight width");
+    static T flat[LANES * ROWS];
+    load_weights_from_txt<T, LANES * ROWS>(flat, fname);
+    for (size_t r = 0; r < ROWS; r++) {
+        w[r] = 0;
+        for (size_t im = 0; im < LANES; im++) {
+            w[r].set_slc(int(im * T::width), flat[r * LANES + im].template slc<T::width>(0));
+        }
+    }
+}
+
+
 template <class T, size_t SIZE> void load_compressed_weights_from_txt(T *w, const char *fname) {
 
     std::string full_path = std::string(WEIGHTS_DIR) + "/" + std::string(fname);

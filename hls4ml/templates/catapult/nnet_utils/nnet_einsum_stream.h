@@ -144,9 +144,11 @@ RowReuseLoop:
         #pragma hls_unroll
         WriteRow:
             for (unsigned i_out = 0; i_out < OUT_LEN / res_T::size; i_out++) {
+            #pragma hls_unroll
                 for (unsigned i_pack = 0; i_pack < res_T::size; i_pack++) {
                     unsigned out = i_out * res_T::size + i_pack;
                     typename CONFIG_T::accum_t acc = lane_acc[out * multscale];
+                #pragma hls_unroll
                 Reduce:
                     for (unsigned g = 1; g < multscale; g++) {
                         acc += lane_acc[out * multscale + g];

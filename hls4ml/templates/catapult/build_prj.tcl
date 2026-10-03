@@ -51,9 +51,6 @@ set ram_fifo_min_depth 8
 set ram_fifo_widths {}
 #hls-fpga-machine-learning insert ram-fifo-config
 
-# Block-major weight ROMs (name and packed word width in bits). The writer replaces this block.
-set packed_weight_roms {}
-#hls-fpga-machine-learning insert packed-weight-roms
 
 puts "***** INVOKE OPTIONS *****"
 foreach x [lsort [array names opt]] {
@@ -158,19 +155,6 @@ proc map_partitioned_arrays_to_registers { design } {
     foreach rsc [find_array_resources $design $pat] {
       logfile message "directive set $rsc -MAP_TO_MODULE {\[Register\]}\n" info
       directive set $rsc -MAP_TO_MODULE {[Register]}
-    }
-  }
-}
-
-
-proc keep_packed_weight_roms_wide { design roms } {
-  # Pin each block-major weight ROM to one packed word per ReuseLoop read (nnet::weight_store).
-  # Without it Catapult may split the word into single weights and build one ROM copy per lane
-  # read in an iteration; it kept the wide word only when constant lanes let it compact it.
-  foreach {name width} $roms {
-    foreach rsc [find_array_resources $design $name.rom:rsc] {
-      logfile message "directive set $rsc -WORD_WIDTH $width\n" info
-      directive set $rsc -WORD_WIDTH $width
     }
   }
 }
@@ -367,7 +351,6 @@ if {$opt(synth)} {
   # Per-boundary overrides (HLSConfig InputFifoDepth) win over the blanket loops above.
   #hls-fpga-machine-learning insert fifo-depth-overrides
   map_partitioned_arrays_to_registers $design
-  keep_packed_weight_roms_wide $design $packed_weight_roms
   keep_stream_packets_out_of_memory $design
   if { $ram_fifo_lib } { map_ram_pipes $design $ram_fifo_widths $ram_fifo_min_width $ram_fifo_min_depth }
 
@@ -465,7 +448,6 @@ if {$opt(synth)} {
   # Per-boundary overrides (HLSConfig InputFifoDepth) win over the blanket loops above.
   #hls-fpga-machine-learning insert fifo-depth-overrides
   map_partitioned_arrays_to_registers $design
-  keep_packed_weight_roms_wide $design $packed_weight_roms
   keep_stream_packets_out_of_memory $design
   if { $ram_fifo_lib } { map_ram_pipes $design $ram_fifo_widths $ram_fifo_min_width $ram_fifo_min_depth }
   go architect

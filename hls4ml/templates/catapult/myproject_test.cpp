@@ -36,6 +36,21 @@ size_t trace_type_size = sizeof(double);
 // Defined here rather than in nnet_helpers.h: Catapult puts its own bundled nnet_utils ahead of
 // the project's copy on the testbench include path, so helpers added to the project's
 // nnet_helpers.h are not seen.
+// Block-major weights stored as wide words (nnet::weight_store): read the .txt's LANES*ROWS values
+// (already in block-major order) as T, then place lane im of word r at bits [im*width, (im+1)*width).
+// Same as the project's nnet_helpers.h copy, which the csim bridge uses.
+template <class T, size_t LANES, size_t ROWS, int B> void load_packed_weights_from_txt(ac_int<B, false> *w, const char *fname) {
+    static_assert(B == int(LANES) * T::width, "packed weight word width must be LANES * weight width");
+    static T flat[LANES * ROWS];
+    load_weights_from_txt<T, LANES * ROWS>(flat, fname);
+    for (size_t r = 0; r < ROWS; r++) {
+        w[r] = 0;
+        for (size_t im = 0; im < LANES; im++) {
+            w[r].set_slc(int(im * T::width), flat[r * LANES + im].template slc<T::width>(0));
+        }
+    }
+}
+
 // Raw integer code of a fixed-point value: its bit pattern as a sign-extended (signed types) or
 // plain (unsigned types) integer, i.e. value * 2^frac_bits exactly, with no decimal formatting.
 template <class T> long long fixed_raw_code(const T &v) { return v.template slc<T::width>(0).to_int64(); }
