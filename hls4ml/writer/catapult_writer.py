@@ -772,11 +772,13 @@ class CatapultWriter(Writer):
         """
         rom_component = self._weight_rom_component(model)
         # A packed weight table goes to a ROM only when it is at least RomMinDepth rows deep
-        # (HLSConfig Model key, default 64). A shallower table is cheaper as logic on the
-        # VTR fabric: with at most 6 address bits each output bit is one LUT6, and constant
+        # (HLSConfig Model key, default 32). A shallower table is cheaper as logic on the
+        # VTR fabric: with at most 5 address bits each output bit fits one LUT6, and constant
         # columns cost nothing, whereas a ROM costs whole memory blocks plus a read cycle.
+        # From 32 rows on, logic tables grow with the design's width and slow VTR's logic
+        # synthesis on wide designs, while a ROM stays a few memory blocks.
         model_cfg = model.config.get_config_value('HLSConfig', {}).get('Model', {})
-        rom_min_depth = int(model_cfg.get('RomMinDepth', 64))
+        rom_min_depth = int(model_cfg.get('RomMinDepth', 32))
 
         for layer in model.get_layers():
             for weights in layer.get_weights():

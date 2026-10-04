@@ -353,7 +353,7 @@ def test_catapult_resource_dense_packs_weight_rows_as_wide_words(test_case_id, r
     # Resource RF 2 stores the 4x3 kernel block-major as 2 words of 6 weights; each word is one
     # unsigned ac_int (lane im at bits [8*im, 8*im+8)), so Catapult maps one ROM row per word
     # instead of splitting a struct of weights and copying the ROM per lane. The table maps to a
-    # ROM only when it is at least RomMinDepth rows deep (default 64); 2 rows stay as logic.
+    # ROM only when it is at least RomMinDepth rows deep (default 32); 2 rows stay as logic.
     model = _make_dense_model()
     config = hls4ml.utils.config_from_keras_model(model, granularity='name')
     config['Model']['Strategy'] = 'Resource'
