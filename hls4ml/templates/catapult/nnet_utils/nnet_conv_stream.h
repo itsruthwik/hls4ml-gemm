@@ -284,11 +284,14 @@ void compute_output_buffer_2d(
                 kernel_data, res_out, weights, biases);
         }
 
-        // Pack output
-        #pragma hls_unroll
-    CastLoop:
-        for (unsigned i_ic = 0; i_ic < CONFIG_T::n_filt; i_ic++) {
-            res_pack[i_ic] = res_out[i_ic];
+        // Pack output. The own scope keeps Catapult from losing the unroll pragma after an inlined
+        // dense_latency call: without it the loop stays rolled, costing n_filt cycles per pixel.
+        {
+            #pragma hls_unroll
+        CastLoop:
+            for (unsigned i_ic = 0; i_ic < CONFIG_T::n_filt; i_ic++) {
+                res_pack[i_ic] = res_out[i_ic];
+            }
         }
 
         // Write output to stream when output ready
@@ -350,11 +353,14 @@ void compute_output_buffer_1d(
                 kernel_data, res_out, weights, biases);
         }
 
-        // Pack output
-        #pragma hls_unroll
-    CastLoop:
-        for (unsigned i_ic = 0; i_ic < CONFIG_T::n_filt; i_ic++) {
-            res_pack[i_ic] = res_out[i_ic];
+        // Pack output. The own scope keeps Catapult from losing the unroll pragma after an inlined
+        // dense_latency call: without it the loop stays rolled, costing n_filt cycles per pixel.
+        {
+            #pragma hls_unroll
+        CastLoop:
+            for (unsigned i_ic = 0; i_ic < CONFIG_T::n_filt; i_ic++) {
+                res_pack[i_ic] = res_out[i_ic];
+            }
         }
 
         // Write output to stream when output ready
