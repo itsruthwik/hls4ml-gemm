@@ -284,8 +284,9 @@ void compute_output_buffer_2d(
                 kernel_data, res_out, weights, biases);
         }
 
-        // Pack output. The own scope keeps Catapult from losing the unroll pragma after an inlined
-        // dense_latency call: without it the loop stays rolled, costing n_filt cycles per pixel.
+        // Pack output. The own scope keeps Catapult from losing the unroll pragma after the strategy
+        // if constexpr (with its else branch discarded on the Latency path): without it the loop stays
+        // rolled, costing n_filt cycles per pixel.
         {
             #pragma hls_unroll
         CastLoop:
@@ -353,8 +354,9 @@ void compute_output_buffer_1d(
                 kernel_data, res_out, weights, biases);
         }
 
-        // Pack output. The own scope keeps Catapult from losing the unroll pragma after an inlined
-        // dense_latency call: without it the loop stays rolled, costing n_filt cycles per pixel.
+        // Pack output. The own scope keeps Catapult from losing the unroll pragma after the strategy
+        // if constexpr (with its else branch discarded on the Latency path): without it the loop stays
+        // rolled, costing n_filt cycles per pixel.
         {
             #pragma hls_unroll
         CastLoop:
