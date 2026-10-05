@@ -39,6 +39,15 @@ PackIm2ColRow:
     a_rows.write(out_pack);
 }
 
+// Pixel and stride counters sized to their range. With 32-bit `int` counters the emit test and the
+// counter updates are 32-bit subtracts and compares, which Catapult splits over several pipeline
+// stages at a 2 ns clock; every later stage then holds its own copy of the kernel window that
+// write_im2col_row reads. sX / sY take values in [filt - stride, filt - 1] (signed when stride > filt).
+template <unsigned EXTENT> struct im2col_pos_t { typedef ac_int<ac::nbits<(EXTENT > 1 ? EXTENT - 1 : 1)>::val, false> type; };
+template <unsigned FILT, unsigned STRIDE> struct im2col_stride_t {
+    typedef ac_int<ac::nbits<FILT + STRIDE>::val + 1, true> type;
+};
+
 // ---------------------------------------------------------------------------
 // im2col_1d_gemm_rows — 1-D im2col that emits one full K-wide row per valid
 // output pixel.  Designed for row/column streaming GEMM IPs.
@@ -52,9 +61,12 @@ void im2col_1d_gemm_rows(ac_channel<data_T> &data, ac_channel<a_row_T> &a_rows) 
                   "A row width must equal filt_width * n_chan");
 
     typedef typename data_T::value_type data_element_t;
-    int pX = 0;
-    int sX = 0;
-    unsigned tile_row = 0;
+    typedef typename im2col_pos_t<CONFIG_T::in_width>::type px_t;
+    typedef typename im2col_stride_t<CONFIG_T::filt_width, CONFIG_T::stride_width>::type sx_t;
+    typedef typename im2col_pos_t<CONFIG_T::tile_rows>::type tile_t;
+    px_t pX = 0;
+    sx_t sX = 0;
+    tile_t tile_row = 0;
     data_element_t kernel_data[CONFIG_T::filt_width * CONFIG_T::n_chan] = {};
     const static int lShiftX = CONFIG_T::filt_width - 1;
 
@@ -84,18 +96,20 @@ ReadInputWidth:
             }
             kernel_shift_1d<decltype(pixel_pack), CONFIG_T>(pixel_pack, kernel_data);
 
-            if ((sX - lShiftX) == 0 && pX > lShiftX - 1) {
+            // Comparisons against constants, no subtracts (same conditions as before).
+            const bool sx_hit = (sX == lShiftX);
+            if (sx_hit && pX >= lShiftX) {
                 write_im2col_row<a_row_T, data_element_t, CONFIG_T::filt_width * CONFIG_T::n_chan, CONFIG_T>(
                     kernel_data, a_rows);
-                tile_row = (tile_row + 1 == CONFIG_T::tile_rows) ? 0 : tile_row + 1;
+                tile_row = (tile_row == CONFIG_T::tile_rows - 1) ? tile_t(0) : tile_t(tile_row + 1);
             }
 
-            if (pX + 1 == CONFIG_T::in_width) {
+            if (pX == CONFIG_T::in_width - 1) {
                 pX = 0;
                 sX = 0;
             } else {
                 pX = pX + 1;
-                sX = ((sX - lShiftX) == 0) ? sX - CONFIG_T::stride_width + 1 : sX + 1;
+                sX = sx_hit ? sx_t(lShiftX - (int)CONFIG_T::stride_width + 1) : sx_t(sX + 1);
             }
         }
     }
@@ -156,13 +170,21 @@ void im2col_2d_gemm_rows(ac_channel<data_T> &data, ac_channel<a_row_T> &a_rows) 
     // recurrence). Fully partitioned: MAX(filt_height-1,1) delay rows x n_chan x
     // in_width registers, no mux needed (each element has a single source, unlike an
     // ap_shift_reg-backed line buffer which needs a read-address mux per tap).
-    static data_element_t line_buffer[MAX(CONFIG_T::filt_height - 1, 1)][CONFIG_T::n_chan]
-                                     [CONFIG_T::in_width];
-    int pX = 0;
-    int pY = 0;
-    int sX = 0;
-    int sY = 0;
-    unsigned tile_row = 0;
+    // Not static: the pixel loop covers the whole frame and no row is emitted until
+    // pY >= filt_height - 1 and pX >= filt_width - 1, by which point every tap it reads was
+    // written in this frame, so nothing needs to persist across frames. As a static, Catapult
+    // kept the persistent copy and a loop-carried copy of every element (twice the registers).
+    data_element_t line_buffer[MAX(CONFIG_T::filt_height - 1, 1)][CONFIG_T::n_chan][CONFIG_T::in_width];
+    typedef typename im2col_pos_t<CONFIG_T::in_width>::type px_t;
+    typedef typename im2col_pos_t<CONFIG_T::in_height>::type py_t;
+    typedef typename im2col_stride_t<CONFIG_T::filt_width, CONFIG_T::stride_width>::type sx_t;
+    typedef typename im2col_stride_t<CONFIG_T::filt_height, CONFIG_T::stride_height>::type sy_t;
+    typedef typename im2col_pos_t<CONFIG_T::tile_rows>::type tile_t;
+    px_t pX = 0;
+    py_t pY = 0;
+    sx_t sX = 0;
+    sy_t sY = 0;
+    tile_t tile_row = 0;
     data_element_t kernel_data[CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan] = {};
     const static int lShiftX = CONFIG_T::filt_width - 1;
     const static int lShiftY = CONFIG_T::filt_height - 1;
@@ -192,26 +214,29 @@ ReadInputPixels:
             }
             gemm_shift_line_buffer_reg<decltype(pixel_pack), CONFIG_T>(pixel_pack, line_buffer, kernel_data);
 
-            if ((sX - lShiftX) == 0 && (sY - lShiftY) == 0 && pY > lShiftY - 1 && pX > lShiftX - 1) {
+            // Comparisons against constants, no subtracts (same conditions as before).
+            const bool sx_hit = (sX == lShiftX);
+            const bool sy_hit = (sY == lShiftY);
+            if (sx_hit && sy_hit && pY >= lShiftY && pX >= lShiftX) {
                 write_im2col_row<a_row_T, data_element_t,
                                   CONFIG_T::filt_height * CONFIG_T::filt_width * CONFIG_T::n_chan, CONFIG_T>(
                     kernel_data, a_rows);
-                tile_row = (tile_row + 1 == CONFIG_T::tile_rows) ? 0 : tile_row + 1;
+                tile_row = (tile_row == CONFIG_T::tile_rows - 1) ? tile_t(0) : tile_t(tile_row + 1);
             }
 
-            if (pX + 1 == CONFIG_T::in_width) {
+            if (pX == CONFIG_T::in_width - 1) {
                 pX = 0;
                 sX = 0;
-                if (pY + 1 == CONFIG_T::in_height) {
+                if (pY == CONFIG_T::in_height - 1) {
                     pY = 0;
                     sY = 0;
                 } else {
                     pY = pY + 1;
-                    sY = ((sY - lShiftY) == 0) ? sY - CONFIG_T::stride_height + 1 : sY + 1;
+                    sY = sy_hit ? sy_t(lShiftY - (int)CONFIG_T::stride_height + 1) : sy_t(sY + 1);
                 }
             } else {
                 pX = pX + 1;
-                sX = ((sX - lShiftX) == 0) ? sX - CONFIG_T::stride_width + 1 : sX + 1;
+                sX = sx_hit ? sx_t(lShiftX - (int)CONFIG_T::stride_width + 1) : sx_t(sX + 1);
             }
         }
     }
