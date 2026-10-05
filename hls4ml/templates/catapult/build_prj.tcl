@@ -131,6 +131,8 @@ proc map_partitioned_arrays_to_registers { design } {
     *dense_resource_rf_*:acc_part:rsc
     *dense_resource_rf_*:tmpmult:rsc
     *dense_resource_rf_*:mult:rsc
+    *dense_latency<*:mult:rsc
+    *dense_latency<*:acc:rsc
     *compute_output_buffer_?d<*:kernel_data:rsc
     *compute_output_buffer_?d<*:res_out:rsc
     *pointwise_mult_buffer<*:data:rsc
@@ -290,6 +292,10 @@ directive set -RESET_CLEARS_ALL_REGS no
 # config_array_partition -complete_threshold 4096 (MaximumSize default), so unannotated
 # arrays get the same register/memory policy in both backends.
 directive set -MEM_MAP_THRESHOLD 4096
+# Arrays forced to registers (map_partitioned_arrays_to_registers) may be larger than Catapult's
+# default REGISTER_THRESHOLD, which would reject them (MEM-8) and leave a fully unrolled kernel's
+# array as a memory it cannot schedule; Vivado partitions these completely at any size.
+directive set -REGISTER_THRESHOLD 1048576
 # The following line gets modified by the backend writer
 set hls_clock_period 5
 
