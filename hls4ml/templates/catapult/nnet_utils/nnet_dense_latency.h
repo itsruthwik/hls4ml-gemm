@@ -10,10 +10,13 @@
 
 namespace nnet {
 
+// One inference of the latency dense, with no pipeline pragma of its own: dense_latency wraps it in a
+// pipelined scope (II = reuse_factor) for its callers (dense, conv, sepconv); dense_overlap calls it
+// directly inside its own pipelined stage block.
 template <class data_T, class res_T, typename CONFIG_T>
-void dense_latency(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_out],
-                   typename CONFIG_T::weight_t weights[CONFIG_T::n_in * CONFIG_T::n_out],
-                   typename CONFIG_T::bias_t biases[CONFIG_T::n_out]) {
+void dense_latency_core(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_out],
+                        typename CONFIG_T::weight_t weights[CONFIG_T::n_in * CONFIG_T::n_out],
+                        typename CONFIG_T::bias_t biases[CONFIG_T::n_out]) {
     constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
     // Partial unroll config
     constexpr int prod1_unroll =
@@ -23,10 +26,7 @@ void dense_latency(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_out],
     (void)ce_reuse_factor; // to silence compiler warnings
     (void)prod1_unroll;
     (void)prod2_unroll;
-
-    // For Catapult, add an extra scope so that we can apply the pipeline pragma as if it applied to the function
-    #pragma hls_pipeline_init_interval ce_reuse_factor
-    do {
+    {
         data_T cache;
         typename CONFIG_T::accum_t mult[CONFIG_T::n_in * CONFIG_T::n_out];
         typename CONFIG_T::accum_t acc[CONFIG_T::n_out];
@@ -81,6 +81,20 @@ void dense_latency(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_out],
             // res[ires] = (res_T) (acc[ires]);
             res[ires] = cast<data_T, res_T, CONFIG_T>(acc[ires]);
         }
+    }
+}
+
+template <class data_T, class res_T, typename CONFIG_T>
+void dense_latency(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_out],
+                   typename CONFIG_T::weight_t weights[CONFIG_T::n_in * CONFIG_T::n_out],
+                   typename CONFIG_T::bias_t biases[CONFIG_T::n_out]) {
+    constexpr int ce_reuse_factor = CONFIG_T::reuse_factor;
+    (void)ce_reuse_factor;
+
+    // For Catapult, add an extra scope so that we can apply the pipeline pragma as if it applied to the function
+    #pragma hls_pipeline_init_interval ce_reuse_factor
+    do {
+        dense_latency_core<data_T, res_T, CONFIG_T>(data, res, weights, biases);
     } while (false); // one iteration loop
 }
 

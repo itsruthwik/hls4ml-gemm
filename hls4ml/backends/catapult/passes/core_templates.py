@@ -40,7 +40,7 @@ dense_config_template = """struct config{index} : nnet::dense_config {{
     using product = nnet::product::{product_type}<x_T, y_T>;
 }};\n"""
 
-dense_function_template = 'nnet::dense<{input_t}, {output_t}, {config}>({input}, {output}, {w}, {b});'
+dense_function_template = 'nnet::{dense_function}<{input_t}, {output_t}, {config}>({input}, {output}, {w}, {b});'
 
 dense_include_list = [
     'nnet_utils/nnet_dense.h',
@@ -49,6 +49,14 @@ dense_include_list = [
     'nnet_utils/nnet_gemm_ip.h',
 ]
 
+
+
+def dense_overlaps_frames(node):
+    """A stream Dense with Latency strategy overlaps inferences: it calls nnet::dense_overlap, whose call is
+    pipelined at II = reuse_factor (Catapult: its stage block at II 1). Other Dense nodes, EinsumDense and
+    every other layer keep their kernels."""
+    return (isinstance(node, Dense) and str(node.get_attr('strategy')).lower() == 'latency'
+            and node.model.config.get_config_value('IOType') == 'io_stream')
 
 class DenseConfigTemplate(LayerConfigTemplate):
     def __init__(self):
@@ -81,6 +89,7 @@ class DenseFunctionTemplate(FunctionCallTemplate):
         params['b'] = node.get_weights('bias').name
         # GEMM-strategy Dense nodes are replaced by GemmStream via ReplaceDenseGemm;
         # this template only handles non-GEMM Dense.
+        params['dense_function'] = 'dense_overlap' if dense_overlaps_frames(node) else 'dense'
 
         return self.template.format(**params)
 

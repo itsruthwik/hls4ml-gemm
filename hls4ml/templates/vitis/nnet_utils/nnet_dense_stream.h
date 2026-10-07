@@ -100,6 +100,27 @@ void dense(hls::stream<data_T> &data_stream, hls::stream<res_T> &res_stream,
     res_write<res_T, CONFIG_T>(res, res_stream);
 }
 
+// Stream Dense with Latency strategy: the same read -> dense_latency -> write as dense(), with the call
+// itself pipelined at II = reuse_factor so the dataflow process takes the next inference while the
+// current one is in flight (dense() finishes an inference before reading the next).
+template <class data_T, class res_T, typename CONFIG_T>
+void dense_overlap(hls::stream<data_T> &data_stream, hls::stream<res_T> &res_stream,
+                   typename CONFIG_T::weight_t weights[CONFIG_T::n_in * CONFIG_T::n_out],
+                   typename CONFIG_T::bias_t biases[CONFIG_T::n_out]) {
+    #pragma HLS INLINE recursive
+    #pragma HLS PIPELINE II=CONFIG_T::reuse_factor
+
+    typename data_T::value_type data[CONFIG_T::n_in];
+    #pragma HLS ARRAY_PARTITION variable=data complete
+
+    typename res_T::value_type res[CONFIG_T::n_out];
+    #pragma HLS ARRAY_PARTITION variable=res complete
+
+    data_prepare<data_T, CONFIG_T>(data_stream, data);
+    dense_latency_wrapper<typename data_T::value_type, typename res_T::value_type, CONFIG_T>(data, res, weights, biases);
+    res_write<res_T, CONFIG_T>(res, res_stream);
+}
+
 } // namespace nnet
 
 #endif
