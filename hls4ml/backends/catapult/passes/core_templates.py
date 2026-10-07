@@ -50,6 +50,15 @@ dense_include_list = [
 ]
 
 
+
+def dense_stage_overlaps(node):
+    """A stream Dense with Latency strategy: the Catapult writer pipelines its stage block at II 1 so the
+    block takes the next inference while the current one is in flight. The kernel (nnet::dense) is
+    unchanged; its read, multiply-add and write stay separately pipelined, each a step of the block's
+    interval. EinsumDense and every other layer are not affected."""
+    return (isinstance(node, Dense) and str(node.get_attr('strategy')).lower() == 'latency'
+            and node.model.config.get_config_value('IOType') == 'io_stream')
+
 class DenseConfigTemplate(LayerConfigTemplate):
     def __init__(self):
         super().__init__(Dense)
