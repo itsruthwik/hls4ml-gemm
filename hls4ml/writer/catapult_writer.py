@@ -85,11 +85,13 @@ class CatapultWriter(Writer):
         # rf>1 and over-constrains the Resource accumulate feedback at 1.
         # Exception: a stream Dense with Latency strategy is pipelined at II 1, so its block takes the next
         # inference while the current one is in flight (its kernel's sections still pipeline separately).
+        # It flushes: without it, a result waits in the pipeline until the next input arrives, which
+        # delays every output by a frame or more when inputs are sparse (one per frame at the end of a CNN).
         from hls4ml.backends.catapult.passes.core_templates import dense_stage_overlaps
 
         wrapper = '#pragma hls_design block\n'
         if dense_stage_overlaps(layer):
-            wrapper += '#pragma hls_pipeline_init_interval 1\n'
+            wrapper += '#pragma hls_pipeline_init_interval 1\n#pragma hls_pipeline_stall_mode flush\n'
         wrapper += f'void {layer.name}_stage(\n'
         wrapper += ',\n'.join(f'    {param}' for param in params)
         wrapper += '\n) {\n'
