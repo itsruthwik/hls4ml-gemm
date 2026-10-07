@@ -17,12 +17,22 @@
 #include "ap_int.h"
 #include "hls_stream.h"
 #include "nnet_stream_beat.h"
+#include <type_traits>
 
 namespace nnet {
 
 // array beats -> packed beats, N_BEATS per invocation. Pure bit copy (raw pattern,
 // never a value conversion), one beat per cycle, free-running across invocations.
-template <class data_T, unsigned N_BEATS>
+// One beat per invocation (a single-row GEMM, e.g. a dense layer): the loop would be a single trip that HLS
+// dissolves, leaving the process unpipelined (it would finish an inference before taking the next), so this
+// overload pipelines the function itself at II 1.
+template <class data_T, unsigned N_BEATS, typename std::enable_if<(N_BEATS == 1), int>::type = 0>
+void pack_stream(hls::stream<data_T> &in, hls::stream<ap_uint<gemm_packed_bits<data_T>::value> > &out) {
+    #pragma HLS PIPELINE II=1
+    out.write(pack_beat<data_T>(in.read()));
+}
+
+template <class data_T, unsigned N_BEATS, typename std::enable_if<(N_BEATS != 1), int>::type = 0>
 void pack_stream(hls::stream<data_T> &in, hls::stream<ap_uint<gemm_packed_bits<data_T>::value> > &out) {
     // Same shape as nnet::clone_stream: the loop is the whole function body and
     // carries a plain PIPELINE, which Vitis auto-rewinds into a free-running process
@@ -37,7 +47,14 @@ PACK:
 // packed beats -> array beats, N_BEATS per invocation. The IP already emitted each
 // lane at the result type's own width (requantized), so this loads the raw bit
 // pattern with .range() and never re-converts the value.
-template <class res_T, unsigned N_BEATS>
+// One beat per invocation: pipelined at the function level, as pack_stream above.
+template <class res_T, unsigned N_BEATS, typename std::enable_if<(N_BEATS == 1), int>::type = 0>
+void unpack_stream(hls::stream<ap_uint<gemm_packed_bits<res_T>::value> > &in, hls::stream<res_T> &out) {
+    #pragma HLS PIPELINE II=1
+    out.write(unpack_beat<res_T>(in.read()));
+}
+
+template <class res_T, unsigned N_BEATS, typename std::enable_if<(N_BEATS != 1), int>::type = 0>
 void unpack_stream(hls::stream<ap_uint<gemm_packed_bits<res_T>::value> > &in, hls::stream<res_T> &out) {
 UNPACK:
     for (int i = 0; i < (int)N_BEATS; i++) {
