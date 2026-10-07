@@ -36,17 +36,9 @@ dense_config_template = """struct config{index} : nnet::dense_config {{
     using product = nnet::product::{product_type}<x_T, y_T>;
 }};\n"""
 
-dense_function_template = 'nnet::{dense_function}<{input_t}, {output_t}, {config}>({input}, {output}, {w}, {b});'
+dense_function_template = 'nnet::dense<{input_t}, {output_t}, {config}>({input}, {output}, {w}, {b});'
 
 dense_include_list = ['nnet_utils/nnet_dense.h', 'nnet_utils/nnet_dense_compressed.h', 'nnet_utils/nnet_dense_stream.h']
-
-
-def dense_overlaps_frames(node):
-    """A stream Dense with Latency strategy overlaps inferences: it calls nnet::dense_overlap, whose call is
-    pipelined at II = reuse_factor (Catapult: its stage block at II 1). Other Dense nodes, EinsumDense and
-    every other layer keep their kernels."""
-    return (isinstance(node, Dense) and str(node.get_attr('strategy')).lower() == 'latency'
-            and node.model.config.get_config_value('IOType') == 'io_stream')
 
 
 class DenseConfigTemplate(LayerConfigTemplate):
@@ -95,7 +87,6 @@ class DenseFunctionTemplate(FunctionCallTemplate):
         params = self._default_function_params(node)
         params['w'] = node.get_weights('weight').name
         params['b'] = node.get_weights('bias').name
-        params['dense_function'] = 'dense_overlap' if dense_overlaps_frames(node) else 'dense'
 
         return self.template.format(**params)
 

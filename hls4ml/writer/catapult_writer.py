@@ -83,13 +83,7 @@ class CatapultWriter(Writer):
         # function-level II on a dataflow stage either, and each layer header pipelines its own
         # driver loop at II=reuse_factor. A block-level II serialises the inner loop bodies at
         # rf>1 and over-constrains the Resource accumulate feedback at 1.
-        # Exception: a stream Dense with Latency strategy (nnet::dense_overlap) is pipelined at II 1 so
-        # its block takes the next inference while the current one is in flight.
-        from hls4ml.backends.catapult.passes.core_templates import dense_overlaps_frames
-
         wrapper = '#pragma hls_design block\n'
-        if dense_overlaps_frames(layer):
-            wrapper += '#pragma hls_pipeline_init_interval 1\n'
         wrapper += f'void {layer.name}_stage(\n'
         wrapper += ',\n'.join(f'    {param}' for param in params)
         wrapper += '\n) {\n'
