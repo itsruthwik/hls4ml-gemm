@@ -75,6 +75,17 @@ def userconf_ifdef(key: str, layer_name: str, model):
 q_kifRS_t = tuple[np.ndarray, np.ndarray, np.ndarray, str, str]
 
 
+def _is_noop_after(prev, new) -> bool:
+    """True when quantizing to `new` cannot change a value already held exactly in a saturating
+    `prev`: `new` covers prev's range (signedness and integer bits) and resolution (fraction bits)."""
+    if not isinstance(prev, FixedPrecisionType) or not isinstance(new, FixedPrecisionType):
+        return False
+    if str(prev.saturation_mode).split('.')[-1] not in ('SAT', 'SAT_SYM'):
+        return False
+    return ((new.signed or not prev.signed) and new.integer - new.signed >= prev.integer - prev.signed
+            and new.fractional >= prev.fractional)
+
+
 class FuseFixedPointQuantizer(OptimizerPass):
     def match(self, node: Layer):
         if not node.attributes.get('bit_exact_transformed', False):
@@ -92,6 +103,11 @@ class FuseFixedPointQuantizer(OptimizerPass):
         from hls4ml.model.optimizer.passes.bit_exact import get_input_layers, get_output_layers
 
         if node.attributes.get('_result_t_propagated', False):
+            prev = node.get_output_variable().type.precision
+            if _is_noop_after(prev, precision):
+                # The earlier quantizer saturates into a range this one holds exactly, so this
+                # one changes no value; folding it in would only drop the saturation.
+                return node
             msg = f'result_t for {node.name} propagated multiple times. \
                 Bit-exactness may be compromised. Avoid using consecutive quantizers in your model.'
             warn(msg, stacklevel=1)

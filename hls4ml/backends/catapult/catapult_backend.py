@@ -37,6 +37,7 @@ from hls4ml.backends.catapult.passes import (
     TransposeWeightsForGemmIP,
     SplitConvGemm,
     ReplaceDenseGemm,
+    CapGemmOutputFraction,
     LowerEinsumToGemm,
     ValidateGemm,
     SplitAttentionHeads,
@@ -69,6 +70,7 @@ class CatapultBackend(FPGABackend):
             ('split_conv_gemm', SplitConvGemm),
             ('replace_dense_gemm', ReplaceDenseGemm),
             ('lower_einsum_to_gemm', LowerEinsumToGemm),
+            ('cap_gemm_output_fraction', CapGemmOutputFraction),
             ('validate_gemm', ValidateGemm),
             ('split_attention_heads', SplitAttentionHeads),
         ]:
@@ -191,6 +193,7 @@ class CatapultBackend(FPGABackend):
             'catapult:replace_dense_gemm',
             'catapult:split_attention_heads',
             'catapult:lower_einsum_to_gemm',
+            'catapult:cap_gemm_output_fraction',
             'catapult:remove_final_reshape',
             'catapult:optimize_pointwise_conv',
             'catapult:inplace_parallel_reshape',

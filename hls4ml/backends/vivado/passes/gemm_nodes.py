@@ -10,6 +10,7 @@ under the ``vivado:`` namespace.
 
 # Re-export node classes so the Vivado backend can import from one place.
 from hls4ml.backends.fpga.gemm.gemm_nodes import (  # noqa: F401
+    CapGemmOutputFraction,
     Gemm,
     LowerEinsumToGemm,
     ReplaceDenseGemm,

@@ -35,6 +35,7 @@ from hls4ml.model.layers import (
     TimeDistributed,
 )
 from hls4ml.backends.vivado.passes.gemm_nodes import (
+    CapGemmOutputFraction,
     LowerEinsumToGemm,
     SplitConvGemm,
     ReplaceDenseGemm,
@@ -68,6 +69,10 @@ class VivadoBackend(FPGABackend):
             pass
         try:
             self.register_pass('lower_einsum_to_gemm', LowerEinsumToGemm)
+        except Exception:
+            pass
+        try:
+            self.register_pass('cap_gemm_output_fraction', CapGemmOutputFraction)
         except Exception:
             pass
         try:
@@ -257,6 +262,7 @@ class VivadoBackend(FPGABackend):
             'vivado:replace_dense_gemm',
             'vivado:split_attention_heads',
             'vivado:lower_einsum_to_gemm',
+            'vivado:cap_gemm_output_fraction',
             'vivado:remove_final_reshape',
             'vivado:optimize_pointwise_conv',
             'vivado:inplace_parallel_reshape',

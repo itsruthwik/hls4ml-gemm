@@ -597,6 +597,42 @@ class LowerEinsumToGemm(OptimizerPass):
         return True
 
 
+class CapGemmOutputFraction(OptimizerPass):
+    """Cap a GEMM output type's fraction bits at what the exact result carries.
+
+    The result of A x B (+ bias) has at most frac(A) + frac(B) fraction bits (or the bias's, if
+    finer). An output quantizer calibrated to more fraction bits only appends zeros, which a GEMM
+    IP's requant (a right shift) cannot produce. Dropping them keeps every value and the integer
+    bits, so the consumers read the same numbers through a narrower stream.
+    """
+
+    def match(self, node):
+        return isinstance(node, Gemm)
+
+    def transform(self, model, node):
+        from hls4ml.model.types import FixedPrecisionType
+
+        out = node.get_output_variable().type.precision
+        a = node.get_input_variable(node.inputs[0]).type.precision
+        if node.get_attr('weights_in_core', True):
+            w = node.get_weights('weight')
+            b = w.type.precision if w is not None else None
+        else:
+            b = node.get_input_variable(node.inputs[1]).type.precision if len(node.inputs) > 1 else None
+        if not all(isinstance(t, FixedPrecisionType) for t in (out, a, b)):
+            return False
+        frac = a.fractional + b.fractional
+        bias = node.get_weights('bias') if node.get_attr('has_bias', False) else None
+        if bias is not None and isinstance(bias.type.precision, FixedPrecisionType):
+            frac = max(frac, bias.type.precision.fractional)
+        extra = out.fractional - frac
+        if extra <= 0 or out.width - extra < 1:
+            return False
+        node.get_output_variable().type.precision = FixedPrecisionType(
+            out.width - extra, out.integer, out.signed, out.rounding_mode, out.saturation_mode)
+        return False
+
+
 class ValidateGemm(OptimizerPass):
     """Structural contract checks for GEMM-IP nodes.
 

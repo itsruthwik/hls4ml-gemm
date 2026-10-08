@@ -6,5 +6,6 @@ from hls4ml.backends.fpga.gemm.gemm_nodes import (
     SplitConvGemm,
     ReplaceDenseGemm,
     LowerEinsumToGemm,
+    CapGemmOutputFraction,
     ValidateGemm,
 )
