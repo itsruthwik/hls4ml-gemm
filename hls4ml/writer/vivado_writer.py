@@ -61,7 +61,7 @@ class VivadoWriter(Writer):
             # layout the emitted call uses (row_major = N-wide beats, one contraction
             # row/beat, mvau IP; col_major = K-wide beats, one output column/beat,
             # default). Weight-stationary GEMM: how the constant operand is packed into
-            # the ROM header / .dat (see weight_layout, mirrored in protocol).
+            # the ROM header / .dat (see weight_layout, repeated in protocol).
             'second_operand_row_major': bool(node.get_attr('second_operand_row_major', False)),
             'second_operand_beat_order': (
                 'row_major' if node.get_attr('second_operand_row_major', False) else 'col_major'

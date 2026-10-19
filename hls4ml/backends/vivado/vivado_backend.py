@@ -162,7 +162,7 @@ class VivadoBackend(FPGABackend):
             attrs.append(
                 TypeAttribute(
                     'accum',
-                    # 24,8 (16 fractional bits, up from 10): the plain (non-HGQ2) LN path has no
+                    # 24,8 (16 fractional bits): the plain (non-HGQ2) LN path has no
                     # register_precision sizing, so this default accum_t is what the kernel's
                     # `/(int)dim` divide runs in. A narrow accum_t loses up to 1 LSB of the
                     # quotient (the fixed-point divide truncates internally before the
@@ -170,7 +170,7 @@ class VivadoBackend(FPGABackend):
                     # tokens where the variance itself is only a few LSBs wide. Widening accum_t
                     # instead of reworking the kernel's arithmetic keeps the divide -- required
                     # for HGQ2 bit-exactness at non-power-of-2 dim -- and keeps it synthesizable
-                    # (a wide-intermediate divide was tried and failed Catapult C/RTL synthesis:
+                    # (a wide-intermediate divide fails Catapult C/RTL synthesis:
                     # no library divider component for the resulting ~80-bit quotient).
                     default=FixedPrecisionType(
                         24, 8, signed=True, rounding_mode=RoundingMode.RND_CONV, saturation_mode=SaturationMode.SAT
@@ -1017,11 +1017,11 @@ class VivadoBackend(FPGABackend):
                 'distributed-arithmetic path.'
             )
 
-        # Free-index parallelism. Latency keeps the historical full unroll (the array core is written
+        # Free-index parallelism. Latency keeps the full unroll (the array core is written
         # for that); Resource defaults to 1 (Conv-style sequential) so a single dense_resource instance
         # is time-shared across free-index positions. A user ParallelizationFactor overrides both.
         # The attribute is seeded with default 1, so an explicit user PF=1 on Latency is not
-        # distinguishable from "unset" and maps to full unroll (the pre-existing Latency behavior).
+        # distinguishable from "unset" and maps to full unroll.
         pf = layer.attributes.get('parallelization_factor', 1)
         if layer.get_attr('strategy') != 'resource' and pf == 1:
             pf = recipe['L0']

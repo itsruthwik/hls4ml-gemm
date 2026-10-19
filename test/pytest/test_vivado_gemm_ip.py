@@ -232,8 +232,7 @@ class TestGemmStrategyRouting:
         self.tmp_path = tmp_path
 
     def test_get_gemm_ip_io_parallel_routes_to_gemm_array(self):
-        """io_parallel Dense + GemmIP uses the array-interface Gemm node
-        (it used to raise; the io_parallel array path superseded that)."""
+        """io_parallel Dense + GemmIP uses the array-interface Gemm node."""
         import tensorflow as tf
         from hls4ml.backends.vivado.passes.gemm_nodes import Gemm
         model = tf.keras.Sequential([tf.keras.layers.Dense(8, input_shape=(16,))])
@@ -708,7 +707,7 @@ class TestValidateGemmRegistration:
 
     def test_validate_gemm_reexported(self):
         from hls4ml.backends.vivado.passes.gemm_nodes import ValidateGemm
-        from hls4ml.backends.fpga.passes.gemm_nodes import ValidateGemm as CatapultValidateGemm
+        from hls4ml.backends.fpga.gemm.gemm_nodes import ValidateGemm as CatapultValidateGemm
 
         # Same class object, not a divergent copy.
         assert ValidateGemm is CatapultValidateGemm
@@ -728,10 +727,9 @@ class TestValidateGemmRegistration:
 class TestEinsumDenseGemmIpIOType:
     """EinsumDense GEMM-IP works on BOTH io_parallel and io_stream.
 
-    The io_parallel-only restriction was lifted: io_stream EinsumDense GEMM-IP lowers
-    to a const_weights Gemm and materializes through gemm_stream_const_weights, at parity with
-    Catapult. Only the row-varying-bias io_stream corner still fails loudly (the
-    per-element bias-add is io_parallel-only), matching Catapult.
+    io_stream EinsumDense GEMM-IP lowers to a const_weights Gemm and materializes through
+    gemm_stream_const_weights, at parity with Catapult. Only the row-varying-bias io_stream
+    case fails loudly (the per-element bias-add is io_parallel-only), as on Catapult.
     """
 
     def test_io_stream_einsum_dense_gemm_ip_lowers_to_gemm(self):
@@ -781,7 +779,7 @@ class TestEinsumDenseGemmIpIOType:
 
 
 # ---------------------------------------------------------------------------
-# EinsumDense -> const_weights Gemm lowering (Stage 2a)
+# EinsumDense -> const_weights Gemm lowering
 # ---------------------------------------------------------------------------
 
 class TestEinsumDenseLowering:

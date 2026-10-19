@@ -125,7 +125,7 @@ proc map_partitioned_arrays_to_registers { design } {
   # by resource name (declaring function + array): hls_resource pragmas on these arrays make
   # Catapult crash intermittently once inlined into the conv path, and line_buffer.Array is an
   # ap_shift_reg member that no pragma can name. Templates that are their own block (im2col) are
-  # anchored on the block name instead. Add an entry per template once it is reviewed.
+  # anchored on the block name instead.
   set patterns {
     *dense_resource_rf_*:acc:rsc
     *dense_resource_rf_*:acc_part:rsc

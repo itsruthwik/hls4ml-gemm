@@ -18,8 +18,8 @@ namespace nnet {
 // same canonical (I, L0, C) layout the io_parallel array core (nnet_einsum_dense.h) uses. It then
 // computes one row (one (i, l0) pair) at a time by calling nnet::dense<>() with CONFIG_T::dense_conf
 // -- the exact same call nnet_einsum_dense.h's io_parallel core makes per free-data index -- so
-// weights stay in the single (I, L1, C) Resource layout for both io types (ApplyResourceStrategy no
-// longer has an io_stream-only permutation branch) and bias add / cast<>() happen inside that same
+// weights stay in the single (I, L1, C) Resource layout for both io types (ApplyResourceStrategy has no
+// io_stream-only permutation branch) and bias add / cast<>() happen inside that same
 // dense kernel, giving bit-exact results with io_parallel.
 template <class data_T, class res_T, typename CONFIG_T>
 typename std::enable_if<CONFIG_T::strategy == nnet::resource, void>::type einsum_dense(

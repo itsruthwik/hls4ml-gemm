@@ -1,6 +1,6 @@
 """Shared helpers for the two-operand Einsum layer, used by the Vivado/Vitis and
 Catapult backends so the row-streaming plan (which operand supplies rows, and the row
-loop's nesting order) is defined once. See the Vivado backend's original `einsum.py`
+loop's nesting order) is defined once. See the Vivado backend's `einsum.py`
 for the derivation.
 """
 

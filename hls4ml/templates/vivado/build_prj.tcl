@@ -164,7 +164,7 @@ if {$opt(reset)} {
 }
 # Vitis HLS 2023.2+ renamed -maximum_size to -complete_threshold; without either, the
 # tool's default (4 elements) leaves any larger array (e.g. a wide nnet::array row) as
-# a RAM. Try the new spelling first, fall back to the old one for older tools.
+# a RAM. Try -complete_threshold first and fall back to -maximum_size for older tools.
 if {[catch {config_array_partition -complete_threshold $maximum_size}]} {
     catch {config_array_partition -maximum_size $maximum_size}
 }

@@ -207,7 +207,7 @@ class CatapultWriter(Writer):
             rom_component (str, optional): Catapult resource library component (e.g.
                 'Altera_ROMS.mgc_rom_sync'). When set, emits
                 `#pragma hls_resource <name>.rom:rsc variables="<name>" map_to_module="<rom_component>"`
-                right before the synthesis-visible array definition -- mirroring the Vivado
+                right before the synthesis-visible array definition -- matching the Vivado
                 `if (reuse_factor > 1) RESOURCE core=ROM_nP_BRAM` guidance for this same weight array.
         """
 
@@ -1475,7 +1475,7 @@ class CatapultWriter(Writer):
     def _gemm_ip_interface(node):
         # Interface is DERIVED from IOType, never guessed: io_parallel -> array,
         # io_stream -> stream, uniformly for the unified Gemm nodes and
-        # the (Phase 1) Einsum/EinsumDense GEMM-IP layers. Because the same IOType
+        # the Einsum/EinsumDense GEMM-IP layers. Because the same IOType
         # drives the instantiated call in the template, the declared interface can
         # never disagree with the core that is actually built.
         io_type = node.model.config.get_config_value('IOType')
@@ -1542,7 +1542,7 @@ class CatapultWriter(Writer):
             # external generator legalizes it per target (see run_atlas_flow.py).
             'reuse_factor': node.get_attr('reuse_factor', 1),
             # How the constant operand is packed (SecondOperandRowMajor): the ROM
-            # header / .dat beat order; also mirrored in protocol.weight_layout.
+            # header / .dat beat order; also repeated in protocol.weight_layout.
             'weight_layout': gemm_ip_weight_layout(node),
         }
 
@@ -1644,7 +1644,7 @@ class CatapultWriter(Writer):
                         # GEMM; for a two-operand GEMM (QK^T / A.V, no static weight) the
                         # "weight" is the second runtime operand B = inputs[1], so take its
                         # precision -- gemm-ip-gen sizes the core and the requant scale
-                        # (product fraction bits) from it. Mirrors the Vivado writer.
+                        # (product fraction bits) from it. Same as the Vivado writer.
                         'weight_precision': (
                             str(node.get_weights('weight').type.precision)
                             if node.get_attr('weight') is not None

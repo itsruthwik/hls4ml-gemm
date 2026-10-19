@@ -1,7 +1,7 @@
 # Multi-head attention on the GEMM path: graph transforms
 
 This doc covers how hls4ml-gemm lowers multi-head attention (MHA) under `Strategy: GEMM`. It first describes
-what upstream hls4ml (merge base `e998745`) does and why that is a poor fit for a streaming GEMM IP. It then
+what upstream hls4ml does and why that is a poor fit for a streaming GEMM IP. It then
 describes what the GEMM path changes, adds and removes, and what that buys.
 
 Sources: `converters/keras_v3/hgq2/multi_head_attention.py`, `utils/einsum_utils.py`,
@@ -112,8 +112,8 @@ flowchart TD
 
 ### 1.3 What the baseline supports
 
-- **Einsum and EinsumDense are `io_parallel` only.** The Vivado templates assert it: "EinsumDense layer only
-  supports io_parallel". EinsumDense is Latency (or distributed arithmetic) only.
+- **Upstream Einsum and EinsumDense are `io_parallel` only.** EinsumDense is Latency (or distributed
+  arithmetic) only.
 - **In `io_parallel`, a transpose is free:** every tensor is a fully partitioned array, so a permutation is
   wiring. But everything is also **fully unrolled**:
   - QK alone is `H·Tq·Tk·dk` multipliers;
@@ -142,7 +142,7 @@ row per beat, plus B either baked in or streamed per frame. The baseline graph m
 4. **No per-head parallelism.** One batched einsum node means one kernel. There is no graph-level way to give
    each head its own IP instance, or to overlap heads.
 
-The first-pass generic lowering (`LowerEinsumToGemm` on its own) shows the problem directly: it lowers each
+The generic lowering (`LowerEinsumToGemm` on its own) shows the problem directly: it lowers each
 einsum to a canonical `Gemm` and materializes every non-identity permutation as a physical `Transpose` node, so
 MHA arrives at the IP with **five whole-tensor transposes per block**:
 
@@ -180,7 +180,7 @@ Each red box stores a whole tensor before emitting its first reordered beat.
 ### 2.1 Where it runs
 
 - `SplitAttentionHeads` (`backends/fpga/gemm/attention_heads.py`) is an optimizer pass in the shared FPGA base.
-  Catapult runs it in the `optimize` flow, **before** `LowerEinsumToGemm`.
+  Catapult and Vivado/Vitis run it in the `optimize` flow, **before** `LowerEinsumToGemm`.
 - It matches the QK Einsum (`strategy == 'gemm'`) whose only consumer is a Softmax.
 - From there it walks forward to the aV Einsum and the O projection, and backward to the Q/K/V projections.
   It skips any `FixedPointQuantizer` in between and requires all four projections to be EinsumDense.
@@ -286,7 +286,7 @@ Each head's natural tensor then lines up with one of the two layouts:
   transpose-free.**
 - The defaults (both column-major) leave one V transpose per head.
 - Any remaining transpose is `[Tk, dk]`-sized per head: small, but still a buffer under `io_stream`.
-- **Not done yet:** folding it into the IP's B-load write order, which would remove it entirely.
+- Folding it into the IP's B-load write order, which would remove it entirely, is not implemented.
 
 ### 2.4 Things the pass has to get right
 
@@ -370,7 +370,7 @@ Code emitted for `n_inplace > 1` (`backends/*/passes/gemm_templates.py`):
 - **io_parallel:** an unrolled per-head loop slices head i's A rows and B columns from the flat arrays, calls
   `gemm_array` once per head, and scatters the result. It works.
 - **io_stream:** an unrolled loop calls `gemm_stream(in0, in1, out)` H times on the **same** streams, relying on
-  head-major stream order. The code marks it as needing follow-up. Vitis rejects the loop as a non-canonical
+  head-major stream order. The code flags it as unfinished. Vitis rejects the loop as a non-canonical
   dataflow region (214-114 / 214-169 / 200-471), which is why `n_inplace == 1` is emitted as a bare call with no loop.
 - **gemm-ip-gen:** ignores `n_inplace` entirely (it appears nowhere in `gemm-ip-gen/src`). It builds one IP
   for one `M×K×N` GEMM, so a batched node shares one IP instance serially across heads.
@@ -419,7 +419,7 @@ choice when H is large or heads are small. It needs:
 ## 5. Limitations and assumptions (as implemented)
 
 - **Self-attention with equal lengths only.** The rewrite reshapes all three projections to `[seq_q, D]` and
-  sizes every split with `seq_q`. Cross-attention with `Tq ≠ Tk` is not handled [needs a guard or a fix].
+  sizes every split with `seq_q`. Cross-attention with `Tq ≠ Tk` is not handled, and the pass does not diagnose it.
 - **`dv == dk` assumed.** `HeadSplit`, `HeadMerge` and the aV GEMM all use `key_dim`; a model with
   `value_dim ≠ key_dim` would be sized wrongly.
 - **Masks and returned attention scores are unsupported;** the converter already rejects them.

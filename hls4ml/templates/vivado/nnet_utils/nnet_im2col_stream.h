@@ -47,7 +47,7 @@ struct im2col_config {
 };
 
 // ---------------------------------------------------------------------------
-// im2col_2d_cl — existing 2-D im2col (channels-last, pixel-at-a-time).
+// im2col_2d_cl — 2-D im2col (channels-last, pixel-at-a-time).
 // ---------------------------------------------------------------------------
 template <class data_T, class res_T, typename CONFIG_T>
 void im2col_2d_cl(

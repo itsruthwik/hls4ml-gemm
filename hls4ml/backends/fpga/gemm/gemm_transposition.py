@@ -20,8 +20,8 @@ class TransposeWeightsForGemmIP(OptimizerPass):
         # We only care about layers that have weights to transpose. After node
         # splitting this is the unified Gemm (its _original_type carries the conv
         # class name, e.g. 'Conv1D'/'Conv2D', for a conv-derived Gemm — without it,
-        # raw [W,C,F]/[H,W,C,F] kernels reached the writer and the packed weight
-        # columns came out scrambled). Im2Col itself carries no weights.
+        # raw [W,C,F]/[H,W,C,F] kernels would reach the writer and the packed weight
+        # columns would come out scrambled). Im2Col itself carries no weights.
         has_weights = isinstance(
             node, (Dense, Conv1D, Conv2D, SeparableConv1D, SeparableConv2D, Gemm)
         )
@@ -80,9 +80,7 @@ class TransposeWeightsForGemmIP(OptimizerPass):
                 node.weights['pointwise'].data = np.transpose(p_data, axes=[2, 0, 1]).reshape(p_data.shape[2], -1)
             
             # Depthwise weights are [W, C, 1]. 
-            # Note: SeparableConv GEMM IP usually only applies to the pointwise part if we split it,
-            # but if we keep it as one node, we might need to handle it.
-            # For now, we focus on the pointwise part which is the GEMM part.
+            # Only the pointwise part of a SeparableConv is a GEMM; the depthwise part is left as is.
             pass
 
         elif isinstance(node, SeparableConv2D):

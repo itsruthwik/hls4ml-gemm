@@ -12,7 +12,7 @@ the emitted C++ differs (enumerated ac_channels vs flat-array reindex), via an
 IOType branch, exactly as every other hls4ml layer does.
 
 These node classes live in the shared FPGA base so every FPGABackend child inherits
-them (mirroring the GEMM nodes). The per-backend HeadSplit / HeadMerge codegen
+them (like the GEMM nodes). The per-backend HeadSplit / HeadMerge codegen
 templates live in that backend's own ``*_templates`` module, in its own dialect.
 """
 

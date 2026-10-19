@@ -11,9 +11,8 @@ from .reshaping_templates import transpose_config_template
 # Shared Dense template
 # Einsum template
 
-# equation_row_plan moved to hls4ml.backends.fpga.einsum_utils so the Catapult backend can share
-# it too; re-exported here (unused directly in this module beyond the import below) for anything
-# still importing it from this path.
+# equation_row_plan lives in hls4ml.backends.fpga.einsum_utils (shared with the Catapult backend);
+# it is re-exported here for importers of this path.
 
 einsum_config_template = """
 struct config{index} {{
@@ -158,6 +157,6 @@ class EinsumFunctionTemplate(FunctionCallTemplate):
         params['input1'] = node.get_input_variable(node.inputs[1]).name
         params['output'] = node.get_output_variable().name
         # A gemm_ip Einsum never reaches this template: LowerEinsumToGemm lowers it to a
-        # Gemm node in the IR before templates run (GEMM lives in the IR now). This
+        # Gemm node in the IR before templates run (GEMM lives in the IR). This
         # template only serves the baseline einsum path.
         return self.template.format(**params)

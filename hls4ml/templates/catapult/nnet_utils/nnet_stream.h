@@ -220,7 +220,7 @@ template <class data_T, class res_T, int N> void repack_stream(ac_channel<data_T
 // CONFIG_T::index_map[i] (the flattened output-index -> input-index map the
 // Catapult Transpose config template precomputes on the Python side -- see
 // hls4ml.backends.catapult.passes.reshaping_templates.catapult_transpose_config_gen).
-// Mirrors nnet::repack_stream's read-all/write-all shape, generalized to a
+// Follows nnet::repack_stream's read-all/write-all shape, generalized to a
 // non-identity element order instead of just a different pack width.
 template <class data_T, class res_T, typename CONFIG_T>
 void transpose_stream(ac_channel<data_T> &data, ac_channel<res_T> &res) {

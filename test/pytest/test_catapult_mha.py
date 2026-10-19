@@ -1,10 +1,10 @@
 """Catapult GEMM-IP codegen tests for the Keras 2 QMultiHeadAttention handler.
 
-Mirrors test_catapult_gemm.py: exercises project generation (convert + write +
+Follows test_catapult_gemm.py: exercises project generation (convert + write +
 artifact checks) plus a numeric csim check. Keras-2-venv-only: the fork's
 `QMultiHeadAttention` (hls4ml.utils.qkeras_attention) needs Keras 2 + QKeras, so
 this whole module skips cleanly under Keras 3 (e.g. the HGQ2 venv). Stock Keras
-MultiHeadAttention is intentionally out of scope (user decision 2026-09-06); see
+MultiHeadAttention is out of scope here; see
 test_catapult_hgq2_attention.py for the native Keras 3 / HGQ2 path.
 """
 
@@ -31,9 +31,8 @@ import hls4ml.converters
 import hls4ml.utils
 from hls4ml.utils.qkeras_attention import QMultiHeadAttention
 
-# csim (compile()) needs Catapult's libstdc++ on LD_LIBRARY_PATH; conftest.py sets it
-# from atlas.env and re-execs pytest. Gate the numeric test on that being in effect so
-# it skips cleanly on a standalone hls4ml checkout (no atlas.env).
+# csim (compile()) needs Catapult's libstdc++ on LD_LIBRARY_PATH. Gate the numeric test
+# on that being set so it skips cleanly when the Catapult toolchain is not configured.
 _HAS_CSIM = 'catapult' in os.environ.get('LD_LIBRARY_PATH', '').lower()
 
 
@@ -131,7 +130,7 @@ def test_mha_csim_numeric(io_type, strategy, tmp_path):
     cfg['Model']['Precision'] = 'ap_fixed<32,12>'  # isolate decomposition, not quantization
     # Catapult's io_parallel softmax is the ac_math piecewise-linear kernel, which
     # static_asserts if its input has too many integer bits (the internal exp table
-    # width blows up exponentially with them -- see softmax-numerics). The QK^T
+    # width blows up exponentially with them). The QK^T
     # scores here are small (bounded dot products of near-unit-scale Q/K), so a
     # handful of integer bits is exact; only the softmax's own input needs
     # narrowing, not the wide Model-wide precision used for everything else.

@@ -1021,7 +1021,7 @@ def default_register_precision(layer: Layer):
             if not isinstance(data, np.ndarray):
                 raise ValueError(f'Expected data to be np.ndarray, got {type(data)} on layer {layer.name}')
             # minimal_kif gives a zero entry i = 0, so one zero weight would widen the whole
-            # tensor's integer part to I >= 1 (an 8-bit fixed<8,-2> kernel became fixed<11,1>).
+            # tensor's integer part to I >= 1 (an 8-bit fixed<8,-2> kernel would become fixed<11,1>).
             # A zero fits any type, so only the nonzero entries set it.
             nonzero = data[data != 0]
             k, i, f = kif_arrs_to_ints(minimal_kif(nonzero if nonzero.size else data))
@@ -1346,7 +1346,7 @@ def _(layer: LayerNormalization):
     # LayerNorm's exact output range is data-dependent (mean/var/rsqrt) and its generic
     # hls4ml kernel is not bit-exact anyway, so treat it as a boundary: produce a
     # GENEROUS-but-bounded KIF that a downstream HGQ2 input quantizer still clamps to the
-    # real trained precision via request_kif. It must be bounded, not the old i=f=126
+    # real trained precision via request_kif. It must be bounded, not an i=f=126
     # stopgap: on a LN -> pool/reshape -> ... path (no direct quantizer) the 126-wide type
     # otherwise leaks into an uninstantiable ap_fixed<253> and cascades into the pool accum.
     # The normalized-then-affine output is strictly narrower than the LN accumulator (which
@@ -1378,8 +1378,8 @@ def _(node: LayerNormalization):
     dim = int(get_input_shapes(node)[0][-1])
     scale = ceil(log2(max(dim, 1)))  # ceil(log2 dim): reduction headroom for the 1/dim divide
 
-    # Precisions of the two quantizer boundaries the accumulator must feed exactly (the
-    # softmax lesson: anchor the accumulator to the quantizer that consumes each reduction):
+    # Precisions of the two quantizer boundaries the accumulator must feed exactly
+    # (as for softmax, anchor the accumulator to the quantizer that consumes each reduction):
     #   - the mean is rounded to mean_t (HGQ2's mean_q),
     #   - the variance is rounded to the rsqrt table address (rsqrt_addr_f == rsqrt_iq frac).
     mean_t = node.get_attr('mean_t')

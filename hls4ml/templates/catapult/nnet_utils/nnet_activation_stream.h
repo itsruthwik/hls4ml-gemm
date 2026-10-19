@@ -436,8 +436,8 @@ void row_max(ac_channel<data_T> &data, ac_channel<typename fold<data_T, CONFIG_T
 #ifdef __SYNTHESIS__
     // Free-running: one call converts one (row, step) beat, with x, mx and the step
     // counter carried across calls so the block's II=1 loop never fills/drains per
-    // frame. See row_exp/row_normalize below and the HGQ2 quantizer masks in
-    // hgq_proxy_model.py for the same pattern.
+    // frame.
+    // row_exp and row_normalize below follow the same pattern.
     static data_T x;
     static typename data_T::value_type mx[F::lanes];
     static unsigned s = 0;
@@ -468,7 +468,7 @@ void row_max(ac_channel<data_T> &data, ac_channel<typename fold<data_T, CONFIG_T
         }
     }
 #else
-    // C model: unchanged, one frame (F::rows * F::steps beats) per call.
+    // C model: one frame (F::rows * F::steps beats) per call.
     data_T x;
     typename data_T::value_type mx[F::lanes];
     unsigned s = 0;
@@ -784,7 +784,7 @@ UnaryLUTActLoop:
         #pragma hls_unroll
     UnaryLUTPackLoop:
         for (int j = 0; j < res_T::size; j++) {
-            // CATAPULT_PORT
+            // Catapult-specific:
             // Vivado: get_index_unary_lut<...>(in_data[j].V);  // .V == raw fixed-point word
             unsigned index = get_index_unary_lut<CONFIG_T::table_size>(in_data[j]);
             out_data[j] = table[index];

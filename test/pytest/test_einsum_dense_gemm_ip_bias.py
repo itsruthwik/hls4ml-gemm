@@ -3,13 +3,12 @@
 The EinsumDense bias is per output element and may vary across the
 n_free_data rows (Keras bias_axes can include the data free axis).  The GEMM
 IP bias port applies one value per column to every row, so the template must
-add the per-element bias outside the IP.  A row-0 broadcast (the historical
-bug) makes every row reuse the first row's bias, which this test rejects:
+add the per-element bias outside the IP.  A row-0 broadcast would make every row
+reuse the first row's bias, which this test rejects:
 the bias rows are spaced 0.5 apart while the comparison tolerance is 0.1.
 
 Also serves as the build-verification of the EinsumDense GEMM-IP csim on
-each backend (it caught the wrong-order weight-column packing and the
-weights-header include resolution along the way).
+each backend.
 """
 
 import json
@@ -19,7 +18,7 @@ import sys
 
 import pytest
 
-MGC_HOME = '/home/tools/siemens/catapult/Mgc_home'
+MGC_HOME = os.environ.get('MGC_HOME', '')
 CATAPULT_GCC_LIB = f'{MGC_HOME}/pkgs/dcs_gcc/gcc-13.4.0/lib64'
 
 BACKEND_PRECISION = {
@@ -33,6 +32,8 @@ def test_einsum_dense_gemm_ip_row_varying_bias(tmp_path, backend):
     output_dir = tmp_path / f'einsum_dense_gemm_ip_bias_{backend.lower()}_prj'
     env = os.environ.copy()
     if backend == 'Catapult':
+        if not MGC_HOME:
+            pytest.skip('MGC_HOME is not set (Catapult install needed for csim)')
         env.setdefault('MGC_HOME', MGC_HOME)  # build_lib.sh resolves headers via $MGC_HOME
         env['LD_LIBRARY_PATH'] = f'{CATAPULT_GCC_LIB}:{env.get("LD_LIBRARY_PATH", "")}'
 
@@ -92,11 +93,11 @@ np.testing.assert_allclose(hls_prediction, keras_prediction, atol=0.1, rtol=0.0)
         assert all(e['weights_in_core'] for e in gemm_entries)
         assert all(e['has_bias'] is False for e in gemm_entries)
     else:
-        # Vivado now unifies with Catapult: EinsumDense lowers to a const_weights Gemm
+        # Vivado matches Catapult: EinsumDense lowers to a const_weights Gemm
         # (LowerEinsumToGemm) and is materialized by the shared Gemm codegen. The einsum
-        # template no longer emits GEMM. After the ROM-accessor migration the Vivado
-        # const_weights array core is gemm_array_const_weights (config-sourced weights, no weight
-        # argument) — the same name/shape as Catapult.
+        # template does not emit GEMM. The Vivado const_weights array core is
+        # gemm_array_const_weights (config-sourced weights, no weight argument),
+        # the same name and shape as on Catapult.
         assert 'nnet::einsum_dense_gemm_ip<' not in top, 'einsum template must no longer emit GEMM'
         assert 'nnet::gemm_array_const_weights<' in top, 'expected the lowered const_weights GEMM-IP array path'
         # Row-varying bias: the core's per-column bias is a baked-zero compile-time
@@ -114,8 +115,7 @@ def test_einsum_dense_gemm_ip_row_varying_bias_io_stream_raises_loudly(tmp_path)
 
     The per-element wrapper bias-add is only wired for io_parallel; the io_stream
     Gemm function template raises NotImplementedError rather than falling back to the
-    per-column IP port (which would drop the per-row bias component — exactly the
-    Phase-3 regression). Attention never hits this (projection bias is per-column),
+    per-column IP port (which would drop the per-row bias component). Attention never hits this (projection bias is per-column),
     so the guard stays a guard; this locks it as a loud failure, not a wrong answer.
     No compile: the raise fires at codegen.
     """

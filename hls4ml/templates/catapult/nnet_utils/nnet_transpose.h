@@ -30,10 +30,10 @@ template <typename CONFIG_T> unsigned transfer_idx(unsigned index) {
 
 template <typename data_T, typename res_T, typename CONFIG_T>
 void transpose(const data_T data[CONFIG_T::N], res_T res[CONFIG_T::N]) {
-    // NOTE: hls_unroll must PRECEDE the for to bind to it (Catapult). Previously
-    // it sat inside the loop body and silently failed to bind (CIN-319), so the
-    // transpose ran rolled at II=1 over N elements — ~64 cycles each, and with
-    // three transposes per io_stream einsum GEMM stage that was ~190 cyc/stage of
+    // NOTE: hls_unroll must precede the for to bind to it (Catapult).
+    // Inside the loop body it silently fails to bind, so the
+    // transpose runs rolled at II=1 over N elements — ~64 cycles each, and with
+    // three transposes per io_stream einsum GEMM stage that is ~190 cyc/stage of
     // pure overhead. Unrolled it is ~1 cycle (combinational reindex).
     #pragma hls_unroll
     for (unsigned i = 0; i < CONFIG_T::N; i++) {

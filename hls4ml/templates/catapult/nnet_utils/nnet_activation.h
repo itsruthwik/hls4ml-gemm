@@ -199,7 +199,7 @@ void sigmoid(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_in]) {
 //       Softmax Activation
 // *************************************************
 //
-// Table-driven softmax mirroring the Vivado/Vitis nnet_activation.h kernels, so
+// Table-driven softmax following the Vivado/Vitis nnet_activation.h kernels, so
 // the HGQ2 (bit-exact) softmax contract holds on Catapult: exp and 1/x are LUTs
 // addressed by the top bits of a fixed-point word, summed in CONFIG_T::accum_t,
 // the sum quantized to CONFIG_T::inv_inp_t before the invert lookup. The stable
@@ -469,7 +469,7 @@ void softmax(data_T data[CONFIG_T::n_slice], res_T res[CONFIG_T::n_slice]) {
 
 // Multi-row softmax: CONFIG_T::n_in is n_outer * n_slice * n_inner elements
 // (n_outer x n_inner independent rows of n_slice each, e.g. one row per attention
-// head / query position); each row is normalized independently. Mirrors Vivado's
+// head / query position); each row is normalized independently. Follows Vivado's
 // nnet::softmax_multidim.
 template <class data_T, class res_T, typename CONFIG_T>
 void softmax_multidim(data_T data[CONFIG_T::n_in], res_T res[CONFIG_T::n_in],
@@ -595,7 +595,7 @@ template <class data_T, class res_T, typename CONFIG_T> void tanh(data_T data[CO
 // *************************************************
 template <int table_size, class data_T> inline unsigned get_index_unary_lut(data_T x) {
     // Slice the whole input word (raw bits) to get an index into the table.
-    // CATAPULT_PORT
+    // Catapult-specific:
     // Vivado: return (unsigned)(x(x.width - 1, 0));  // all bits, reinterpreted unsigned
     // ac_fixed::slc<W> keeps the source signedness, so route through an explicit
     // unsigned ac_int (as the softmax idx helper does) -- a bare (unsigned) cast would

@@ -26,11 +26,10 @@ Two residual within-head orientations are handled here, not as head-moves:
   two matmuls' settings are unrelated, so the transpose-free choice can differ per
   matmul (and both, one, or neither may need a transpose). Folding a needed transpose
   into the GEMM IP's B-residency buffer write-order — so even that disappears in
-  io_stream — is the gemm-ip-gen contract tracked separately; keeping the physical
-  transpose here means nothing mis-lowers.
+  io_stream — is left to the GEMM IP; the physical transpose here is always correct.
 
 Runs BEFORE ``LowerEinsumToGemm``: it consumes the QK^T/A.V Einsum and the Softmax
-directly (creating Gemm + per-head Softmax nodes), and leaves the now-2D EinsumDense
+directly (creating Gemm + per-head Softmax nodes), and leaves the 2D EinsumDense
 projections for the generic lowering. Softmax is HGQ2 bit-exact — the per-head clones
 copy the identical (head-invariant) table types/scales and keep the transformed flag.
 
@@ -40,7 +39,7 @@ and clones each into the per-head lanes with its head-axis precision slice. Homo
 / untrained models have none and take the identical path unchanged (see the helpers at
 the bottom of this module).
 
-Lives in the shared FPGA base so every FPGABackend child inherits it (mirroring the
+Lives in the shared FPGA base so every FPGABackend child inherits it (like the
 GEMM passes). ``match()`` requires ``Strategy: GEMM`` on the Einsum, so it stays inert
 on backends with no GEMM-IP path; emission is only realised where the backend also
 provides the HeadSplit / HeadMerge templates and wires the pass into its flow.
@@ -55,7 +54,7 @@ from hls4ml.backends.fpga.gemm.gemm_nodes import Gemm, _mirror_precision_to_gemm
 from hls4ml.backends.fpga.passes.split_merge_nodes import HeadSplit, HeadMerge
 
 # Softmax attributes that fully describe the (head-invariant) bit-exact tables and
-# reduction; copied verbatim onto every per-head clone. The per-head shape facts
+# reduction; copied onto every per-head clone. The per-head shape facts
 # (n_in / n_outer / n_inner / input+output vars) are set separately.
 _SOFTMAX_CARRY_KEYS = (
     'activation', 'axis', 'implementation', 'exp_scale',
@@ -114,7 +113,7 @@ class SplitAttentionHeads(OptimizerPass):
         sm_prec = sm.get_output_variable().type.precision
         av_prec = av.get_output_variable().type.precision
 
-        # Resolved GEMM config (strategy/reuse_factor/... + SecondOperandRowMajor) mirrored
+        # Resolved GEMM config (strategy/reuse_factor/... + SecondOperandRowMajor) copied
         # onto the per-head two-operand Gemms. Each matmul's row_major is resolved from
         # its OWN config -- they are independent knobs, not a single shared flip: col-major
         # feeds a matmul's B directly when its natural layout is already K-inner (contract
@@ -125,12 +124,12 @@ class SplitAttentionHeads(OptimizerPass):
         qk_row_major = bool(qk_cfg.get('second_operand_row_major', False))
         av_row_major = bool(av_cfg.get('second_operand_row_major', False))
 
-        # --- 1. Projections stay 2D [seq, d_model]: head becomes a within-beat lane
+        # Projections stay 2D [seq, d_model]: head becomes a within-beat lane
         #        (beat = d_model), not a stream-order axis. The reshape moves no data.
         for p in (k_proj, q_proj, v_proj):
             p.get_output_variable().shape = [seq_q, d_model]
 
-        # --- 2. HeadSplit after each Q/K/V projection: 1 x [seq, d_model] -> H x [seq, key_dim]
+        # HeadSplit after each Q/K/V projection: 1 x [seq, d_model] -> H x [seq, key_dim]
         splits = {}
         for p, tag in ((q_proj, 'Q'), (k_proj, 'K'), (v_proj, 'V')):
             hs = model.make_node(
@@ -144,7 +143,7 @@ class SplitAttentionHeads(OptimizerPass):
                 hs.get_output_variable(o).type.precision = p.get_output_variable().type.precision
             splits[tag] = hs
 
-        # --- 3. H per-head lanes: QK^T Gemm -> Softmax -> (V transpose) -> A.V Gemm
+        # H per-head lanes: QK^T Gemm -> Softmax -> (V transpose) -> A.V Gemm
         av_head_out = []  # tensor name feeding HeadMerge for each head
         chain = []  # graph order for the per-head nodes
         for h in range(H):
@@ -180,7 +179,7 @@ class SplitAttentionHeads(OptimizerPass):
             chain.append(qk_h)
 
             # Per-head bit-exact softmax over seq_k (n_outer = seq_q rows, n_inner = 1).
-            # The bit-exact tables are head-invariant, so copy them verbatim; the
+            # The bit-exact tables are head-invariant, so copy them; the
             # required attrs (e.g. 'activation') must be present at construction.
             sm_attrs = {key: sm.attributes[key] for key in _SOFTMAX_CARRY_KEYS if key in sm.attributes}
             # n_slice is the reduction length (seq_k). It defaults to n_in when unset,
@@ -227,7 +226,7 @@ class SplitAttentionHeads(OptimizerPass):
                 merge_in_prec = qn.get_output_variable().type.precision
             av_head_out.append(out_t)
 
-        # --- 4. HeadMerge: H x [seq, key_dim] -> [seq, d_model], before the output projection.
+        # HeadMerge: H x [seq, key_dim] -> [seq, d_model], before the output projection.
         hm = model.make_node(
             HeadMerge,
             f'{av.name}_merge',
@@ -239,13 +238,13 @@ class SplitAttentionHeads(OptimizerPass):
         # per-head clone name is what users configure) and would otherwise leak
         # Model.Precision.default onto the merge output and the output projection's input.
         hm.get_output_variable().type.precision = merge_in_prec
-        # The output projection now reads the merged 2D context (same flat data the
+        # The output projection reads the merged 2D context (same flat data the
         # 3D [seq, head, key_dim] carried; O_proj contracts head*key_dim = d_model).
         o_in = out_iq.outputs[0] if out_iq is not None else av.outputs[0]
         _rewire_input(o_proj, o_in, hm.outputs[0])
 
-        # --- 5. Rebuild the graph: drop qk/sm/av (plus any surviving cluster quantizers,
-        #        now cloned per head), splice splits after projections and the per-head
+        # Rebuild the graph: drop qk/sm/av (plus any surviving cluster quantizers,
+        #        cloned per head), splice splits after projections and the per-head
         #        chain + merge before the output projection.
         drop = {qk.name, sm.name, av.name}
         for q in (softmax_oq, out_iq, query_oq, key_oq, value_oq):
@@ -279,7 +278,7 @@ def _two_op_gemm(model, name, in0, in1, gemm_m, gemm_k, gemm_n, out_shape, out_p
     """Build a plain two-operand Gemm (both operands activations, no constant weight).
 
     ``extra`` carries the resolved GEMM config (strategy/reuse_factor/... and
-    second_operand_row_major) so the per-head Gemms mirror the source einsum's knobs for
+    second_operand_row_major) so the per-head Gemms carry the source einsum's knobs for
     the manifest and the b_row_major config const. in1 (B) must already be oriented so its
     last axis matches the chosen beat layout (K-inner for col-major, N-inner for row-major)."""
     attrs = {
@@ -425,13 +424,13 @@ def _clone_quantizer_head(model, orig, h, in_tensor, H):
     }
     q = model.make_node(FixedPointQuantizer, name, attrs, [in_tensor])
     # The clone's numeric type must come from the source node, not re-resolve to
-    # Model.Precision.default: at construction, add_output_variable() looked up
+    # Model.Precision.default: at construction, add_output_variable() looks up
     # result_t by *this clone's own name*, which is almost never present in the
     # user's HLSConfig (the model was authored against the pre-split node names),
-    # so it silently fell back to the model default. Only trust that lookup when
+    # so it silently falls back to the model default. Only trust that lookup when
     # the user actually wrote an explicit per-head override for this clone's name;
     # otherwise copy the source's real (user-configured or bit-exact-derived) type
-    # verbatim, exactly as SAT/RND/mask_kbi already are above.
+    # as is, like SAT/RND/mask_kbi above.
     if not userconf_ifdef('result_t', name, model):
         q.get_output_variable().type.precision = orig.get_output_variable().type.precision
     return q

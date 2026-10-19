@@ -68,7 +68,7 @@ class EinsumConfigTemplate(LayerConfigTemplate):
 
         # Catapult backend supports io_parallel (array core, Latency or Resource) and io_stream
         # (Resource only -- the one io_stream kernel, nnet_einsum_stream.h, has no Latency path
-        # and no drain fallback). This now matches the Vivado/Vitis backend's accepted set exactly:
+        # and no drain fallback). This matches the Vivado/Vitis backend's accepted set exactly:
         # io_stream + Latency (and distributed_arithmetic) is rejected earlier, at conversion, by
         # init_einsum -- see catapult_backend.py -- not here.
         assert io_type in ('io_parallel', 'io_stream'), 'Einsum layer supports io_parallel and io_stream'
@@ -164,7 +164,7 @@ class EinsumFunctionTemplate(FunctionCallTemplate):
         # to a Gemm node in the IR. This template only serves the baseline paths —
         # streaming (io_stream) and the flat-array einsum (io_parallel). Both call the same
         # nnet::einsum name (overload resolution picks the ac_channel or the flat-array
-        # version), mirroring the Vivado/Vitis backend.
+        # version), as in the Vivado/Vitis backend.
         return self.template.format(**params)
 
 

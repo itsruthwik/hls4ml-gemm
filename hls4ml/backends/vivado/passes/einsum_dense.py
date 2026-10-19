@@ -80,7 +80,7 @@ struct config{index} {{
 
 einsum_dense_function_template = 'nnet::einsum_dense<{input_t}, {output_t}, {config}>({input}, {output}, {w}, {b});'
 einsum_dense_da_function_template = 'nnet::einsum_dense<{input_t}, {output_t}, {config}>({input}, {output}, {b});'
-# GEMM-IP EinsumDense no longer emits from this template — it is lowered to a Gemm
+# GEMM-IP EinsumDense does not emit from this template — it is lowered to a Gemm
 # node (see LowerEinsumToGemm) and materialized by the shared Gemm codegen.
 
 einsum_dense_include_list = [
@@ -242,9 +242,9 @@ class EinsumDenseFunctionTemplate(FunctionCallTemplate):
         params['gemm_k'] = node.get_attr('gemm_k', node.attributes['n_contract'])
         if node.get_attr('strategy') == 'gemm':
             # A gemm_ip EinsumDense must be rewritten to a const_weights Gemm node by
-            # LowerEinsumToGemm before templates run — the einsum template no longer
-            # emits GEMM (GEMM lives in the IR now). Reaching here means the lowering
-            # pass did not run; fail loudly rather than silently emit the old path.
+            # LowerEinsumToGemm before templates run — the einsum template does not
+            # emits GEMM (GEMM lives in the IR). Reaching here means the lowering
+            # pass did not run; fail loudly rather than silently emit wrong code.
             raise Exception(
                 f"EinsumDense '{node.name}' still has Strategy: GEMM at codegen time. It should have "
                 "been lowered to a Gemm node by the 'lower_einsum_to_gemm' pass. This indicates the "

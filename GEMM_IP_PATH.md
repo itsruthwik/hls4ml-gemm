@@ -4,7 +4,7 @@
 
 With `Strategy: GEMM`, hls4ml-gemm turns every matrix product in a model (Dense, Conv, EinsumDense and the
 attention matmuls) into one uniform `Gemm` node. It implements that node as a plain C++ function call into an
-external GEMM IP. The fork is 78 commits on top of upstream hls4ml (merge base `e998745`).
+external GEMM IP.
 
 The boundary with gemm-ip-gen is a function signature, not a hardware contract. hls4ml emits three things:
 - the `gemm_stream_<layer>` / `nnet::gemm_*` calls;
@@ -45,7 +45,9 @@ entries (the stock lookup would stop at the first scope that exists).
 
 ## GEMM-specific graph passes (in pipeline order)
 
-Six shared passes, plus one Vivado/Vitis-only pass (7), turn a Keras graph into canonical GEMMs. Passes 1–6 live
+Six shared passes, plus one Vivado/Vitis-only pass (7), turn a Keras graph into canonical GEMMs (a shared
+`CapGemmOutputFraction` pass additionally trims a GEMM output type's fraction bits to what the exact result
+carries). Passes 1–6 live
 in `backends/fpga/gemm/` and are shared by every FPGA backend; pass 7 lives in `backends/vivado/passes/`.
 Catapult runs 1–4 in the `optimize` flow and 5–6 in `specific_types`; Vivado/Vitis registers 1–6 as well.
 
@@ -102,8 +104,8 @@ three ways below.
 
 The pass is idempotent (`_weights_transposed_for_gemm`). The EinsumDense guard runs before the Dense branch,
 because `'Dense'` is a substring of `'EinsumDense'`. The writer chooses the source layout from the layer type,
-never from the shape: square kernels are ambiguous, and an earlier shape-based guess silently packed MHA
-projection weights transposed.
+never from the shape: square kernels are ambiguous, so a shape-based guess could pack MHA projection
+weights transposed.
 
 ### 2. Weight repack into IP beat order (writer)
 
@@ -150,8 +152,8 @@ removes most of them:
   row-major needs a small per-head 2D `Transpose` (the csim-correct fallback). The two matmuls are independent,
   so both, one or neither may need one.
 
-**Not done yet:** folding that remaining transpose into the IP's B-load write order, which would remove it
-under io_stream as well.
+Folding that remaining transpose into the IP's B-load write order, which would remove it under io_stream as
+well, is not implemented.
 
 ## Writer outputs
 

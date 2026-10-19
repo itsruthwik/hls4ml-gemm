@@ -7,7 +7,7 @@ attention math (Q.K^T, softmax, A.V) is inherited unchanged; its accumulator /
 softmax precision is set later in the hls4ml config, matching the weight/
 activation scheme used elsewhere in the fork.
 
-This mirrors HGQ2's `QMultiHeadAttention` (which does the same swap with its own
+This parallels HGQ2's `QMultiHeadAttention` (which does the same swap with its own
 `QEinsumDense`) so hls4ml's Keras 2 converter (hls4ml/converters/keras/multi_head_attention.py)
 can decompose it into the same EinsumDense / Einsum / Softmax primitive nodes as
 the native Keras 3 / HGQ2 handler.
@@ -68,8 +68,8 @@ class QMultiHeadAttention(MultiHeadAttention):
                  quantize_interior=False, score_int=3, prob_int=0, ctx_int=3, **kwargs):
         super().__init__(*args, **kwargs)
         self.weight_bits = weight_bits
-        # Integer bits for the projection-kernel quantizer. Default 0 keeps the
-        # historical +/-1 range ([-1,1)); pass e.g. 7 for a full-range INT8
+        # Integer bits for the projection-kernel quantizer. Default 0 gives the
+        # +/-1 range ([-1,1)); pass e.g. 7 for a full-range INT8
         # (fixed<8,8>) weight, needed by callers that want large-magnitude
         # integer weights instead of the usual sub-unity fake-quant range.
         if not isinstance(weight_int, int) or not (0 <= weight_int < weight_bits):
@@ -143,7 +143,7 @@ class QMultiHeadAttention(MultiHeadAttention):
         )
 
     def _build_from_signature(self, query, value, key=None):
-        # Mirrors keras' MultiHeadAttention._build_from_signature but builds
+        # Follows keras' MultiHeadAttention._build_from_signature but builds
         # QEinsumDense projections instead of EinsumDense.
         self._built_from_signature = True
         self._query_shape = tf.TensorShape(query.shape if hasattr(query, "shape") else query)

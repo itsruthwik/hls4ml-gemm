@@ -322,7 +322,7 @@ np.testing.assert_allclose(hls_prediction, keras_prediction, atol=0.35, rtol=0.0
 
     with open(output_dir / 'gemm_config.json') as f:
         gemm_config = json.load(f)
-    # The four Q/K/V/O projections are now unified Gemm nodes (const_weights, array interface).
+    # The four Q/K/V/O projections are unified Gemm nodes (const_weights, array interface).
     projection_entries = [entry for entry in gemm_config.values() if entry['type'] == 'Gemm']
     assert len(projection_entries) == 4
     assert {entry['gemm_m'] for entry in projection_entries} == {4}
@@ -343,7 +343,7 @@ def test_catapult_hgq2_attention_multihead_gemm_ip(io_type, tmp_path):
     # cluster into H per-head lanes: projections stay 2D [seq, d_model]; a stateless
     # HeadSplit fans each into H [seq, key_dim] streams; each head runs its own QK^T
     # Gemm, Softmax and A.V Gemm; a stateless HeadMerge concatenates the contexts back.
-    # The head-move transposes are gone (head is a within-beat lane) — the only residual
+    # There are no head-move transposes (head is a within-beat lane); the only residual
     # reorder is the per-head A.V V-transpose. With 2 heads there are 4 projections +
     # 2 QK^T + 2 A.V = 8 Gemm nodes, and exactly 2 (io_stream) V-transposes.
     output_dir = tmp_path / f'catapult_hgq2_mha_multihead_{io_type}_prj'

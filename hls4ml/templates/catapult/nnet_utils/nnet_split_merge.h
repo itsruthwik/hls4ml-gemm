@@ -10,8 +10,8 @@
 // (beat = d_model). Multi-head attention needs each head's [seq, key_dim] block.
 // Because head lives INSIDE a beat (d_model = H * key_dim, contiguous lanes),
 // separating heads is a stateless lane slice — one input beat produces H output
-// beats in the same step, no buffer and no reorder. This lets the head-move
-// transpose be dropped entirely: the GEMM nodes stay uniform (they consume clean
+// beats in the same step, no buffer and no reorder. This avoids the head-move
+// transpose entirely: the GEMM nodes stay uniform (they consume clean
 // per-head [seq, key_dim]); all head-lane handling lives here.
 //
 // The io_stream forms take the H output/input channels ENUMERATED (variadic),

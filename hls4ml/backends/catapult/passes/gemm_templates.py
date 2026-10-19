@@ -37,7 +37,7 @@ im2col_gemm_rows_function_template = (
 # K-wide row per patch), but the standalone node's output variable is the flat
 # [n_patches, patch_size] array the downstream Gemm array template reads
 # ({input}[row*gemm_k+kk]) — unpack into that flat layout here rather than
-# widening the emitter (kept frozen; see plan.md).
+# widening the emitter.
 im2col_gemm_rows_array_function_template = """
     {{
         typedef nnet::array<{output_scalar_t}, config{index}::filt_height * config{index}::filt_width \
@@ -97,7 +97,7 @@ gemm_const_weights_config_template = """struct config{index} : nnet::gemm_config
     static const unsigned gemm_n = {n_out};
     static const unsigned gemm_ip_id = {index};
     // Microarchitecture knobs consumed by the generic (behavioral-HLS) GEMM core:
-    // the reuse loop trip count and the multiplier ALLOCATION cap (mirrors the
+    // the reuse loop trip count and the multiplier ALLOCATION cap (same as the
     // Vivado writer's own gemm_const_weights_config_template).
     static const unsigned reuse_factor = {reuse_factor};
     static const unsigned multiplier_limit = {multiplier_limit};
@@ -140,7 +140,7 @@ gemm_two_operand_config_template = """struct config{index} {{
     // nnet::gemm_config, so declare it explicitly (true for the QK^T / A.V cores).
     static const bool transpose_weights = true;
     // Microarchitecture knobs consumed by the generic (behavioral-HLS) GEMM core
-    // (mirrors the Vivado writer's own gemm_two_operand_config_template).
+    // (same as the Vivado writer's gemm_two_operand_config_template).
     static const unsigned reuse_factor = {reuse_factor};
     static const unsigned multiplier_limit = {multiplier_limit};
     typedef {input1_t} weight_t;
@@ -234,8 +234,7 @@ def _inject_weight_rom_accessor(cfg, node):
         )
     else:
         # Column-major (default): one K-high output column per beat. weight_col_t /
-        # gemm_weight_cols() are the legacy names of the same ROM, kept for consumers
-        # that predate weight_beat_t.
+        # gemm_weight_cols() are aliases of weight_beat_t / gemm_weight_beats() for this layout.
         inject = (
             '    static const bool weights_row_major = false;\n'
             '    typedef nnet::array<weight_t, gemm_k> weight_beat_t;\n'
@@ -308,9 +307,8 @@ class GemmConfigTemplate(GemmIPConfigTemplateBase):
 class GemmFunctionTemplate(FunctionCallTemplate):
     """One function template for the unified Gemm node.
 
-    Dispatches the 2x2 (IOType x weights_in_core) among the four gemm_* signatures.
-    Phase 1 exercises only the weight-stationary column (Dense / pointwise Conv);
-    the two-operand column (attention QK^T / A.V) is wired in Phase 2.
+    Dispatches on IOType and weights_in_core among the gemm_* signatures: weight-stationary
+    (Dense / pointwise Conv) and two-operand (attention QK^T / A.V), each for array and stream.
     """
 
     def __init__(self):
@@ -347,7 +345,7 @@ class GemmFunctionTemplate(FunctionCallTemplate):
             if node.get_attr('n_inplace', 1) == 1:
                 # Bare call: no bias array/port, no zero-fill, no per-head loop.
                 return gemm_stream_two_op_single_function_template.format(**two_op)
-            # n_inplace > 1: unchanged, needs its own follow-up look (plan.md).
+            # n_inplace > 1: the template loops the two-stream call over the heads.
             return gemm_stream_two_op_function_template.format(**two_op)
 
         params = self._default_function_params(node)

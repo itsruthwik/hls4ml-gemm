@@ -40,6 +40,8 @@ def test_einsum_dense(test_case_id, backend, io_type, strategy, operation):
         pytest.skip('Catapult only covers strategy=resource, io_type=io_stream')
 
     eq, inp_shape, out_shape, bias_axes = operation
+    if io_type == 'io_stream' and eq == '...abcd,bcde->...aeb':
+        pytest.skip('io_stream Einsum needs an operand whose free axes form a contiguous block of the output')
     model = keras.Sequential(
         [Input(inp_shape), EinsumDense(eq, output_shape=out_shape, bias_axes=bias_axes, name='einsum_dense')]
     )

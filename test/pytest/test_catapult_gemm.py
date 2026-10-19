@@ -10,9 +10,8 @@ import hls4ml
 import hls4ml.converters
 import hls4ml.utils
 
-# csim (compile()) needs Catapult's libstdc++ on LD_LIBRARY_PATH; conftest.py sets it
-# from atlas.env and re-execs pytest. Gate the numeric test on that being in effect so
-# it skips cleanly on a standalone hls4ml checkout (no atlas.env).
+# csim (compile()) needs Catapult's libstdc++ on LD_LIBRARY_PATH. Gate the numeric test
+# on that being set so it skips cleanly when the Catapult toolchain is not configured.
 _HAS_CSIM = 'catapult' in os.environ.get('LD_LIBRARY_PATH', '').lower()
 
 

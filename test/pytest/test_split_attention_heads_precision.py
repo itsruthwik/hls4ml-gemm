@@ -24,7 +24,7 @@ L, D, H = 4, 8, 2
 KEY_DIM = D // H
 
 # Explicit 8-bit precision for every per-head quantizer clone this pass produces,
-# keyed by its *own* (head-suffixed) name -- the pattern used by examples/mha_*.
+# keyed by its *own* (head-suffixed) name -- as a user config would.
 HLS_CONFIG = {
     'Model': {
         'Precision': {'default': 'fixed<16,6,RND,WRAP,0>'},

@@ -21,7 +21,7 @@ def to_acfixed(k, b, i, RND, SAT, backend='oneapi'):
         # Catapult's ac_types have no such restriction (ac_fixed.h only requires MSB < W), so
         # this padding must not be applied there: it silently doubles the resolution of 1-bit
         # quantized values (b=1 differs numerically from b=2, not just in representation), which
-        # was causing the Catapult native path to diverge from HGQ2/Vivado at HGQ input quantizers.
+        # would make the Catapult native path diverge from HGQ2/Vivado at HGQ input quantizers.
         b = 2
     return f'ac_fixed<{b},{i},{k},AC_{RND},AC_{SAT}>'
 
@@ -62,7 +62,7 @@ def _mask_body(
 def generate_mask_fn(
     name: str, shape: tuple[int, ...], k: np.ndarray, b: np.ndarray, i: np.ndarray, RND: str, SAT: str, backend: str
 ) -> str:
-    """Generate heterogenous quantization mask function, ONLY works for IOType=io_parallel"""
+    """Generate heterogeneous quantization mask function, ONLY works for IOType=io_parallel"""
     body, _ = _mask_body(shape, k, b, i, RND, SAT, backend)
     arguments = 'input_t &inp, output_t &out' if backend.lower() in ['oneapi', 'quartus'] else 'input_t *inp, output_t *out'
     mask_fn = f"""
@@ -159,7 +159,7 @@ def _generate_mask_fn_stream_beatwise(
         # Heterogeneous along a streamed axis: still beat-wise, but select the lane types on
         # the beat index. Identical beats share a case, so the mux is over the DISTINCT
         # patterns, not over n_beats. Storage stays O(1) either way. Runs of consecutive
-        # beat indices are one `case a ... b:` range label: a label per beat index made the
+        # beat indices are one `case a ... b:` range label: a label per beat index makes the
         # HLS front end spend minutes per quantizer on a frame of a thousand beats.
         groups: dict[tuple, list[int]] = {}
         for t, beat in enumerate(beats):

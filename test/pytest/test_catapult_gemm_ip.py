@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -106,9 +107,8 @@ def test_catapult_dense_gemm_ip_config_codegen(test_case_id, io_type, gemm_ip, e
 
 
 def test_catapult_dense_gemm_ip_io_parallel_routes_to_gemm_array(test_case_id):
-    """io_parallel Dense + GemmIP uses the array-interface Gemm node
-    (it used to raise; the io_parallel array path superseded that)."""
-    from hls4ml.backends.fpga.passes.gemm_nodes import Gemm
+    """io_parallel Dense + GemmIP uses the array-interface Gemm node."""
+    from hls4ml.backends.fpga.gemm.gemm_nodes import Gemm
 
     model = _make_dense_model()
     config = hls4ml.utils.config_from_keras_model(model, granularity='name')
@@ -164,8 +164,8 @@ def test_catapult_dense_gemm_metadata_rank1(test_case_id):
     assert 'static const unsigned gemm_m = 1;' in parameters_text
     assert 'static const unsigned gemm_k = 4;' in parameters_text
     assert 'static const unsigned gemm_n = 3;' in parameters_text
-    # Four-name GEMM layer: nnet_gemm_ip.h defines the two array entries; the old
-    # wrapper/indirection names are gone.
+    # Four-name GEMM layer: nnet_gemm_ip.h defines the two array entries; there are
+    # no wrapper/indirection names.
     assert 'void gemm_array' in gemm_ip_text
     assert 'void gemm_array_const_weights' in gemm_ip_text
     assert 'stream_gemm_ip' not in gemm_ip_text
@@ -452,7 +452,7 @@ def test_catapult_general_conv1d_gemm_ip_codegen(test_case_id):
 
     # General conv routes through a standalone Im2Col node feeding a pure Gemm node
     # (SplitConvGemm splits, no fusion). Assert the node kinds, not their names.
-    from hls4ml.backends.fpga.passes.gemm_nodes import Gemm
+    from hls4ml.backends.fpga.gemm.gemm_nodes import Gemm
     from hls4ml.model.layers import Im2Col
 
     assert any(isinstance(layer, Im2Col) for layer in hls_model.get_layers()), \
@@ -461,7 +461,7 @@ def test_catapult_general_conv1d_gemm_ip_codegen(test_case_id):
         'General conv should produce a Gemm node'
     assert 'nnet::im2col_1d_gemm_rows<' in myproject_text
     assert 'nnet::gemm_stream_const_weights<' in myproject_text
-    # Four-name GEMM layer: the old weight-column feed / wrapper helpers are gone.
+    # Four-name GEMM layer: there are no weight-column feed / wrapper helpers.
     assert 'void gemm_array' in gemm_ip_text
     assert 'stream_gemm_packed_weight_cols' not in gemm_ip_text
     assert 'stream_gemm_ip' not in gemm_ip_text
@@ -490,10 +490,9 @@ def test_catapult_io_stream_stage_wrapper_codegen(test_case_id):
 
     myproject_text = (output_dir / 'firmware' / 'myproject.cpp').read_text()
 
-    assert '#pragma hls_design block\nvoid dense1_stage(' in myproject_text
-    assert '#pragma hls_design block\nvoid dense1_relu_stage(' in myproject_text
-    assert '#pragma hls_design block\nvoid dense2_stage(' in myproject_text
-    assert '#pragma hls_design block\nvoid dense2_relu_stage(' in myproject_text
+    # Each stage is an hls_design block; Latency-strategy Dense stages also carry pipeline pragmas.
+    for stage in ('dense1', 'dense1_relu', 'dense2', 'dense2_relu'):
+        assert re.search(rf'#pragma hls_design block\n(#pragma [^\n]*\n)*void {stage}_stage\(', myproject_text), stage
     assert 'void CCS_BLOCK(dense1_stage)' not in myproject_text
     assert '#pragma hls_design ccore' not in myproject_text
 
@@ -551,7 +550,7 @@ def test_catapult_gemm_strategy_emits_contract_and_behavioral_ip(test_case_id):
     assert gemm_ip_header.exists()
     gemm_ip_text = gemm_ip_header.read_text()
     # Four-name GEMM layer: entry point == synth core == csim behavioral share one
-    # name each; the behavioral now lives inline in the four entries.
+    # name each; the behavioral model lives inline in the four entries.
     assert 'void gemm_array' in gemm_ip_text
     assert 'void gemm_array_const_weights' in gemm_ip_text
     assert 'stream_gemm_ip' not in gemm_ip_text

@@ -42,8 +42,7 @@ def test_catapult_hgq2_layernorm_bit_exact(test_case_id, io_type, dim):
     model = _make_model(dim)
     data = np.random.normal(0, 1, size=(50, seq_len, dim)).astype(np.float32)
 
-    # Warm up the quantizers' calibrated ranges (EMA-based) before extracting the rsqrt LUT --
-    # matches the pattern used to validate LN<->HGQ2 consistency.
+    # Warm up the quantizers' calibrated ranges (EMA-based) before extracting the rsqrt LUT.
     model.predict(data, verbose=0)
 
     r_keras = model.predict(data, verbose=0)

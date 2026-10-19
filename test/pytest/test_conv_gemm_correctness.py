@@ -110,7 +110,7 @@ class TestGeneralConv1DGemmIP:
         assert 'static const unsigned stride_width = 2;' in parameters_text
 
     def test_conv1d_channels_first_rejects_gemm_ip(self, test_case_id):
-        """Conv1D with channels_first should reject GEMM IP for now."""
+        """Conv1D with channels_first should reject GEMM IP."""
         pytest.skip("channels_first Conv1D GEMM support deferred")
 
 

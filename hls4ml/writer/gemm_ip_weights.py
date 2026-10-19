@@ -54,8 +54,8 @@ def _single_kn_block(var, weight_data):
 def _kn_reader(var, layer, weight_data, gemm_k, gemm_n):
     """Return ``value(k, n)`` = the weight multiplying input k for output n.
 
-    The SOURCE layout is decided by the layer type, never sniffed from the shape —
-    a square kernel is ambiguous and a shape guess silently packed transposed
+    The SOURCE layout is decided by the layer type, never sniffed from the shape:
+    a square kernel is ambiguous, and a shape guess would pack transposed
     weights for square EinsumDense kernels (e.g. MHA projections).
       - EinsumDense kernels are [n_contract, n_free_kernel] = [K, N];
         TransposeWeightsForGemmIP does not touch them (whether still an EinsumDense
@@ -114,8 +114,7 @@ def write_gemm_ip_weight_cols(var, layer, odir):
         h_file.write(f'#define {guard}\n\n')
         # File-relative include: resolves from firmware/weights/ on every
         # backend regardless of the build's -I flags (the Vivado csim has
-        # none that reach nnet_utils, and the bare "nnet_utils/..." form only
-        # worked on Catapult via the copy shipped inside MGC_HOME).
+        # none that reach nnet_utils).
         h_file.write('#include "../nnet_utils/nnet_types.h"\n\n')
         h_file.write(f'static nnet::array<{var.type.name}, {beat_len}> {beat_name}[{n_beats}] = {{')
         sep = ''
@@ -137,7 +136,7 @@ def _fixed_point_int(value, precision):
 
     Weight-stationary cells hand the exact quantized bits to the external GEMM IP
     generator with no float re-quantization round-trip (keeps csim/cosim bit-exact,
-    per the plan's single-arithmetic-authority decision). For a fixed<W,I> type the
+    with a single arithmetic authority). For a fixed<W,I> type the
     stored integer is round(value * 2**(W-I)); integer types have 0 fractional bits.
     """
     frac = getattr(precision, 'fractional', 0) or 0

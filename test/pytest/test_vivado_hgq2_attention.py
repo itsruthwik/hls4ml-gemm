@@ -21,7 +21,7 @@ def test_vivado_hgq2_attention_multihead_gemm_ip(backend, io_type, tmp_path):
     each head runs its own QK^T Gemm, Softmax and A.V Gemm; a stateless HeadMerge
     concatenates the contexts back. With 2 heads there are 4 projections + 2 QK^T +
     2 A.V = 8 Gemm nodes. Verified bit-exact on both io types (io_stream relies on the
-    ported HGQ io_stream quantizer).
+    HGQ io_stream quantizer).
     """
     keras.utils.set_random_seed(7)
     with QuantizerConfigScope(f0=3, i0=2):

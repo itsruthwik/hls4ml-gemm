@@ -4,15 +4,15 @@ test_int8_gemm_ip_precision.py
 Regression tests for INT8 precision override support in the Catapult GEMM IP
 backend (Strategy: GEMM).
 
-Root cause (see local-docs/HGQ2_Mixed_Precision_Report.md):
+Background:
   When a Dense or Conv layer is transformed into a Gemm (conv via a standalone Im2Col + Gemm)
-  node, the new synthetic node previously could not find its LayerName precision
-  entries in HLSConfig because its node name (e.g. 'gemm_dense_target') differed
-  from the original source name ('dense_target').
+  node, the new synthetic node cannot find its LayerName precision entries in HLSConfig on its
+  own, because its node name (e.g. 'gemm_dense_target') differs from the original source name
+  ('dense_target').
 
-  The fix adds _mirror_precision_to_gemm_node() which is called *before* make_node()
-  in each optimizer pass so that initialize() -> add_weights_variable() -> get_precision()
-  finds the correct per-layer entries.
+  _mirror_precision_to_gemm_node() is called *before* make_node() in each optimizer pass so
+  that initialize() -> add_weights_variable() -> get_precision() finds the correct per-layer
+  entries.
 
 Configuration API notes
 -----------------------
@@ -31,6 +31,8 @@ Tests
    the original Dense node (regression guard that baseline path is unaffected)
 4. Precision isolation — INT8 override on one Dense does NOT leak to sibling
 5. Conv1D INT8 GemmIP — conv-derived Gemm has weight_t = ac_int<8, true>
+6. Dense GemmIP with result and accum overrides — distinct result and accumulator precision
+7. Conv1D GemmIP (Im2Col + Gemm) — distinct accumulator precision
 """
 
 import os
@@ -158,7 +160,7 @@ def test_dense_int8_gemm_ip_weight_type(tmp_path):
 def test_dense_gemm_ip_no_override_uses_default(tmp_path):
     """
     When GemmIP=True but no LayerName precision override is given, weight_t /
-    bias_t should fall back to the model-global default.  The fix must be a
+    bias_t should fall back to the model-global default.  The mirroring must be a
     no-op when there is nothing to mirror.
     """
     import hls4ml
@@ -222,7 +224,7 @@ def test_dense_non_gemm_ip_path_unaffected(tmp_path):
     )
 
     # No Gemm node should exist
-    from hls4ml.backends.fpga.passes.gemm_nodes import Gemm
+    from hls4ml.backends.fpga.gemm.gemm_nodes import Gemm
     for node in hls_model.get_layers():
         assert not isinstance(node, Gemm), \
             f"Unexpected Gemm node '{node.name}' when GemmIP=False."
@@ -300,7 +302,7 @@ def test_conv1d_int8_gemm_ip_weight_type(tmp_path):
     Gemm node (fed by a standalone Im2Col node) must have weight_t = ac_int<8, true>.
     """
     import hls4ml
-    from hls4ml.backends.fpga.passes.gemm_nodes import Gemm
+    from hls4ml.backends.fpga.gemm.gemm_nodes import Gemm
 
     model = _make_conv1d_model()
     config = hls4ml.utils.config_from_keras_model(model, backend='Catapult', granularity='name')
@@ -408,7 +410,7 @@ def test_conv1d_gemm_ip_accum_override(tmp_path):
     Conv1D GEMM-IP path (Im2Col + Gemm) emits distinct accumulator precision.
     """
     import hls4ml
-    from hls4ml.backends.fpga.passes.gemm_nodes import Gemm
+    from hls4ml.backends.fpga.gemm.gemm_nodes import Gemm
 
     model = _make_conv1d_model()
     config = hls4ml.utils.config_from_keras_model(model, backend='Catapult', granularity='name')

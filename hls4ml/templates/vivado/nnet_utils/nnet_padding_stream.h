@@ -27,9 +27,9 @@ template <class data_T, class res_T, typename CONFIG_T> void fill_data(hls::stre
 }
 
 // One flat loop over the output grid, one beat per cycle: a border position writes zeros, an
-// interior one copies the next input beat. The nested per-region loops this replaces had no
-// pipeline pragma, so Vitis auto-pipelined the row loop and unrolled a whole padded row of
-// stream reads and writes into one body (thousands of instructions per instance), which made
+// interior one copies the next input beat. Nested per-region loops have no
+// pipeline pragma, so Vitis auto-pipelines the row loop and unrolls a whole padded row of
+// stream reads and writes into one body (thousands of instructions per instance), which makes
 // its front-end optimisation the long pole of every conv design's csynth.
 template <class data_T, class res_T, typename CONFIG_T>
 void zeropad1d_cl(hls::stream<data_T> &data, hls::stream<res_T> &res) {

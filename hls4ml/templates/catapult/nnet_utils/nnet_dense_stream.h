@@ -28,12 +28,12 @@ void dense(ac_channel<data_T> &data_stream, ac_channel<res_T> &res_stream,
            typename weight_store<CONFIG_T>::type weights[weight_store<CONFIG_T>::size],
            typename CONFIG_T::bias_t biases[CONFIG_T::n_out]) {
     // data is written by the unrolled DataPack loop and read fully in parallel by dense_wrapper's
-    // unrolled inner loops; mirrors the Vivado ARRAY_PARTITION variable=data complete.
+    // unrolled inner loops; equivalent to the Vivado ARRAY_PARTITION variable=data complete.
     #pragma hls_resource data:rsc variables="data" map_to_module="[Register]"
     typename data_T::value_type data[CONFIG_T::n_in];
 
     // res is written fully in parallel by dense_wrapper's unrolled inner loops and read by the
-    // unrolled ResPack loop; mirrors the Vivado ARRAY_PARTITION variable=res complete.
+    // unrolled ResPack loop; equivalent to the Vivado ARRAY_PARTITION variable=res complete.
     #pragma hls_resource res:rsc variables="res" map_to_module="[Register]"
     typename res_T::value_type res[CONFIG_T::n_out];
 

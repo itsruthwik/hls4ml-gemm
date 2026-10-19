@@ -10,7 +10,7 @@ The GEMM path uses the row/column streaming contract:
   C stream: one full N-wide row per cycle
   M = n_patches, K = n_in, N = n_out
 
-Key differences from Catapult:
+Vivado/Vitis specifics:
   - Uses hls::stream instead of ac_channel.
   - Uses Xilinx pragmas (#pragma HLS STREAM / DATAFLOW / PIPELINE).
   - get_backend('vivado') used for product_type.
@@ -117,7 +117,7 @@ gemm_const_weights_config_template = """struct config{index} : nnet::gemm_config
     static const unsigned gemm_ip_id = {index};
     static const bool transpose_weights = true;
     // Microarchitecture knobs consumed by the generic (behavioral-HLS) GEMM core:
-    // row-loop pipeline II and the multiplier ALLOCATION cap (mirrors nnet_dense_*).
+    // row-loop pipeline II and the multiplier ALLOCATION cap (as in nnet_dense_*).
     static const unsigned reuse_factor = {reuse_factor};
     static const unsigned multiplier_limit = {multiplier_limit};
     typedef {weight_t.name} weight_t;
@@ -380,8 +380,8 @@ def _inject_weight_rom_accessor(cfg, node):
         )
     else:
         # Column-major (default): one K-high output column per beat. weight_col_t /
-        # gemm_weight_cols() are the legacy names of the same ROM, kept for consumers
-        # that predate weight_beat_t.
+        # gemm_weight_cols() are aliases of the same ROM for consumers
+        # that use the column-major names.
         inject = (
             '    static const bool weights_row_major = false;\n'
             '    typedef nnet::array<weight_t, gemm_k> weight_beat_t;\n'
@@ -486,7 +486,7 @@ class GemmFunctionTemplate(FunctionCallTemplate):
                     out_var,
                     f'config{idx}::gemm_m',
                 )
-            # n_inplace > 1: unchanged, needs its own follow-up look (plan.md).
+            # n_inplace > 1: emitted as the per-head loop template above.
             return gemm_stream_two_op_function_template.format(**two_op)
 
         params = self._default_function_params(node)
@@ -514,7 +514,7 @@ class GemmFunctionTemplate(FunctionCallTemplate):
             # io_stream packed path has no place to add a row-varying bias without
             # silently dropping the per-row component. EinsumDense GEMM-IP is
             # io_parallel-gated so this is unreachable in practice, but fail loudly
-            # rather than emit a wrong answer (mirrors Catapult).
+            # rather than emit a wrong answer (as in the Catapult backend).
             raise NotImplementedError(
                 f"Gemm '{node.name}': row-varying bias is not supported on the io_stream GEMM-IP "
                 "path. Use io_parallel for EinsumDense layers whose bias varies across rows."

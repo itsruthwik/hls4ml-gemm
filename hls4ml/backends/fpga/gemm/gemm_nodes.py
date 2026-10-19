@@ -6,7 +6,7 @@ from hls4ml.model.attributes import Attribute, WeightAttribute, TypeAttribute
 class Gemm(Layer):
     """Math-only consumer of the GEMM IP.
 
-    One node for every plain GEMM (Dense, pointwise Conv, and — from Phase 2 —
+    One node for every plain GEMM (Dense, pointwise Conv, and
     the attention einsums). The interface (stream vs array) is NOT encoded in the
     class: it is read from the model's IOType in the template, exactly as every
     other hls4ml layer sources it. The two axes that DO live on the node are
@@ -61,8 +61,8 @@ register_layer('Gemm', Gemm)
 #   interface        -> ac_channel or array?       (IOType)
 #
 # A Dense layer's kernel is constant whether it runs io_stream or io_parallel, so
-# deriving this from IOType (as an earlier revision did) both mislabels io_parallel
-# Dense and blocks io_parallel weight-stationary support.
+# deriving this from IOType would mislabel io_parallel Dense and block
+# io_parallel weight-stationary support.
 #
 # True  : Dense, Conv (pointwise and im2col), EinsumDense — the kernel is constant.
 # False : Einsum QK^T / A.V — both operands are per-frame activations.
@@ -79,8 +79,7 @@ def _bias_tensor_is_nonzero(bias_data):
     """True when a bias tensor exists and is not all-zero.
 
     has_bias is a fact derived from the IR (the bias tensor itself), not from any
-    attribute -- nothing sets a 'use_bias' attribute on the node, so reading it always
-    fell back to its True default and has_bias was a dead constant.
+    attribute (nothing sets a 'use_bias' attribute on the node).
     """
     if bias_data is None:
         return False
@@ -91,7 +90,7 @@ def _bias_tensor_is_nonzero(bias_data):
 
 
 # ---------------------------------------------------------------------------
-# Precision mirroring helper
+# Precision propagation helper
 # ---------------------------------------------------------------------------
 # Precision vars that may carry per-layer overrides from the user's hls_config.
 _GEMM_PRECISION_VARS = ('weight', 'bias', 'accum', 'result', 'default')
@@ -133,7 +132,7 @@ def _lookup_effective_precision(cfg, source_node, source_layer_name, var):
 
 
 def _mirror_precision_to_gemm_node(model, source_layer_name, dest_node_name):
-    """Mirror effective source precision to a synthetic GEMM node.
+    """Copy effective source precision to a synthetic GEMM node.
 
     When a Dense/Conv layer (e.g. ``dense_target``) is replaced by a ``GemmStream``
     node (e.g. ``gemm_dense_target``), the new node's name is not present in
@@ -169,7 +168,7 @@ def _mirror_precision_to_gemm_node(model, source_layer_name, dest_node_name):
 # Resolve config values (Strategy, ReuseFactor, ...) from the SOURCE layer and store
 # the concrete per-layer value on the GEMM node (resolve-then-store). Resolution MUST
 # happen here: after replacement the GEMM node's name is not in HLSConfig, so a later
-# read would miss the user's per-layer settings (same reason precision is mirrored
+# read would miss the user's per-layer settings (same reason precision is copied
 # above). hls4ml carries these into the manifest; what a gemm-ip-gen target does with
 # them is the target's own concern.
 def _resolve_config_key(cfg, source_node, key, default):
@@ -222,7 +221,7 @@ def _resolve_gemm_config(model, source_node):
         # Two-operand only: stream the B operand row-major (N-wide beats, one contraction
         # row per beat) instead of the default col-major (K-wide beats, one output column
         # per beat). Required to route a two-operand GEMM to the mvau IP (its runtime load
-        # streams for every tiling with no full-B buffer). Default False = today's behavior.
+        # streams for every tiling with no full-B buffer). Default False.
         'second_operand_row_major': bool(
             _safe(lambda: _resolve_config_key(cfg, source_node, 'SecondOperandRowMajor', False), False)
         ),
@@ -285,7 +284,7 @@ class SplitConvGemm(OptimizerPass):
 
         gemm_name = f'gemm_{node.name}'
 
-        # Mirror any per-layer precision overrides from the source Conv layer BEFORE
+        # Copy any per-layer precision overrides from the source Conv layer BEFORE
         # make_node() so that initialize() → add_weights_variable() picks them up.
         _mirror_precision_to_gemm_node(model, node.name, gemm_name)
 
@@ -323,7 +322,7 @@ class SplitConvGemm(OptimizerPass):
             # precision, exactly as the Dense/pointwise/attention Gemm nodes do.
             # _original_type on the GEMM must contain the conv class name —
             # gemm_transposition branches on it to pick the [W,C,F]/[H,W,C,F] ->
-            # [F, W*C]/[F, H*W*C] weight layout — NOT an 'Im2Col_' prefix.
+            # [F, W*C]/[F, H*W*C] weight layout.
             im2col_attributes = {
                 'in_height': node.get_attr('in_height', 1),
                 'in_width': node.get_attr('in_width'),
@@ -356,7 +355,7 @@ class SplitConvGemm(OptimizerPass):
             # its output precision explicitly to the conv INPUT precision here.
             im2col_node.get_output_variable().type.precision = node.get_input_variable().type.precision
 
-            gemm_attributes.pop('im2col_tile_rows', None)  # lives on the Im2Col node now
+            gemm_attributes.pop('im2col_tile_rows', None)  # lives on the Im2Col node
             gemm_node = model.make_node(
                 Gemm, gemm_name, gemm_attributes, im2col_node.outputs.copy(), node.outputs.copy()
             )
@@ -407,7 +406,7 @@ class ReplaceDenseGemm(OptimizerPass):
 
         gemm_name = f'gemm_{node.name}'
 
-        # Mirror any per-layer precision overrides from the source Dense layer BEFORE
+        # Copy any per-layer precision overrides from the source Dense layer BEFORE
         # make_node() so that initialize() → add_weights_variable() picks them up.
         _mirror_precision_to_gemm_node(model, node.name, gemm_name)
 
@@ -452,7 +451,7 @@ class LowerEinsumToGemm(OptimizerPass):
     def _lower_einsum_dense(self, model, node):
         """EinsumDense (constant kernel) -> const_weights Gemm.
 
-        Mirrors ReplaceDenseGemm. The kernel is already [n_inplace, K, N] from
+        Same structure as ReplaceDenseGemm. The kernel is already [n_inplace, K, N] from
         init_einsum_dense; the writer packs it as [K, N] keyed on _original_type
         ('EinsumDense'), and TransposeWeightsForGemmIP leaves it untouched.
         """
@@ -466,7 +465,7 @@ class LowerEinsumToGemm(OptimizerPass):
                 f'(got {n_inplace}).'
             )
         # Projections carry identity transposes; non-identity perms need Transpose
-        # nodes, which arrive with the Einsum (two-operand) lowering.
+        # nodes, which the EinsumDense lowering does not emit; refuse them.
         if not (_perm_is_identity(node.attributes['inp_tpose_idxs'])
                 and _perm_is_identity(node.attributes['out_tpose_idxs'])):
             raise NotImplementedError(

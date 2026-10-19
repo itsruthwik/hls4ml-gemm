@@ -187,7 +187,7 @@ class TestConvGemmIpWithPadding:
     """Test Conv GEMM IP with padding and stride."""
 
     def test_conv1d_gemm_ip_with_padding_generates_code(self):
-        """Verify Conv1D with padding generates code (padding should be supported)."""
+        """Verify Conv1D with padding generates code."""
         # Create Conv1D model with padding
         input_layer = Input(shape=(10, 3))
         conv = Conv1D(8, kernel_size=3, padding='same', data_format='channels_last')(input_layer)
@@ -218,7 +218,7 @@ class TestConvGemmIpWithPadding:
             assert os.path.exists(myproject_file), "myproject.h should exist for Conv1D with padding"
 
     def test_conv2d_gemm_ip_with_stride_generates_code(self):
-        """Verify Conv2D with stride generates code (stride should be supported)."""
+        """Verify Conv2D with stride generates code."""
         # Create Conv2D model with stride
         input_layer = Input(shape=(8, 8, 3))
         conv = Conv2D(16, kernel_size=(3, 3), strides=(2, 2), padding='valid', data_format='channels_last')(input_layer)

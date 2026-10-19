@@ -1,7 +1,7 @@
 """Vivado GEMM graph optimizer passes.
 
 Reuses the shared Gemm / Im2Col layer classes and the ReplaceDenseGemm /
-SplitConvGemm passes that were originally written for Catapult (SplitConvGemm
+SplitConvGemm passes shared with the Catapult backend (SplitConvGemm
 builds a standalone Im2Col node feeding a pure Gemm node for non-pointwise
 conv). Those classes are already globally registered through
 ``register_layer``, so we only need to import them and register the passes

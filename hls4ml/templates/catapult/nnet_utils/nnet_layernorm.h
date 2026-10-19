@@ -39,7 +39,7 @@ struct layernorm_config {
 // Bit-exact to HGQ2's QLayerNormalization: the reciprocal-std is NOT recomputed in float
 // here. HGQ2 routes the per-token variance through a quantized LUT (rsqrt_table), whose
 // values already fold in epsilon and the output quantizer, and which the converter transfers
-// verbatim. This kernel reproduces that exactly: it addresses the SAME table by the SAME
+// unchanged. This kernel reproduces that exactly: it addresses the SAME table by the SAME
 // quantized-variance index (round(var * 2^rsqrt_addr_f), saturated). Because the table is
 // data-driven, the kernel needs nothing about epsilon (any value works).
 template <class data_T, class res_T, typename CONFIG_T>
@@ -72,10 +72,10 @@ LAYERNORM_1D_SUM:
     // reciprocal-multiply instead rounds the reciprocal (error ~Sum*2^-accum_f) and was what made
     // the rare per-token rsqrt index flip. Same idiom as average pooling's `y /= length`.
     // NOTE: keep this divide directly in accum_t -- do NOT promote the operands to a wide
-    // intermediate type. That was tried (a fixed-point divide of two narrow accum_t values does
-    // lose precision versus true round-to-nearest) but a wide ac_fixed/ap_fixed quotient
+    // intermediate type. (A fixed-point divide of two narrow accum_t values does
+    // lose precision versus true round-to-nearest), but a wide ac_fixed/ap_fixed quotient
     // synthesizes to a divider Catapult's default resource library has no component for
-    // (measured: 'div(80,1,37,0,37)' fails C/RTL synthesis -- CRAAS-6). accum_t is sized
+    // (e.g. 'div(80,1,37,0,37)' fails C/RTL synthesis). accum_t is sized
     // explicitly for the HGQ2 path (register_precision) and is bit-exact there regardless of
     // width; the plain (non-HGQ2) path's precision is fixed by widening its DEFAULT accum_t
     // (see vivado_backend/catapult_backend's LayerNorm attribute registration), not by
@@ -95,8 +95,8 @@ LAYERNORM_1D_VAR:
 
     // HGQ2 address: quantize the variance to rsqrt_addr_f fractional bits (round),
     // then saturate into the unsigned table range [0, table_size).
-    // CATAPULT_PORT: ac_fixed has no implicit conversion to int, so the round-half-up +
-    // saturate is done through an explicit ac_int cast (mirrors the Vivado (int) cast, same
+    // Catapult-specific: ac_fixed has no implicit conversion to int, so the round-half-up +
+    // saturate is done through an explicit ac_int cast (like the Vivado (int) cast, same
     // truncate-toward-zero-after-add-0.5 semantics for the values this ever sees: var >= 0).
     // The scale-by-2^rsqrt_addr_f must NOT be done in accum_t: accum_t's integer width is sized
     // for the LN reduction (sum/variance), which is independent of table_size, so for a large

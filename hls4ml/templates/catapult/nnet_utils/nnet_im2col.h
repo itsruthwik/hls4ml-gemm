@@ -81,7 +81,7 @@ ReadInputWidth:
     // Pipeline the spatial driver loop (Catapult does not auto-flatten the nest the way Vivado does,
     // so pipelining only the inner ReadInputPack leaves this loop rolled). Unroll the inner pack loop.
     // II is a literal 1 (gapless): Catapult rejects a symbolic pragma argument such as
-    // CONFIG_T::reuse_factor (CIN-93) and then leaves the loop rolled.
+    // CONFIG_T::reuse_factor and then leaves the loop rolled.
     #pragma hls_pipeline_init_interval 1
     for (unsigned i_iw = 0; i_iw < CONFIG_T::in_width / (data_T::size / CONFIG_T::n_chan); i_iw++) {
         data_T data_pack = data.read();
@@ -96,7 +96,7 @@ ReadInputWidth:
             }
             kernel_shift_1d<decltype(pixel_pack), CONFIG_T>(pixel_pack, kernel_data);
 
-            // Comparisons against constants, no subtracts (same conditions as before).
+            // Comparisons against constants, no subtracts.
             const bool sx_hit = (sX == lShiftX);
             if (sx_hit && pX >= lShiftX) {
                 write_im2col_row<a_row_T, data_element_t, CONFIG_T::filt_width * CONFIG_T::n_chan, CONFIG_T>(
@@ -166,7 +166,7 @@ void im2col_2d_gemm_rows(ac_channel<data_T> &data, ac_channel<a_row_T> &a_rows) 
                   "A row width must equal filt_height * filt_width * n_chan");
 
     typedef typename data_T::value_type data_element_t;
-    // GEMM-only register line buffer (replaces ap_shift_reg to break the RecII~=5
+    // GEMM-only register line buffer (used instead of ap_shift_reg to avoid a RecII~=5
     // recurrence). Fully partitioned: MAX(filt_height-1,1) delay rows x n_chan x
     // in_width registers, no mux needed (each element has a single source, unlike an
     // ap_shift_reg-backed line buffer which needs a read-address mux per tap).
@@ -214,7 +214,7 @@ ReadInputPixels:
             }
             gemm_shift_line_buffer_reg<decltype(pixel_pack), CONFIG_T>(pixel_pack, line_buffer, kernel_data);
 
-            // Comparisons against constants, no subtracts (same conditions as before).
+            // Comparisons against constants, no subtracts.
             const bool sx_hit = (sX == lShiftX);
             const bool sy_hit = (sY == lShiftY);
             if (sx_hit && sy_hit && pY >= lShiftY && pX >= lShiftX) {

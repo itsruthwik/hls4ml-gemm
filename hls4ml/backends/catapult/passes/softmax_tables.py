@@ -63,7 +63,7 @@ def quantize_to_fixed(values: np.ndarray, precision: FixedPrecisionType) -> np.n
 
 def table_index_values(precision: FixedPrecisionType, table_size: int) -> np.ndarray:
     """Real value addressed by each table index: the index forms the top bits of a
-    ``precision`` word (mirrors ``softmax_real_val_from_idx``)."""
+    ``precision`` word (matching ``softmax_real_val_from_idx``)."""
     width, integer, signed = precision.width, precision.integer, precision.signed
     n_bits = ceil(log2(table_size))
     assert n_bits <= width, f'softmax table of {table_size} entries needs {n_bits} address bits, input has {width}'

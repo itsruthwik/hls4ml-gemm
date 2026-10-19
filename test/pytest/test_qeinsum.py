@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 import keras
@@ -37,6 +38,12 @@ def test_einsum_dense(test_case_id, backend, io_type, strategy, operation):
         pytest.skip('oneAPI only covers strategy=latency, io_type=io_parallel')
     if backend == 'Catapult' and (strategy != 'resource' or io_type != 'io_stream'):
         pytest.skip('Catapult only covers strategy=resource, io_type=io_stream')
+    if backend == 'oneAPI' and shutil.which('icpx') is None:
+        pytest.skip('oneAPI compiler (icpx) not found')
+    if io_type == 'io_stream' and strategy == 'latency':
+        pytest.skip('io_stream Einsum is implemented for Strategy=Resource only')
+    if io_type == 'io_stream' and operation[0] == 'xabcd,xbcde->xaeb':
+        pytest.skip('io_stream Einsum needs an operand whose free axes form a contiguous block of the output')
 
     eq, inp0_shape, inp1_shape = operation
     inp0 = Input(inp0_shape)

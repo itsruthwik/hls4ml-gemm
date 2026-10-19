@@ -40,7 +40,7 @@ void einsum_latency(const data0_T tpose_i0[CONFIG_T::tpose_inp0_config::N],
     }
 }
 
-// Resource-strategy contraction core, ported from the Vivado backend (nnet_einsum.h there).
+// Resource-strategy contraction core, adapted from the Vivado backend nnet_einsum.h.
 // Shares multipliers across ReuseLoop iterations like nnet::dense_resource_rf_leq_nin, with one
 // structural rule the HLS scheduler depends on: every unrolled multiplier lane accumulates into
 // its OWN partial sum (lane_acc[im], index static per lane), and only the operand index (the

@@ -64,7 +64,7 @@ def parse_mha_layer(keras_layer, input_names, input_shapes, data_reader):
     # QMultiHeadAttention carries INT8 bit-widths; stock MultiHeadAttention does not
     # (None -> leave projection precision to the hls4ml config).
     weight_bits = cfg.get('weight_bits')
-    # Integer bits for the projection-weight quantizer (0 keeps the historical
+    # Integer bits for the projection-weight quantizer (0 gives the
     # +/-1 range; a caller building large-magnitude INT8 weights sets weight_int
     # on the layer, e.g. 7 for a full-range INT8). Must match what re-derives the
     # HLS weight/bias precision below, or large weight values get re-clamped into
@@ -247,12 +247,12 @@ def parse_mha_layer(keras_layer, input_names, input_shapes, data_reader):
         # negative `integer` (it computes tf.pow(2, integer) with int args). Reclaiming
         # that resolution would need setting the query weight precision directly.
 
-    # NOTE (activation/result precision, step 3b): modelling each projection's
+    # NOTE (activation/result precision): modelling each projection's
     # output quantizer must be done as the EinsumDense's *own* result precision,
     # in place -- NOT by inserting activation nodes between the projection and the
     # QK/AV einsums. The Catapult attention pass requires the einsum's inputs to be
     # EinsumDense projections directly (it errors otherwise), so inserted nodes
-    # break the GEMM lowering. Tracked as remaining work.
+    # break the GEMM lowering.
     nodes = [q_node, k_node, v_node, qk_node, sm_node, av_node, o_node]
     shapes = [Q_shape, K_shape, V_shape, score_shape, score_shape, pre_O_shape, O_shape]
     return [(n, s) for n, s in zip(nodes, shapes)]

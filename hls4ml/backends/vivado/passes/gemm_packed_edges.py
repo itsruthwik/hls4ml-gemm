@@ -7,7 +7,7 @@ With ``HLSConfig: Model: GemmPackedStreams: True`` this pass marks an edge ``gem
 when one end is a GEMM node and the other end is a GEMM node or a layer whose template reads
 or writes the packed beat itself (nnet_stream_beat.h); that edge then carries the raw beat,
 and neither end runs a separate conversion process. Every other edge is unchanged, so a
-layer without packed support keeps today's pack/unpack around the GEMM.
+layer without packed support keeps its own pack/unpack around the GEMM.
 
 Model inputs and outputs are never packed: Vitis will not hand a top-level argument straight
 to an RTL blackbox, and the model's interface stays in hls4ml's array beats.

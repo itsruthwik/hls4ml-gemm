@@ -17,7 +17,7 @@ namespace nnet {
 // (equation_row_plan, shared with the Vivado/Vitis backend -- see
 // hls4ml.backends.fpga.einsum_utils) derives, purely from the equation's index letters, which
 // operand supplies rows and how the row loop nests; conversion raises before codegen if neither
-// operand's rows can be streamed directly. Two phases, ported from the Vivado/Vitis kernel of the
+// operand's rows can be streamed directly. Two phases, adapted from the Vivado/Vitis kernel of the
 // same name:
 //
 // 1. DataPrepare: unpack both operand streams into flat arrays, then run each through
@@ -133,7 +133,7 @@ RowReuseLoop:
                 in1_T b = tpose_i1[i * L1 * C + row_l * C + c];
                 mult = CONFIG_T::template product<in0_T, in1_T>::product(a, b);
             }
-            // Loop-carried path is exactly this one add (mirrors einsum_resource): lane_acc[im]
+            // Loop-carried path is exactly this one add (as in einsum_resource): lane_acc[im]
             // is cleared once, on the first reuse step of each row, by starting the accumulation
             // from `mult` alone instead of `lane_acc[im] + mult`.
             lane_acc[im] = (ir == 0) ? mult : (typename CONFIG_T::accum_t)(lane_acc[im] + mult);
@@ -190,7 +190,7 @@ struct einsum_stream_impl<data0_T, data1_T, res_T, CONFIG_T, 0> {
     }
 };
 
-// row_stream_op == 1: rows are (i, l1), each n_free0 outputs. Mirror of the above with the
+// row_stream_op == 1: rows are (i, l1), each n_free0 outputs. Same as the above with the
 // operand roles swapped.
 template <class data0_T, class data1_T, class res_T, typename CONFIG_T>
 struct einsum_stream_impl<data0_T, data1_T, res_T, CONFIG_T, 1> {

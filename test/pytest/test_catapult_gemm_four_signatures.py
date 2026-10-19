@@ -1,10 +1,9 @@
 """Global guard: the Catapult GEMM layer exposes EXACTLY four entry points.
 
-The unified-gemm-ir-node work collapsed a ~12-name GEMM C++ layer down to four
-signatures — `gemm_stream`, `gemm_stream_const_weights`, `gemm_array`,
+The GEMM C++ layer has four signatures — `gemm_stream`, `gemm_stream_const_weights`, `gemm_array`,
 `gemm_array_const_weights` — the 2x2 of (io_stream|io_parallel) x (two-operand|
 weight-stationary). Every node template dispatches into this fixed set. A fifth
-`gemm_*` entry point (e.g. an accum-draining core, or a resurrected wrapper) would
+`gemm_*` entry point (e.g. an accum-draining core, or a wrapper) would
 silently break the "four names everywhere" contract that gemm-ip-gen is built
 against, so assert the set directly against the canonical headers rather than
 relying on the per-test `... not in` negative checks scattered across the suite.

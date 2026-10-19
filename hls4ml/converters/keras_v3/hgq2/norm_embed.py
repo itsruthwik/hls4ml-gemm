@@ -1,6 +1,6 @@
 """keras_v3 handlers for HGQ2 QLayerNormalization and QEmbedding.
 
-The Vivado/Vitis backend already has the IR layers, C++ kernels
+The Vivado/Vitis backend has the IR layers, C++ kernels
 (`nnet_layernorm.h`, `nnet_embed.h`) and templates; these handlers just map the
 HGQ2 layers onto them. `QLayerHandler.default_class_name` strips the leading 'Q',
 so QLayerNormalization -> LayerNormalization and QEmbedding -> Embedding, and the
@@ -27,7 +27,7 @@ def _extract_rsqrt_lut(rsqrt_table):
     per-token variance through a quantized LUT (`rsqrt_table`, a QUnaryFunctionLUT)
     with an input quantizer `iq` (which fixes the table's address grid) and an
     output quantizer `oq`. To be bit-exact to HGQ2, hls4ml must use *this* table,
-    not its own `init_invert_sqr_table`. Mirrors QUnaryLUTHandler, specialized to
+    not its own `init_invert_sqr_table`. Follows QUnaryLUTHandler, specialized to
     the rsqrt table whose input (variance) is unsigned.
 
     Returns (table_data, table_t, addr_f, table_size): the LUT array indexed by the

@@ -75,7 +75,7 @@ void einsum_latency(const data0_T tpose_i0[CONFIG_T::tpose_inp0_config::N],
 // derived from ir made hundreds of lanes alias the same registers through
 // runtime indices each cycle; csim serialises those read-modify-writes correctly
 // but Vitis scheduled them as independent, giving RTL != C on multi-layer
-// dataflow designs (mha_small, 2026-09). The per-lane form has no such aliasing.
+// dataflow designs. The per-lane form has no such aliasing.
 //
 // Numerics are identical to einsum_latency: each product is rounded into accum_t
 // once (translation-invariant on the accum grid) and accum_t adds wrap, so the
