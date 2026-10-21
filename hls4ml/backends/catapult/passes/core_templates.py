@@ -1,0 +1,446 @@
+from math import ceil, log2
+
+from hls4ml.backends.backend import get_backend
+from hls4ml.backends.catapult.passes.resource_strategy import block_major_weight_keys
+from hls4ml.backends.template import FunctionCallTemplate, LayerConfigTemplate
+from hls4ml.model.layers import (
+    Activation,
+    BatchNormalization,
+    Dense,
+    HardActivation,
+    LayerNormalization,
+    ParametrizedActivation,
+    PReLU,
+    Softmax,
+)
+from hls4ml.model.optimizer.passes.hgq_proxy_model import UnaryLUT
+
+# Dense templates
+
+dense_config_template = """struct config{index} : nnet::dense_config {{
+    static const unsigned n_in = {n_in};
+    static const unsigned n_out = {n_out};
+    static const unsigned gemm_m = {gemm_m};
+    static const unsigned gemm_k = {gemm_k};
+    static const unsigned gemm_n = {gemm_n};
+    static const unsigned gemm_ip_id = {index};
+    static const unsigned io_type = nnet::{iotype};
+    static const unsigned strategy = nnet::{strategy};
+    static const unsigned reuse_factor = {reuse};
+    static const unsigned n_zeros = {nzeros};
+    static const unsigned n_nonzeros = {nonzeros};
+    static const unsigned multiplier_limit = DIV_ROUNDUP(n_in * n_out, reuse_factor) - n_zeros / reuse_factor;
+    static const bool store_weights_in_bram = false;
+    static const bool block_major_weights = {block_major};
+    typedef {accum_t.name} accum_t;
+    typedef {bias_t.name} bias_t;
+    typedef {weight_t.name} weight_t;
+    typedef {index_t.name} index_t;
+    template<class x_T, class y_T>
+    using product = nnet::product::{product_type}<x_T, y_T>;
+}};\n"""
+
+dense_function_template = 'nnet::dense<{input_t}, {output_t}, {config}>({input}, {output}, {w}, {b});'
+
+dense_include_list = [
+    'nnet_utils/nnet_dense.h',
+    'nnet_utils/nnet_dense_compressed.h',
+    'nnet_utils/nnet_dense_stream.h',
+    'nnet_utils/nnet_gemm_ip.h',
+]
+
+
+
+def dense_stage_overlaps(node):
+    """A stream Dense with Latency strategy: the Catapult writer pipelines its stage block at II 1 so the
+    block takes the next inference while the current one is in flight. The kernel (nnet::dense) is
+    unchanged; its read, multiply-add and write stay separately pipelined, each a step of the block's
+    interval. EinsumDense and every other layer are not affected."""
+    return (isinstance(node, Dense) and str(node.get_attr('strategy')).lower() == 'latency'
+            and node.model.config.get_config_value('IOType') == 'io_stream')
+
+class DenseConfigTemplate(LayerConfigTemplate):
+    def __init__(self):
+        super().__init__(Dense)
+        self.template = dense_config_template
+
+    def format(self, node):
+        params = self._default_config_params(node)
+        params['nzeros'] = node.get_weights('weight').nzeros
+        params['nonzeros'] = node.get_weights('weight').nonzeros
+        params['product_type'] = get_backend('catapult').product_type(
+            node.get_input_variable().type.precision, node.get_weights('weight').type.precision
+        )
+        params['gemm_m'] = node.get_attr('gemm_m', 1)
+        params['gemm_k'] = node.get_attr('gemm_k', node.get_attr('n_in'))
+        params['gemm_n'] = node.get_attr('gemm_n', node.get_attr('n_out'))
+        params['block_major'] = str('weight' in block_major_weight_keys(node)).lower()
+
+        return self.template.format(**params)
+
+
+class DenseFunctionTemplate(FunctionCallTemplate):
+    def __init__(self):
+        super().__init__(Dense, include_header=dense_include_list)
+        self.template = dense_function_template
+
+    def format(self, node):
+        params = self._default_function_params(node)
+        params['w'] = node.get_weights('weight').name
+        params['b'] = node.get_weights('bias').name
+        # GEMM-strategy Dense nodes are replaced by GemmStream via ReplaceDenseGemm;
+        # this template only handles non-GEMM Dense.
+
+        return self.template.format(**params)
+
+
+# BatchNormalization templates
+
+batchnorm_config_template = """struct config{index} : nnet::batchnorm_config {{
+    static const unsigned n_in = {n_in};
+    static const unsigned n_filt = {n_filt};
+    static const unsigned n_scale_bias = (n_filt == -1) ? n_in : n_filt;
+    static const unsigned io_type = nnet::{iotype};
+    static const unsigned reuse_factor = {reuse};
+    static const unsigned multiplier_limit = DIV_ROUNDUP(n_in, reuse_factor);
+    static const bool store_weights_in_bram = false;
+    typedef {bias_t.name} bias_t;
+    typedef {scale_t.name} scale_t;
+    template<class x_T, class y_T>
+    using product = nnet::product::{product_type}<x_T, y_T>;
+}};\n"""
+
+batchnorm_function_template = 'nnet::normalize<{input_t}, {output_t}, {config}>({input}, {output}, {scale}, {bias});'
+
+batchnorm_include_list = ['nnet_utils/nnet_batchnorm.h', 'nnet_utils/nnet_batchnorm_stream.h']
+
+
+class BatchNormalizationConfigTemplate(LayerConfigTemplate):
+    def __init__(self):
+        super().__init__(BatchNormalization)
+        self.template = batchnorm_config_template
+
+    def format(self, node):
+        params = self._default_config_params(node)
+        params['n_in'] = node.get_input_variable().size_cpp()
+        params['product_type'] = get_backend('catapult').product_type(
+            node.get_input_variable().type.precision, node.get_weights('scale').type.precision
+        )
+
+        return self.template.format(**params)
+
+
+class BatchNormalizationFunctionTemplate(FunctionCallTemplate):
+    def __init__(self):
+        super().__init__(BatchNormalization, include_header=batchnorm_include_list)
+        self.template = batchnorm_function_template
+
+    def format(self, node):
+        params = self._default_function_params(node)
+        params['scale'] = node.get_weights('scale').name
+        params['bias'] = node.get_weights('bias').name
+
+        return self.template.format(**params)
+
+
+# LayerNormalization templates
+
+layernorm_config_template = """struct config{index} : nnet::layernorm_config {{
+    static const unsigned n_in = {n_in};
+    static const unsigned seq_len = {seq_len};
+    static const unsigned axis = {axis};
+    static const unsigned rsqrt_addr_f = {rsqrt_addr_f};
+    static const unsigned table_size = {table_size};
+    typedef {accum_t.name} accum_t;
+    typedef {bias_t.name} bias_t;
+    typedef {scale_t.name} scale_t;
+    typedef {rsqrt_table_t.name} table_t;
+    typedef {mean_t} mean_t;
+    typedef {norm_t} norm_t;
+    typedef {sum_t} sum_t;
+    typedef {sum2_t} sum2_t;
+    static const unsigned io_type = nnet::{iotype};
+    static const unsigned strategy = nnet::{strategy};
+    static const unsigned reuse_factor = {reuse};
+    template<class x_T, class y_T>
+    using product = nnet::product::{product_type}<x_T, y_T>;
+}};\n"""
+
+layernorm_function_template = (
+    'nnet::layernormalize<{input_t}, {output_t}, {config}>({input}, {output}, {scale}, {bias}, {rsqrt_table});'
+)
+
+layernorm_include_list = ['nnet_utils/nnet_layernorm.h', 'nnet_utils/nnet_layernorm_stream.h']
+
+
+class LayerNormalizationConfigTemplate(LayerConfigTemplate):
+    def __init__(self):
+        super().__init__(LayerNormalization)
+        self.template = layernorm_config_template
+
+    def format(self, node):
+        params = self._default_config_params(node)
+        params['n_in'] = node.get_input_variable().size_cpp()
+        params['product_type'] = get_backend('catapult').product_type(
+            node.get_input_variable().type.precision, node.get_weights('scale').type.precision
+        )
+        params['rsqrt_table_t'] = node.get_weights('rsqrt_table').type
+        params['table_size'] = node.get_attr('table_size')
+        params['rsqrt_addr_f'] = node.get_attr('rsqrt_addr_f')
+        _mean_t = node.get_attr('mean_t')
+        params['mean_t'] = getattr(_mean_t, 'precision', _mean_t).definition_cpp()
+        _norm_t = node.get_attr('norm_t')
+        params['norm_t'] = getattr(_norm_t, 'precision', _norm_t).definition_cpp()
+        for name in ('sum_t', 'sum2_t'):
+            _t = node.get_attr(name)
+            params[name] = getattr(_t, 'precision', _t).definition_cpp()
+
+        return self.template.format(**params)
+
+
+class LayerNormalizationFunctionTemplate(FunctionCallTemplate):
+    def __init__(self):
+        super().__init__(LayerNormalization, include_header=layernorm_include_list)
+        self.template = layernorm_function_template
+
+    def format(self, node):
+        params = self._default_function_params(node)
+        params['scale'] = node.get_weights('scale').name
+        params['bias'] = node.get_weights('bias').name
+        params['rsqrt_table'] = node.get_weights('rsqrt_table').name
+
+        return self.template.format(**params)
+
+
+# Activation templates
+
+activ_config_template = """struct {type}_config{index} : nnet::activ_config {{
+    static const unsigned n_in = {n_in};
+    static const unsigned table_size = {table_size};
+    static const unsigned io_type = nnet::{iotype};
+    static const unsigned reuse_factor = {reuse};
+    typedef {table_t.name} table_t;
+}};\n"""
+
+unary_lut_config_template = """struct {type}_config{index} : nnet::activ_config {{
+    static const unsigned n_in = {n_in};
+    static const unsigned table_size = {table_size};
+    static const unsigned io_type = nnet::{iotype};
+    static const unsigned strategy = nnet::{strategy};
+    static const unsigned reuse_factor = {reuse};
+    typedef {table_t.name} table_t;
+}};\n"""
+
+param_activ_config_template = """struct {type}_config{index} : nnet::activ_config {{
+    static const unsigned n_in = {n_in};
+    static const unsigned table_size = {table_size};
+    static const unsigned io_type = nnet::{iotype};
+    static const unsigned reuse_factor = {reuse};
+    typedef {table_t.name} table_t;
+    typedef {param_t.name} param_t;
+}};\n"""
+
+hard_activ_config_template = """struct {type}_config{index} {{
+    static const unsigned n_in = {n_in};
+    static const {slope_t.name} slope;
+    static const {shift_t.name} shift;
+    static const unsigned io_type = nnet::{iotype};
+    static const unsigned reuse_factor = {reuse};
+}};
+// really this allocation of pixels array ought to be in a .cpp file
+#ifndef INCLUDED_MC_TESTBENCH_H
+const {slope_t.name} {type}_config{index}::slope = {slope};
+const {shift_t.name} {type}_config{index}::shift = {shift};
+#endif\n"""
+
+softmax_config_template = """struct {type}_config{index} : nnet::activ_config {{
+    static const unsigned n_in = {n_in};
+    static const unsigned n_slice = {n_slice};
+    static const unsigned n_inner = {n_inner};
+    static const unsigned n_outer = {n_outer};
+    static const unsigned parallelization_factor = {parallelization_factor};
+    static const unsigned table_size = {table_size};
+    static const unsigned exp_table_size = {exp_table_size};
+    static const unsigned inv_table_size = {inv_table_size};
+    static const unsigned io_type = nnet::{iotype};
+    static const unsigned strategy = nnet::{strategy};
+    static const unsigned reuse_factor = {reuse};
+    static const unsigned axis = {axis};
+    static const nnet::softmax_implementation implementation = nnet::softmax_implementation::{implementation};
+    static constexpr float exp_scale = {exp_scale};
+    typedef {exp_table_t.name} exp_table_t;
+    typedef {inv_table_t.name} inv_table_t;
+    typedef {accum_t_str} accum_t;
+    typedef {inv_inp_t.name} inv_inp_t;
+    typedef {inp_norm_t_str} inp_norm_t;
+}};\n"""
+
+activ_function_template = 'nnet::{activation}<{input_t}, {output_t}, {config}>({input}, {output});'
+softmax_table_function_template = (
+    'nnet::{activation}<{input_t}, {output_t}, {config}>({input}, {output}, {exp_table}, {inv_table});'
+)
+param_activ_function_template = (
+    'nnet::{activation}<{input_t}, {param_t.name}, {output_t}, {config}>({input}, {param}, {output});'
+)
+
+activ_include_list = ['nnet_utils/nnet_activation.h', 'nnet_utils/nnet_activation_stream.h']
+
+
+class ActivationConfigTemplate(LayerConfigTemplate):
+    def __init__(self):
+        super().__init__(Activation)
+        self.template = activ_config_template
+
+    def format(self, node):
+        params = self._default_config_params(node)
+        params['type'] = node.get_attr('activation')
+
+        return self.template.format(**params)
+
+
+class UnaryLUTConfigTemplate(LayerConfigTemplate):
+    def __init__(self):
+        super().__init__(UnaryLUT)
+        self.template = unary_lut_config_template
+
+    def format(self, node):
+        params = self._default_config_params(node)
+        params['type'] = node.get_attr('activation')
+
+        return self.template.format(**params)
+
+
+class ParamActivationConfigTemplate(LayerConfigTemplate):
+    def __init__(self):
+        super().__init__((ParametrizedActivation, PReLU))
+        self.template = param_activ_config_template
+
+    def format(self, node):
+        params = self._default_config_params(node)
+        params['type'] = node.get_attr('activation')
+
+        return self.template.format(**params)
+
+
+class HardActivationConfigTemplate(LayerConfigTemplate):
+    def __init__(self):
+        super().__init__(HardActivation)
+        self.template = hard_activ_config_template
+
+    def format(self, node):
+        params = self._default_config_params(node)
+        params['type'] = node.get_attr('activation')
+
+        return self.template.format(**params)
+
+
+class SoftmaxConfigTemplate(ActivationConfigTemplate):
+    def __init__(self):
+        super(ActivationConfigTemplate, self).__init__(Softmax)  # Skip ActivationConfigTemplate's __init__
+        self.template = softmax_config_template
+
+    def format(self, node):
+        params = self._default_config_params(node)
+        params['type'] = node.get_attr('activation').lower()
+        params.setdefault('exp_table_size', params['table_size'])
+        params.setdefault('inv_table_size', params['table_size'])
+        params.setdefault('n_inner', 1)
+        params.setdefault('n_outer', 1)
+        params.setdefault('exp_scale', 1.0)
+        params.setdefault('parallelization_factor', -1)
+        # Per-head attention clones carry the pre-split softmax's configured strategy as the
+        # user wrote it (the backend init doesn't revisit them), and a model-wide strategy
+        # such as GEMM means nothing to softmax: only Resource selects the folded kernel.
+        params['strategy'] = 'resource' if str(node.get_attr('strategy', '')).lower() == 'resource' else 'latency'
+
+        n_slice = params['n_in'] // params['n_inner'] // params['n_outer']
+        params['n_slice'] = n_slice
+
+        if params['accum_t'].name == 'model_default_t':
+            scale = ceil(log2(n_slice))
+            exp_table_t = node.attributes['exp_table_t'].precision
+            signed, width, integers = exp_table_t.signed, exp_table_t.width, exp_table_t.integer
+            params['accum_t_str'] = f'ac_fixed<{width + scale}, {integers + scale}, {str(signed).lower()}>'
+        else:
+            params['accum_t_str'] = params['accum_t'].name
+
+        if params['inv_inp_t'].name == 'model_default_t':
+            params['inv_inp_t'] = params['exp_table_t']
+
+        if params['implementation'] == 'stable':
+            if 'inp_norm_t' not in params:
+                input_t = node.get_input_variable().type.precision
+                width, iwidth, signed = input_t.width, input_t.integer, input_t.signed
+                width, iwidth = width - signed, iwidth - signed
+                if signed:
+                    exp_table_size = params['inv_table_size']
+                    params['exp_table_size'] = str(min(int(exp_table_size), 2**width))
+                params['inp_norm_t_str'] = f'ac_fixed<{width}, {iwidth}, false>'
+            else:
+                inp_norm_t = params['inp_norm_t'].precision
+                params['exp_table_size'] = str(min(int(params['exp_table_size']), 2**inp_norm_t.width))
+                params['inp_norm_t_str'] = params['inp_norm_t'].name
+        else:
+            params['inp_norm_t_str'] = 'ac_fixed<1, 0, true>'
+        return self.template.format(**params)
+
+
+class SoftmaxFunctionTemplate(FunctionCallTemplate):
+    def __init__(self):
+        super().__init__(Softmax, include_header=activ_include_list)
+        self.template = activ_function_template
+
+    def format(self, node):
+        params = self._default_function_params(node)
+        use_multidim = node.get_attr('n_inner', 1) > 1 or node.get_attr('n_outer', 1) > 1
+        use_multidim = use_multidim and node.model.config.get_config_value('IOType') == 'io_parallel'
+        params['activation'] = 'softmax_multidim' if use_multidim else 'softmax'
+        params['config'] = f'softmax_config{node.index}'
+        if node.get_attr('implementation') in ('latency', 'stable'):
+            # Table kernels take the constant exp / 1/x tables materialized by
+            # catapult:softmax_const_tables (Catapult cannot synthesize the float init).
+            params['exp_table'] = node.get_weights('exp_table').name
+            params['inv_table'] = node.get_weights('inv_table').name
+            return softmax_table_function_template.format(**params)
+        return self.template.format(**params)
+
+
+class ActivationFunctionTemplate(FunctionCallTemplate):
+    def __init__(self):
+        super().__init__((Activation, HardActivation), include_header=activ_include_list)
+        self.template = activ_function_template
+
+    def format(self, node):
+        params = self._default_function_params(node)
+        params['activation'] = node.get_attr('activation').lower()
+        params['config'] = '{}_config{}'.format(node.get_attr('activation'), node.index)
+
+        return self.template.format(**params)
+
+
+class ParametrizedActivationFunctionTemplate(FunctionCallTemplate):
+    def __init__(self):
+        super().__init__(ParametrizedActivation, include_header=activ_include_list)
+        self.template = param_activ_function_template
+
+    def format(self, node):
+        params = self._default_function_params(node)
+        params['activation'] = node._get_act_function_name()
+        params['param'] = node.get_attr('activ_param', 1.0)
+        params['config'] = '{}_config{}'.format(node.get_attr('activation'), node.index)
+
+        return self.template.format(**params)
+
+
+class PReLUFunctionTemplate(FunctionCallTemplate):
+    def __init__(self):
+        super().__init__(PReLU, include_header=activ_include_list)
+        self.template = param_activ_function_template
+
+    def format(self, node):
+        params = self._default_function_params(node)
+        params['activation'] = node.get_attr('activation').lower()
+        params['param'] = node.get_weights('param').name
+        params['config'] = '{}_config{}'.format(node.get_attr('activation'), node.index)
+
+        return self.template.format(**params)

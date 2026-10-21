@@ -1,0 +1,127 @@
+from pathlib import Path
+
+import numpy as np
+import pytest
+from tensorflow.keras.layers import LayerNormalization
+from tensorflow.keras.models import Sequential
+
+import hls4ml
+
+test_root_path = Path(__file__).parent
+
+in_shape = (10, 8)
+
+
+@pytest.fixture(scope='module')
+def data():
+    np.random.seed(0)
+    return np.random.rand(100, *in_shape)
+
+
+@pytest.fixture(scope='module')
+def model():
+    model = Sequential()
+    layer = LayerNormalization(input_shape=in_shape)
+    model.add(layer)
+    model.compile()
+
+    np.random.seed(0)
+    weights = np.random.normal(1.0, 0.1, size=(in_shape[-1],))
+    biases = np.random.normal(0.0, 0.1, size=(in_shape[-1],))
+    layer.set_weights([weights, biases])
+    return model
+
+
+@pytest.fixture(scope='module')
+def custom_epsilon_model():
+    model = Sequential()
+    layer = LayerNormalization(input_shape=in_shape, epsilon=1e-2)
+    model.add(layer)
+    model.compile()
+    return model
+
+
+@pytest.mark.parametrize('backend', ['Vivado', 'Vitis', 'Catapult'])
+def test_layernorm_parsing(test_case_id, custom_epsilon_model, backend):
+    custom_config = hls4ml.utils.config_from_keras_model(custom_epsilon_model, granularity='name', backend=backend)
+    custom_config['LayerName']['layer_normalization']['Precision']['accum'] = 'ap_fixed<10,4>'
+    custom_config['LayerName']['layer_normalization']['table_t'] = 'ap_fixed<12,5>'
+    custom_config['LayerName']['layer_normalization']['TableSize'] = 2048
+    custom_config['LayerName']['layer_normalization']['TableRangePower2'] = 1
+    output_dir = str(test_root_path / test_case_id)
+    hls_model = hls4ml.converters.convert_from_keras_model(
+        custom_epsilon_model, backend=backend, hls_config=custom_config, io_type='io_parallel', output_dir=output_dir
+    )
+    hls_model.write()
+
+    # Check that custom configuration is picked up correctly
+    fixed_t = 'ac_fixed<{},{},true>' if backend == 'Catapult' else 'ap_fixed<{},{}>'
+    hls_layer = list(hls_model.get_layers())[1]  # 0 is input, 1 is LayerNorm
+    assert hls_layer.attributes['accum_t'].precision.definition_cpp() == fixed_t.format(10, 4)
+    assert hls_layer.attributes['table_t'].precision.definition_cpp() == fixed_t.format(12, 5)
+    assert hls_layer.attributes['table_size'] == 2048
+    assert hls_layer.attributes['table_range_power2'] == 1
+    assert hls_layer.attributes['epsilon_power_of_10'] == 2
+
+
+# Vivado/Vitis/Catapult in io_parallel mode is supported
+@pytest.mark.parametrize('backend', ['Vivado', 'Vitis', 'Catapult'])
+def test_layernorm_accuracy(test_case_id, model, data, backend):
+    config = hls4ml.utils.config_from_keras_model(model, granularity='name', backend=backend)
+    output_dir = str(test_root_path / test_case_id)
+    hls_model = hls4ml.converters.convert_from_keras_model(
+        model, backend=backend, hls_config=config, io_type='io_parallel', output_dir=output_dir
+    )
+    hls_model.compile()
+
+    # Predict
+    y_keras = model.predict(data).flatten()
+    y_hls = hls_model.predict(data).flatten()
+    np.testing.assert_allclose(y_keras, y_hls, rtol=0, atol=5e-2, verbose=True)
+
+
+@pytest.mark.parametrize('backend', ['Vivado', 'Vitis', 'Catapult'])
+def test_layernorm_no_center_scale(test_case_id, data, backend):
+    """center=False / scale=False previously fed None weight data into the graph."""
+    model = Sequential()
+    model.add(LayerNormalization(input_shape=in_shape, center=False, scale=False))
+    model.compile()
+
+    config = hls4ml.utils.config_from_keras_model(
+        model, granularity='name', default_precision='ap_fixed<32,16>', backend=backend
+    )
+    output_dir = str(test_root_path / test_case_id)
+    hls_model = hls4ml.converters.convert_from_keras_model(model, hls_config=config, output_dir=output_dir, backend=backend)
+    hls_model.compile()
+
+    y_keras = model.predict(data)
+    y_hls = hls_model.predict(data).reshape(y_keras.shape)
+    np.testing.assert_allclose(y_keras, y_hls, rtol=0, atol=5e-2, verbose=True)
+
+
+@pytest.mark.parametrize('backend', ['Vivado', 'Vitis', 'Catapult'])
+def test_layernorm_table_range_power2_direction(test_case_id, custom_epsilon_model, backend):
+    """table_range_power2 must widen the addressed variance range in the upstream direction:
+    rsqrt_addr_f = ceil(log2(table_size)) + table_range_power2 (matching the pre-HGQ2 kernel's
+    own table builder, init_invert_sqr_table: max_val = 2**-table_range_power2). A flipped sign
+    would shrink the range instead of growing it."""
+    config = hls4ml.utils.config_from_keras_model(custom_epsilon_model, granularity='name', backend=backend)
+    output_dir = str(test_root_path / test_case_id)
+    hls_model = hls4ml.converters.convert_from_keras_model(
+        custom_epsilon_model, backend=backend, hls_config=config, io_type='io_parallel', output_dir=output_dir
+    )
+    hls_model.write()
+    hls_layer = list(hls_model.get_layers())[1]
+    table_size = hls_layer.attributes['table_size']
+    base_addr_f = hls_layer.attributes['rsqrt_addr_f']
+    assert base_addr_f == int(np.ceil(np.log2(table_size)))
+
+    config2 = hls4ml.utils.config_from_keras_model(custom_epsilon_model, granularity='name', backend=backend)
+    config2['LayerName']['layer_normalization']['TableRangePower2'] = 2
+    output_dir2 = str(test_root_path / (test_case_id + '_wide'))
+    hls_model2 = hls4ml.converters.convert_from_keras_model(
+        custom_epsilon_model, backend=backend, hls_config=config2, io_type='io_parallel', output_dir=output_dir2
+    )
+    hls_model2.write()
+    hls_layer2 = list(hls_model2.get_layers())[1]
+    assert hls_layer2.attributes['rsqrt_addr_f'] == base_addr_f + 2

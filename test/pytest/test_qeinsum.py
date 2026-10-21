@@ -1,0 +1,74 @@
+import shutil
+from pathlib import Path
+
+import keras
+import numpy as np
+import pytest
+
+from hls4ml.converters import convert_from_keras_model
+
+try:
+    from hgq.layers import QEinsum
+    from hgq.utils import trace_minmax
+except ImportError:
+    pytest.skip('HGQ2 is not installed', allow_module_level=True)
+
+from keras.layers import Input
+
+test_root_path = Path(__file__).parent
+
+
+@pytest.mark.parametrize('strategy', ['latency', 'resource'])
+@pytest.mark.parametrize('io_type', ['io_parallel', 'io_stream'])
+@pytest.mark.parametrize('backend', ['Vivado', 'Vitis', 'oneAPI', 'Catapult'])
+@pytest.mark.parametrize(
+    'operation',
+    [
+        # eq, inp, out
+        ('xbi,xj->xbij', (8, 16), (16,)),
+        ('xbi,xio->xbo', (7, 8), (8, 9)),
+        ('xi,xoi->xo', (16,), (20, 16)),
+        ('xabcd,xbcde->xaeb', (2, 4, 8, 16), (4, 8, 16, 3)),
+        ('xqd,xkd->xkq', (4, 8), (6, 8)),
+    ],
+    ids=['xbi_xj_xbij', 'xbi_xio_xbo', 'xi_xoi_xo', 'xabcd_xbcde_xaeb', 'xqd_xkd_xkq'],
+)
+def test_einsum_dense(test_case_id, backend, io_type, strategy, operation):
+    if backend == 'oneAPI' and (strategy != 'latency' or io_type != 'io_parallel'):
+        pytest.skip('oneAPI only covers strategy=latency, io_type=io_parallel')
+    if backend == 'Catapult' and (strategy != 'resource' or io_type != 'io_stream'):
+        pytest.skip('Catapult only covers strategy=resource, io_type=io_stream')
+    if backend == 'oneAPI' and shutil.which('icpx') is None:
+        pytest.skip('oneAPI compiler (icpx) not found')
+    if io_type == 'io_stream' and strategy == 'latency':
+        pytest.skip('io_stream Einsum is implemented for Strategy=Resource only')
+    if io_type == 'io_stream' and operation[0] == 'xabcd,xbcde->xaeb':
+        pytest.skip('io_stream Einsum needs an operand whose free axes form a contiguous block of the output')
+
+    eq, inp0_shape, inp1_shape = operation
+    inp0 = Input(inp0_shape)
+    inp1 = Input(inp1_shape)
+    out = QEinsum(eq, name='einsum')([inp0, inp1])
+    model = keras.Model(inputs=[inp0, inp1], outputs=out)
+
+    data = np.random.randn(1000, *inp0_shape).astype(np.float32), np.random.randn(1000, *inp1_shape).astype(np.float32)
+    output_dir = str(test_root_path / test_case_id)
+    reuse_factor = 2 if strategy == 'resource' else 1
+    hls_config = {
+        'Model': {
+            'Precision': 'ap_fixed<1,0>' if backend != 'oneAPI' else 'ac_fixed<2,0>',
+            'ReuseFactor': reuse_factor,
+            'Strategy': strategy,
+        },
+    }
+
+    r_keras = trace_minmax(model, data, batch_size=8192, verbose=0, return_results=True)  # type: ignore
+
+    model_hls = convert_from_keras_model(
+        model, backend=backend, output_dir=output_dir, hls_config=hls_config, io_type=io_type
+    )
+
+    model_hls.compile()
+    r_hls = model_hls.predict(data).reshape(r_keras.shape)  # type: ignore
+
+    assert np.all(r_hls.ravel() == r_keras.ravel())
