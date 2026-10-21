@@ -163,7 +163,7 @@ class SplitAttentionHeads(OptimizerPass):
             # QK^T: A=Q_h, B=K_h, contract key_dim -> [seq_q, seq_k] (softmax reduces last).
             # B beat layout: col-major feeds K_h ([seq_k, key_dim]) directly (K-inner beats,
             # gemm_k-wide); row-major transposes K_h to [key_dim, seq_k] (N-inner beats,
-            # gemm_n-wide) for the mvau IP.
+            # gemm_n-wide) for IPs that load B one contraction row at a time.
             if qk_row_major:
                 kt_h = model.make_node('Transpose', f'{qk.name}_kt_h{h}', {'perm': [1, 0]}, [k_h])
                 chain.append(kt_h)

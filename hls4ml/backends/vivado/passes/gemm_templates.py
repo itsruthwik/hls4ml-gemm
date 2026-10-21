@@ -262,7 +262,7 @@ gemm_two_operand_config_template = """struct config{index} {{
     // The generated two-operand core expects the B operand transposed.
     static const bool transpose_weights = true;
     // B beat layout: false = col-major (K-wide beats, one output column/beat, default);
-    // true = row-major (N-wide beats, one contraction row/beat) for the mvau IP.
+    // true = row-major (N-wide beats, one contraction row/beat).
     static const bool b_row_major = {b_row_major};
     static const unsigned reuse_factor = {reuse_factor};
     static const unsigned multiplier_limit = {multiplier_limit};

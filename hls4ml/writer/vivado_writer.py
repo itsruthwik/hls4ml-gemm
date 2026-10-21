@@ -59,7 +59,7 @@ class VivadoWriter(Writer):
             'has_bias': bool(node.get_attr('has_bias', False)),
             # SecondOperandRowMajor, resolved per layer. Two-operand GEMM: the B beat
             # layout the emitted call uses (row_major = N-wide beats, one contraction
-            # row/beat, mvau IP; col_major = K-wide beats, one output column/beat,
+            # row/beat; col_major = K-wide beats, one output column/beat,
             # default). Weight-stationary GEMM: how the constant operand is packed into
             # the ROM header / .dat (see weight_layout, repeated in protocol).
             'second_operand_row_major': bool(node.get_attr('second_operand_row_major', False)),

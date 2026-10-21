@@ -130,7 +130,7 @@ For two-operand GEMMs (QKᵀ, A·V), the same knob chooses how B is streamed:
 - **column-major (default)**: one K-high output column per beat, K elements wide;
 - **row-major**: one contraction row per beat, N elements wide.
 
-The knob exists because targets differ: some IPs load B more cheaply one way, e.g. mvau's runtime loader
+The knob exists because targets differ: some IPs load B more cheaply one way, e.g. a runtime loader that
 streams row-major B for every tiling without a full-B buffer. In `_lower_einsum`, row-major swaps the last two
 axes of B's canonicalizing permutation. `gemm_k`, `gemm_n` and the output shape are unchanged; only B's beat
 layout flips. The templates pass `b_row_major` to the IP, and `ValidateGemm` checks the beat width matches.

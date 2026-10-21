@@ -82,8 +82,8 @@ void gemm_stream_const_weights(hls::stream<data_T> &data_stream, hls::stream<res
 // constexpr, and the two layouts carry different static_asserts, so use a
 // bool-specialized helper):
 //   false (default) : col-major -- gemm_n beats, each K-wide (b[n][k] = B[k][n]).
-//   true            : row-major -- gemm_k beats, each N-wide (b[k][n] = B[k][n]); this is
-//                     the layout the mvau IP consumes (one contraction row per beat).
+//   true            : row-major -- gemm_k beats, each N-wide (b[k][n] = B[k][n]); one
+//                     contraction row per beat, for IPs that load B row by row.
 // ---------------------------------------------------------------------------
 template <bool B_ROW_MAJOR> struct gemm_stream_two_op;
 

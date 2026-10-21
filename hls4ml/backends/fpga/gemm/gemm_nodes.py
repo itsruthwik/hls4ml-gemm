@@ -220,8 +220,8 @@ def _resolve_gemm_config(model, source_node):
         'sparse': bool(_safe(lambda: cfg.get_compression(source_node), False)),
         # Two-operand only: stream the B operand row-major (N-wide beats, one contraction
         # row per beat) instead of the default col-major (K-wide beats, one output column
-        # per beat). Required to route a two-operand GEMM to the mvau IP (its runtime load
-        # streams for every tiling with no full-B buffer). Default False.
+        # per beat). Required by IPs whose runtime B load
+        # streams one contraction row per beat for every tiling with no full-B buffer). Default False.
         'second_operand_row_major': bool(
             _safe(lambda: _resolve_config_key(cfg, source_node, 'SecondOperandRowMajor', False), False)
         ),
@@ -556,8 +556,8 @@ class LowerEinsumToGemm(OptimizerPass):
             **_resolve_gemm_config(model, node),
         }
 
-        # SecondOperandRowMajor: canonical B is [I, L1, C] (C=K last -> K-wide beats). For the
-        # mvau IP we want [I, C, L1] (L1=N last -> N-wide beats, one contraction row per beat),
+        # SecondOperandRowMajor: canonical B is [I, L1, C] (C=K last -> K-wide beats). A row-major
+        # consumer wants [I, C, L1] (L1=N last -> N-wide beats, one contraction row per beat),
         # so swap the last two axes of B's canonicalizing perm. The Gemm's gemm_k/gemm_n and
         # its [I, L0, L1] output are unchanged; only B's stream beat layout flips. The
         # config/template/csim read B row-major off CONFIG_T::b_row_major (below).

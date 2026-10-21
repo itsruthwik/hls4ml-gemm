@@ -62,8 +62,8 @@ def test_vivado_hgq2_attention_multihead_gemm_ip(backend, io_type, tmp_path):
 @pytest.mark.parametrize('backend', ['Vivado', 'Vitis'])
 def test_vivado_hgq2_attention_second_operand_row_major(backend, tmp_path):
     """SecondOperandRowMajor=True streams the two-operand B operand row-major (N-wide beats,
-    one contraction row per beat) instead of the default col-major (K-wide beats). Required to
-    route QK^T / A.V to the mvau GEMM IP. Must stay bit-exact and mark the two-operand configs
+    one contraction row per beat) instead of the default col-major (K-wide beats). Needed by GEMM IPs
+    that load B one contraction row per beat. Must stay bit-exact and mark the two-operand configs
     b_row_major=true (io_stream)."""
     keras.utils.set_random_seed(7)
     with QuantizerConfigScope(f0=3, i0=2):
