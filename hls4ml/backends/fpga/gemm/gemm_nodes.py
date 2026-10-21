@@ -162,6 +162,40 @@ def _mirror_precision_to_gemm_node(model, source_layer_name, dest_node_name):
     cfg.parse_name_config(dest_node_name, synthetic_cfg)
 
 
+def _explicit_accum_precision(cfg, source_node):
+    """The config's accumulator for *source_node* from an ``accum`` key only (LayerName,
+    then LayerType, then Model), ignoring ``default`` fallbacks and ``auto``."""
+    name = source_node.name.lower()
+    candidates = [cfg.layer_name_precision.get(name + '_accum'),
+                  cfg.layer_type_precision.get(source_node.class_name.lower() + '_accum'),
+                  cfg.model_precision.get('accum')]
+    for precision in candidates:
+        if not _is_auto_precision(precision):
+            return precision
+    return None
+
+
+def _carry_accum_precision(model, source_node, gemm_node):
+    """Keep the source layer's resolved accumulator on the Gemm that replaces it.
+
+    The bit-exact and precision-inference passes run in the convert flow, before this
+    lowering, and size the Dense / Conv / Einsum accumulator from the quantized operands.
+    A freshly made Gemm resolves its own ``accum`` from the config instead and lands on
+    the backend default, which the GEMM kernels honour and which overflows on a model
+    whose accumulator was sized wider. Copy the source's type so the Gemm accumulates
+    exactly as the layer it stands in for would have. An accumulator the config names
+    explicitly (an ``accum`` key at any scope, not ``auto``) stays authoritative, as
+    ``_mirror_precision_to_gemm_node`` has already applied it to the Gemm; a bare
+    ``default`` precision does not count, since the source layer's own sizing passes
+    override it too.
+    """
+    if _explicit_accum_precision(model.config, source_node) is not None:
+        return
+    src = source_node.types.get('accum_t') if hasattr(source_node, 'types') else None
+    if src is not None and 'accum_t' in gemm_node.types:
+        gemm_node.types['accum_t'].precision = src.precision
+
+
 # ---------------------------------------------------------------------------
 # GEMM config resolution
 # ---------------------------------------------------------------------------
@@ -304,6 +338,7 @@ class SplitConvGemm(OptimizerPass):
             gemm_node = model.make_node(
                 Gemm, gemm_name, gemm_attributes, node.inputs.copy(), node.outputs.copy()
             )
+            _carry_accum_precision(model, node, gemm_node)
         else:
             # Resolve/validate the im2col tile-row knob: default = out_width (one
             # output row, the natural gapless burst), else must fit 1..n_patches.
@@ -359,6 +394,7 @@ class SplitConvGemm(OptimizerPass):
             gemm_node = model.make_node(
                 Gemm, gemm_name, gemm_attributes, im2col_node.outputs.copy(), node.outputs.copy()
             )
+            _carry_accum_precision(model, node, gemm_node)
             gemm_node.get_output_variable().type.precision = original_output_precision
             gemm_node.get_weights('weight').type.precision = original_weight_precision
 
@@ -420,6 +456,7 @@ class ReplaceDenseGemm(OptimizerPass):
         original_output_precision = node.get_output_variable().type.precision
 
         gemm_node = model.make_node(Gemm, gemm_name, gemm_attributes, node.inputs.copy(), node.outputs.copy())
+        _carry_accum_precision(model, node, gemm_node)
         gemm_node.get_output_variable().type.precision = original_output_precision
 
         model.replace_node(node, gemm_node)
@@ -517,6 +554,7 @@ class LowerEinsumToGemm(OptimizerPass):
         original_weight_precision = node.get_weights('weight').type.precision
 
         gemm_node = model.make_node(Gemm, gemm_name, gemm_attributes, node.inputs.copy(), node.outputs.copy())
+        _carry_accum_precision(model, node, gemm_node)
         gemm_node.get_output_variable().type.precision = original_output_precision
         gemm_node.get_weights('weight').type.precision = original_weight_precision
 
@@ -566,6 +604,7 @@ class LowerEinsumToGemm(OptimizerPass):
 
         gemm_name = f'gemm_{node.name}'
         gemm_node = model.make_node(Gemm, gemm_name, gemm_attributes, node.inputs.copy(), node.outputs.copy())
+        _carry_accum_precision(model, node, gemm_node)
         # The Gemm's output is the CANONICAL [I, L0, L1]; the out-transpose (below)
         # restores the einsum's declared output shape/precision.
         gemm_node.get_output_variable().type.precision = original_output_precision
