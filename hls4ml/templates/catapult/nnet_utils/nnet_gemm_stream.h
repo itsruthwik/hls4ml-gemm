@@ -18,6 +18,7 @@ struct gemm_config {
     static const unsigned gemm_m    = 1;
     static const unsigned gemm_k    = 10;
     static const unsigned gemm_n    = 10;
+    static const bool     b_row_major = false;  // two-operand B beat layout (default col-major)
 
     typedef float weight_t;
     typedef float bias_t;
@@ -81,8 +82,11 @@ void gemm_stream_const_weights(ac_channel<data_T> &data_stream, ac_channel<res_T
 // gemm_stream — io_stream, TWO activation operands (attention QK^T / A.V).
 // NON-buffered: A and B both stream in; the wrapper does not drain B. The
 // mandatory operand residency (B is reused across A's M rows) lives inside the IP
-// — modelled here by reading the B columns into local storage, which is the IP's
+// — modelled here by reading the B beats into local storage, which is the IP's
 // business, not a hls4ml-side buffer stage. No separate concurrent feed process.
+// B's beat layout follows CONFIG_T::b_row_major (SecondOperandRowMajor): col-major
+// is gemm_n beats of one K-high output column each (b[n][k] == B[k][n]); row-major
+// is gemm_k beats of one N-wide contraction row each (b[k][n] == B[k][n]).
 // Two-operand GEMM never has a real bias -- there is only ever this one
 // signature, no bias argument at all.
 // ---------------------------------------------------------------------------
@@ -90,12 +94,14 @@ template <class data0_T, class data1_T, class res_T, typename CONFIG_T>
 void gemm_stream(ac_channel<data0_T> &a_stream, ac_channel<data1_T> &b_stream,
                  ac_channel<res_T> &res_stream) {
     static_assert(data0_T::size == CONFIG_T::gemm_k, "A row width must equal gemm_k.");
-    static_assert(data1_T::size == CONFIG_T::gemm_k, "B column height must equal gemm_k.");
+    static_assert(data1_T::size == (CONFIG_T::b_row_major ? CONFIG_T::gemm_n : CONFIG_T::gemm_k),
+                  "B beat width must equal gemm_n (row-major B) or gemm_k (col-major B).");
     static_assert(res_T::size == CONFIG_T::gemm_n, "C row width must equal gemm_n.");
 
-    data1_T b_cols[CONFIG_T::gemm_n];
-    for (unsigned int n = 0; n < CONFIG_T::gemm_n; n++) {
-        b_cols[n] = b_stream.read();
+    const unsigned int n_b_beats = CONFIG_T::b_row_major ? CONFIG_T::gemm_k : CONFIG_T::gemm_n;
+    data1_T b_beats[n_b_beats];
+    for (unsigned int i = 0; i < n_b_beats; i++) {
+        b_beats[i] = b_stream.read();
     }
     for (unsigned int m = 0; m < CONFIG_T::gemm_m; m++) {
         data0_T a_row = a_stream.read();
@@ -104,7 +110,7 @@ void gemm_stream(ac_channel<data0_T> &a_stream, ac_channel<data1_T> &b_stream,
             typename CONFIG_T::accum_t accum = 0;
             for (unsigned int k = 0; k < CONFIG_T::gemm_k; k++) {
                 accum += CONFIG_T::template product<typename data0_T::value_type, typename data1_T::value_type>::product(
-                    a_row[k], b_cols[n][k]);
+                    a_row[k], CONFIG_T::b_row_major ? b_beats[k][n] : b_beats[n][k]);
             }
             c_row[n] = cast<typename data0_T::value_type, typename res_T::value_type, CONFIG_T>(accum);
         }

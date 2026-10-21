@@ -139,6 +139,9 @@ gemm_two_operand_config_template = """struct config{index} {{
     // and asserts CONFIG_T::transpose_weights. This bare struct does not inherit
     // nnet::gemm_config, so declare it explicitly (true for the QK^T / A.V cores).
     static const bool transpose_weights = true;
+    // B beat layout: false = col-major (K-wide beats, one output column/beat, default);
+    // true = row-major (N-wide beats, one contraction row/beat).
+    static const bool b_row_major = {b_row_major};
     // Microarchitecture knobs consumed by the generic (behavioral-HLS) GEMM core
     // (same as the Vivado writer's gemm_two_operand_config_template).
     static const unsigned reuse_factor = {reuse_factor};
@@ -295,6 +298,7 @@ class GemmConfigTemplate(GemmIPConfigTemplateBase):
             'gemm_k': gk,
             'gemm_n': gn,
             'n_inplace': node.get_attr('n_inplace', 1),
+            'b_row_major': 'true' if node.get_attr('second_operand_row_major', False) else 'false',
             'reuse_factor': rf,
             'multiplier_limit': -(-(gk * gn) // rf),
             'input1_t': inp1.type.name,

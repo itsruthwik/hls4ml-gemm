@@ -410,3 +410,58 @@ assert np.std(keras_prediction) > 1e-3, 'degenerate model output; the comparison
     two_operand = [e for e in gemm_entries if not e['weights_in_core']]
     assert len(const_weights) == 4   # Q/K/V/O projections
     assert len(two_operand) == 4  # 2 heads x (QK^T + A.V)
+
+
+def test_catapult_hgq2_attention_io_stream_second_operand_row_major(tmp_path):
+    """SecondOperandRowMajor=True streams the two-operand B operand row-major (N-wide beats,
+    one contraction row per beat) instead of the default col-major (K-wide beats). The
+    two-operand configs must carry b_row_major=true and csim must stay within tolerance
+    of Keras, as the col-major io_stream GEMM test above does."""
+    output_dir = tmp_path / 'catapult_hgq2_mha_io_stream_row_major_prj'
+    env = _catapult_csim_env()
+
+    script = f'''
+import numpy as np
+import keras
+from hgq.config import QuantizerConfigScope
+from hgq.layers import QMultiHeadAttention
+from hls4ml.converters import convert_from_keras_model
+
+keras.utils.set_random_seed(2024)
+with QuantizerConfigScope(f0=3, i0=2):
+    q = keras.layers.Input((4, 8), name='q')
+    v = keras.layers.Input((4, 8), name='v')
+    k = keras.layers.Input((4, 8), name='k')
+    out = QMultiHeadAttention(1, 4, name='hgq_mha', fuse='none')(q, v, k)
+    model = keras.Model([q, v, k], out)
+
+hls_model = convert_from_keras_model(
+    model,
+    backend='Catapult',
+    output_dir={str(output_dir)!r},
+    io_type='io_stream',
+    hls_config={{
+        'Model': {{'Precision': 'ac_fixed<16,6,true>', 'ReuseFactor': 1, 'Strategy': 'GEMM',
+                   'SecondOperandRowMajor': True}},
+    }},
+)
+hls_model.compile()
+
+rng = np.random.default_rng(6789)
+data = [rng.normal(0, 0.25, size=(2, 4, 8)).astype(np.float32) for _ in range(3)]
+keras_prediction = model.predict(data, verbose=0)
+hls_prediction = hls_model.predict(data).reshape(keras_prediction.shape)
+assert np.std(keras_prediction) > 1e-3, 'degenerate model output; the comparison would be vacuous'
+np.testing.assert_allclose(hls_prediction, keras_prediction, atol=0.35, rtol=0.0)
+'''
+
+    result = subprocess.run([sys.executable, '-c', script], env=env, text=True, capture_output=True, check=False)
+    _assert_build_ok(result)
+
+    # One head: QK^T and A.V are the two two-operand configs, both row-major; the
+    # const_weights projection configs have no b_row_major field.
+    parameters = (output_dir / 'firmware/parameters.h').read_text()
+    assert parameters.count('b_row_major = true') == 2
+    assert 'b_row_major = false' not in parameters
+    top = (output_dir / 'firmware/myproject.cpp').read_text()
+    assert 'nnet::gemm_stream<' in top

@@ -342,7 +342,7 @@ Summary:
 
 Result: MHA streams end to end as ordinary row-streaming GEMMs with no frame-sized reorder buffers on the
 critical path. Heads run in parallel, and the GEMM node / IP contract stays uniform, so every target
-(tensor_slice, cmvu, generic) handles attention with no attention-specific code.
+(tensor_slice, generic) handles attention with no attention-specific code.
 
 ---
 
@@ -385,7 +385,7 @@ Mostly an artifact. A GEMM IP can serve a batched GEMM; the current code doesn't
 **Artifacts of the current implementation:**
 - **gemm-ip-gen has no batch knob.** A target could take `(M, K, N, batch)` and run the batch as `batch`
   frames back to back on one IP. For two-operand GEMMs this is the existing runtime-B path: B is already
-  reloaded every frame (CMVU double-buffered loaders, tensor_slice per-frame B).
+  reloaded every frame (tensor_slice per-frame B, the generic kernel's per-frame B buffer).
 - **The io_stream per-head loop** is a template shortcut. The clean form is one call with `n_inplace` in the
   config and the IP counting frames itself; Vitis's objection is to the loop, not to batching.
 - **Batched constant weights** (EinsumDense `n_inplace > 1`) are blocked only by the writer's one-block-per-file
